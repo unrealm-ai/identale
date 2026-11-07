@@ -404,7 +404,6 @@ async function startLocalOwned(args, env, initialize, checkSignal, onControl) {
   if (!installed && !options.install) throw new Error('Dependencies are missing. Run npm ci --ignore-scripts or omit --no-install.');
   const prepare = [];
   if (!installed) prepare.push({ name: 'locked dependency install', file: 'npm', args: ['ci', '--ignore-scripts', '--no-audit', '--no-fund'], env: environments.build });
-  prepare.push({ name: 'Argon2 native preflight', file: process.execPath, args: ['scripts/shared/local-native-preflight.mjs', ...(!options.install ? ['--no-repair'] : [])], env: environments.build });
   if (options.build) prepare.push({ name: 'build', file: 'npm', args: ['run', 'build'], env: environments.build });
   else {
     await startupStep('Checking existing build outputs (--no-build)', async () => {

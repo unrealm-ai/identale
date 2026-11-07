@@ -13,7 +13,6 @@
     "@fastify/rate-limit": "11.2.1",
     "@larksuiteoapi/node-sdk": "1.76.0",
     "@wecom/aibot-node-sdk": "1.0.7",
-    "argon2": "0.45.1",
     "cron-parser": "5.10.2",
     "dingtalk-stream": "2.1.5",
     "fastify": "5.12.7",

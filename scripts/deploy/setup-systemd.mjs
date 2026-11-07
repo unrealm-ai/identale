@@ -363,12 +363,11 @@ async function setupOwned(args) {
       if (options.skipInstall) throw new Error('Locked dependencies are missing; omit --skip-install.');
       run('npm', ['ci', '--ignore-scripts', '--no-audit', '--no-fund']);
     }
-    run(process.execPath, ['scripts/shared/local-native-preflight.mjs', ...(options.skipInstall ? ['--no-repair'] : [])]);
     if (!options.skipBuild) run('npm', ['run', 'build']);
     for (const entry of [...services.map(service => service.entry), 'apps/web/dist/index.html']) await fs.access(path.join(repositoryRoot, entry));
     await validateWebDistribution(path.join(repositoryRoot, 'apps/web/dist'), repositoryRoot);
     await applyCheckoutAcls(await planCheckoutAcls(identity, aclInput), aclChanges, aclJournal);
-    // Exercise real dependency/native imports after grants, before stopping installed services.
+    // Exercise the built password adapter after grants, before stopping installed services.
     assertServiceAccess(identity, { ...access, storage: { directories: [], trees: [], files: [] } });
     const certificate = await prepareCertificate(options, host, stage);
     const nginx = renderNginx(await template('nginx.conf.template'), host, port);

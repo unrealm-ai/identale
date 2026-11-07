@@ -125,7 +125,7 @@ test('managed traversal container is not assigned to the service and its old mod
   assert.equal((await fs.stat(base)).mode & 0o777, 0o700);
 });
 
-test('access probe checks real non-root storage and native dependencies and rejects unreadable resources', async t => {
+test('access probe exercises the built password adapter and real non-root access', async t => {
   if (process.getuid() === 0) { t.skip('this probe test exercises the current non-root developer account'); return; }
   const { base, storage, identity } = await fixture(t);
   const entries = await planServicePermissions(storage, { containers: [] });

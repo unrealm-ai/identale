@@ -160,8 +160,11 @@ export async function probeServiceAccess(input) {
   for (const file of [...input.entries, ...input.extraFiles]) await fs.access(file, constants.R_OK);
   for (const file of [...input.storage.directories, ...input.storage.trees]) await fs.access(file, constants.R_OK | constants.W_OK | constants.X_OK);
   for (const file of input.storage.files) if (await optionalStat(file)) await fs.access(file, constants.R_OK | constants.W_OK);
-  for (const name of ['fastify', '@earendil-works/pi-coding-agent', '@dentity/domain', 'argon2']) await fs.access(fileURLToPath(import.meta.resolve(name)), constants.R_OK);
-  await import('argon2');
+  for (const name of ['fastify', '@earendil-works/pi-coding-agent', '@dentity/domain']) await fs.access(fileURLToPath(import.meta.resolve(name)), constants.R_OK);
+  const { passwordHasher } = await import('../../apps/control-plane/dist/adapters/security/argon2-password-hasher.js');
+  const probePassword = 'service-account-password-hash-probe';
+  const probeHash = await passwordHasher.hash(probePassword);
+  if (!await passwordHasher.verify(probeHash, probePassword)) throw new Error('Argon2 password adapter probe failed.');
   if (input.registryPath) {
     const registry = JSON.parse(await fs.readFile(input.registryPath, 'utf8'));
     const { validateRegistry } = await import('../../apps/runtime-host-pi/dist/resources.js');

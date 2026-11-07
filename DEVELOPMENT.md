@@ -6,7 +6,7 @@
 
 ## 环境与安装
 
-版本以 `package.json`、`package-lock.json` 和 `.nvmrc` 为准：Node.js `>=24.19.0 <25`，npm `11.9.0`，TypeScript `6.0.3`。后端使用 Node 内置 SQLite；密码哈希依赖 Argon2 原生模块。
+版本以 `package.json`、`package-lock.json` 和 `.nvmrc` 为准。Node.js 版本为 `>=24.19.0 <25`，npm 为 `11.9.0`，TypeScript 为 `6.0.3`。后端使用 Node 内置 SQLite 和 Argon2id。
 
 推荐从仓库根目录运行：
 
@@ -14,7 +14,7 @@
 bash scripts/start.sh
 ```
 
-统一入口按需准备固定版本 Node、依赖和构建，然后初始化并启动本地实例；不要用 root 启动本地开发。它不替换系统 Node。需要管理系统依赖或网络下载失败时，查看脚本实际输出，不跳过原生模块检查。
+统一入口按需准备固定版本 Node、依赖和构建，然后初始化并启动本地实例。本地开发使用普通用户启动。遇到系统依赖或网络下载问题时，查看对应阶段的脚本输出。
 
 本地启动默认输出 `[Identale]` 阶段提示，包含开始、完成 / 就绪、失败或中断及耗时。兼容 Node 和依赖复用、`--no-build` 复用产物会明确标记。Node 下载在交互终端显示 curl 进度条，重定向时使用普通文本；下载、依赖安装、编译和服务就绪等待每 10 秒输出一次 `still running` 及已耗时。校验、解压和配置检查也有阶段提示。完成、失败或中断后停止对应的定时提示。
 
@@ -50,7 +50,7 @@ npm run local:start -- --no-install --no-build
 | `scripts/local/` | 本地启动、初始化、环境加载、进程管理、恢复和诊断；`local-init.mjs` 为可选手动入口 |
 | `scripts/deploy/` | Linux systemd 安装、服务身份、部署配置、证书和前端发布实现 |
 | `scripts/deploy/templates/` | systemd、Nginx 与服务环境变量模板 |
-| `scripts/shared/` | 两种模式共用的 Node 准备、凭据、路径和原生依赖检查 |
+| `scripts/shared/` | 两种模式共用的 Node 准备、凭据和路径 |
 | `scripts/maintenance/` | 显式离线迁移 / 归档工具，不参与正常安装启动 |
 | `scripts/test/` | 启动、停止、重启及部署配置测试，不参与正常启动 |
 

@@ -196,7 +196,6 @@ test('--no-install and --no-build report dependency reuse and validate outputs b
   const { root, env } = await fixture(t);
   await fs.cp(path.join(repositoryRoot, 'scripts'), path.join(root, 'scripts'), { recursive: true, filter: source => !path.relative(path.join(repositoryRoot, 'scripts'), source).split(path.sep).includes('test') });
   // Reuse the sparse lock fixture used by the dependency-check unit test.
-  // Native provenance checks will reject it before any business service runs.
   await fs.mkdir(path.join(root, 'node_modules'));
   await fs.writeFile(path.join(root, 'node_modules/.package-lock.json'), '{}');
   await fs.writeFile(path.join(root, 'package-lock.json'), JSON.stringify({ packages: {} }));
@@ -215,10 +214,11 @@ test('--no-install and --no-build report dependency reuse and validate outputs b
   for (const server of listeners) await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
   for (const [index, key] of ['DENTITY_CONTROL_PLANE_PORT', 'DENTITY_RUNTIME_SERVICE_PORT', 'DENTITY_RUNTIME_HOST_PI_PORT', 'DENTITY_WEB_PORT'].entries()) env[key] = String(listeners[index].address().port);
   env.DENTITY_APP_ORIGIN = `http://127.0.0.1:${env.DENTITY_WEB_PORT}`;
-  await Promise.all(listeners.map(server => new Promise(resolve => server.close(resolve))));
+  // Keep the platform port occupied so the sparse fixture never runs a service.
+  await Promise.all(listeners.slice(1).map(server => new Promise(resolve => server.close(resolve))));
   result = run();
   assert.equal(result.status, 1, result.stderr);
   assert.match(result.stdout, /Build: skipped \(--no-build\); reusing existing outputs/, result.stderr);
-  assert.match(result.stderr, /Argon2 package identity could not be verified/);
+  assert.match(result.stderr, /for platform is unavailable \(EADDRINUSE\)/);
   assert.doesNotMatch(result.stdout, /Running locked dependency install|Running build|Starting platform|Local services listening/);
 });

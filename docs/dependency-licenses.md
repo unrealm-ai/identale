@@ -42,7 +42,6 @@
 | @earendil-works/pi-telemetry | 1.4.0 | MIT | production tree | lockfile |
 | @earendil-works/pi-tui | 1.4.0 | MIT | production tree | lockfile |
 | @emotion/hash | 0.8.0 | MIT | production tree | lockfile |
-| @epic-web/invariant | 1.0.0 | MIT | production tree | lockfile |
 | @esbuild/aix-ppc64 | 0.28.2 | MIT | development | lockfile |
 | @esbuild/android-arm | 0.28.2 | MIT | development | lockfile |
 | @esbuild/android-arm64 | 0.28.2 | MIT | development | lockfile |
@@ -84,7 +83,6 @@
 | @larksuiteoapi/node-sdk | 1.76.0 | MIT | production tree | lockfile |
 | @lukeed/ms | 2.0.2 | MIT | production tree | lockfile |
 | @napi-rs/lzma-linux-x64-gnu | 1.5.1 | MIT | development | lockfile |
-| @phc/format | 1.0.0 | MIT | production tree | lockfile |
 | @pinojs/redact | 0.4.0 | MIT | production tree | lockfile |
 | @protobufjs/aspromise | 1.1.2 | BSD-3-Clause | production tree | lockfile |
 | @protobufjs/base64 | 1.1.2 | BSD-3-Clause | production tree | lockfile |
@@ -160,7 +158,6 @@
 | ajv | 8.20.0 | MIT | production tree | lockfile |
 | ajv-formats | 3.0.1 | MIT | production tree | lockfile |
 | alien-signals | 3.2.1 | MIT | development | lockfile |
-| argon2 | 0.45.1 | MIT | production tree | lockfile |
 | async-validator | 4.2.5 | MIT | production tree | lockfile |
 | asynckit | 0.4.0 | MIT | production tree | lockfile |
 | atomic-sleep | 1.0.0 | MIT | production tree | lockfile |
@@ -178,7 +175,6 @@
 | combined-stream | 1.0.8 | MIT | production tree | lockfile |
 | cookie | 2.0.1 | MIT | production tree | lockfile |
 | cron-parser | 5.10.2 | MIT | production tree | lockfile |
-| cross-env | 10.1.0 | MIT | production tree | lockfile |
 | cross-spawn | 7.0.6 | MIT | production tree | lockfile |
 | css-render | 0.15.14 | MIT | production tree | lockfile |
 | csstype | 3.0.11 | MIT | production tree | lockfile |
@@ -273,10 +269,8 @@
 | muggle-string | 0.4.1 | MIT | development | lockfile |
 | naive-ui | 2.45.3 | MIT | production tree | lockfile |
 | nanoid | 3.3.20 | MIT | production tree | lockfile |
-| node-addon-api | 8.9.2 | MIT | production tree | lockfile |
 | node-domexception | 1.0.0 | MIT | production tree | lockfile |
 | node-fetch | 3.3.2 | MIT | production tree | lockfile |
-| node-gyp-build | 4.8.4 | MIT | production tree | lockfile |
 | object-inspect | 1.13.4 | MIT | production tree | lockfile |
 | on-exit-leak-free | 2.1.2 | MIT | production tree | lockfile |
 | openai | 7.19.0 | Apache-2.0 | production tree | lockfile |
