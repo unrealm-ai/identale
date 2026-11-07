@@ -15,6 +15,7 @@ import { lifecycleDiagnostics } from './local-lifecycle-log.mjs';
 import { loadLocalEnvironment } from './local-environment.mjs';
 import { localDatabasePaths, localResourcePaths, expandLocalPath } from '../shared/local-paths.mjs';
 import { claimCheckoutMode } from '../shared/checkout-mode.mjs';
+import { startupStage, startupStep } from '../shared/startup-progress.mjs';
 
 export function parseArgs(args) {
   if (args.some(arg => !['--no-install', '--no-build', '--mock'].includes(arg))) throw new Error('Usage: npm run local:start -- [--no-install] [--no-build] [--mock]');
@@ -131,16 +132,24 @@ async function listening(port) {
 }
 
 // Command injection exists only as a JS API for isolated tests, never CLI flags.
-export async function supervise({ commands, prepare = [], cwd, signalSource = process, log = console.log, timeoutMs = 30000, killAfterMs = 12000, onControl, registerGroup, lifecycleInstanceId = randomUUID() }) {
+export async function supervise({ commands, prepare = [], cwd, signalSource = process, log = console.log, timeoutMs = 30000, killAfterMs = 12000, onControl, registerGroup, lifecycleInstanceId = randomUUID(), progressIntervalMs = 10000 }) {
   if (!['darwin', 'linux'].includes(process.platform)) throw new Error('Local process groups require macOS or Linux.');
   const diagnostics = lifecycleDiagnostics({ root: cwd, instanceId: lifecycleInstanceId, role: 'launcher' });
   diagnostics.record('launcher_start');
   const children = new Set();
   let stopping = false, started = false, resultCode = 0, cleanupConfirmed = true, finish, stopPromise, processState = 'starting';
+  let finishProgress, progressService;
+  const endProgress = status => { finishProgress?.(status); finishProgress = undefined; progressService = undefined; };
+  const beginProgress = (label, service) => {
+    endProgress('interrupted');
+    finishProgress = startupStage(label, { log, intervalMs: progressIntervalMs });
+    progressService = service;
+  };
   const live = child => !child.spawnFailed && child.exitCode === null && child.signalCode === null;
   let reservations = [];
   // Signals are installed before awaiting reservation. Stop waits for that
   // operation, so a signal cannot strand a newly reserved port.
+  beginProgress('Checking and reserving local service ports');
   const reserving = reservePorts(commands.map(command => command.port), commands.map(command => command.name)).then(value => { reservations = value; });
   const completion = new Promise(resolve => { finish = resolve; });
   const cleanup = async list => {
@@ -180,6 +189,7 @@ export async function supervise({ commands, prepare = [], cwd, signalSource = pr
   const stop = (code = 0, reason = 'control_request') => {
     resultCode = Math.max(resultCode, code);
     if (stopPromise) return stopPromise;
+    endProgress('interrupted');
     diagnostics.record('launcher_stop_requested', { reason, exitCode: code });
     stopping = true; processState = 'stopping';
     stopPromise = (async () => {
@@ -208,8 +218,8 @@ export async function supervise({ commands, prepare = [], cwd, signalSource = pr
   const handlers = new Map(Object.entries({ SIGINT: 130, SIGTERM: 143, SIGHUP: 129 }).map(([signal, code]) => [signal, () => { diagnostics.record('signal_received', { signal }); void stop(code, `signal_${signal}`); }]));
   for (const [signal, handler] of handlers) signalSource.on(signal, handler);
   if (signalSource === process) observeLauncherProcess(diagnostics, { instanceId: lifecycleInstanceId, state: () => ({ processState, childCount: [...children].filter(live).length }) });
-  try { await reserving; }
-  catch (error) { await stop(1, 'port_reservation_failed'); throw error; }
+  try { await reserving; endProgress(); }
+  catch (error) { endProgress('failed'); await stop(1, 'port_reservation_failed'); throw error; }
   onControl?.({ stop, completion, get cleanupConfirmed() { return cleanupConfirmed; } });
   function launch(command, preparatory = false) {
     const marker = randomUUID();
@@ -242,10 +252,11 @@ export async function supervise({ commands, prepare = [], cwd, signalSource = pr
         } finally { resolve(); }
       });
     });
-    child.once('error', error => { child.spawnFailed = !child.pid; diagnostics.record('command_error', { childPid: child.pid, service: command.name, errorCode: error.code }); log(`Unable to launch ${command.name}.`); void stop(1, 'command_error'); });
+    child.once('error', error => { child.spawnFailed = !child.pid; if (progressService === command.name) endProgress('failed'); diagnostics.record('command_error', { childPid: child.pid, service: command.name, errorCode: error.code }); log(`Unable to launch ${command.name}.`); void stop(1, 'command_error'); });
     child.once('exit', (code, signal) => {
       diagnostics.record('command_exit', { childPid: child.pid, service: command.name, exitCode: code, signal });
       if (!stopping && (!preparatory || code !== 0)) {
+        if (progressService === command.name) endProgress(`failed (code=${code ?? 'none'}, signal=${signal ?? 'none'})`);
         log(`${command.name} exited (code=${code ?? 'none'}, signal=${signal ?? 'none'}); stopping local services.`);
         void stop(1, 'command_exit');
       }
@@ -256,16 +267,17 @@ export async function supervise({ commands, prepare = [], cwd, signalSource = pr
   try {
     for (const command of prepare) {
       if (stopping) break;
-      log(`Running ${command.name}…`);
+      beginProgress(`Running ${command.name}`, command.name);
       const child = launch(command, true);
       await new Promise(resolve => { child.once('exit', resolve); child.once('error', resolve); });
       if (!stopping && child.exitCode === 0) {
-        try { await cleanup([child]); children.delete(child); }
-        catch { await stop(1, 'preparation_cleanup_failed'); break; }
+        try { await cleanup([child]); children.delete(child); endProgress(); }
+        catch { endProgress('failed during cleanup'); await stop(1, 'preparation_cleanup_failed'); break; }
       } else { await stop(1, 'preparation_failed'); break; }
     }
     for (const [index, command] of commands.entries()) {
       if (stopping) break;
+      beginProgress(`Starting ${command.name} on 127.0.0.1:${command.port}; waiting for readiness`, command.name);
       await closeReservation(reservations[index]);
       if (stopping) break;
       const child = launch(command), deadline = Date.now() + timeoutMs;
@@ -274,9 +286,10 @@ export async function supervise({ commands, prepare = [], cwd, signalSource = pr
         await delay(60);
       }
       if (stopping || !live(child)) break;
+      endProgress('ready');
     }
     if (!stopping) { started = true; processState = 'running'; diagnostics.record('launcher_ready'); log(`Local services listening. Open http://127.0.0.1:${commands.find(command => command.name === 'Web')?.port ?? 15173}. Ctrl+C stops this launcher’s instance. Configure a model API manually before chatting.`); }
-  } catch (error) { diagnostics.record('startup_failed', { errorCode: error.code }); log(error.message); await stop(1, 'startup_failed'); }
+  } catch (error) { endProgress('failed'); diagnostics.record('startup_failed', { errorCode: error.code }); log(error.message); await stop(1, 'startup_failed'); }
   return { completion, stop, get started() { return started; }, get cleanupConfirmed() { return cleanupConfirmed; } };
 }
 async function commandReady(command, child) {
@@ -291,7 +304,7 @@ async function commandReady(command, child) {
   } catch { return false; }
 }
 export async function superviseLocal(options) {
-  const instance = await claimLocalInstance({ root: options.cwd, ports: options.commands.map(command => command.port), signalSource: options.signalSource, log: options.log, stopTimeoutMs: (options.killAfterMs ?? 12000) + 6000 });
+  const instance = await startupStep('Checking previous local instance and recovering owned processes', () => claimLocalInstance({ root: options.cwd, ports: options.commands.map(command => command.port), signalSource: options.signalSource, log: options.log, stopTimeoutMs: (options.killAfterMs ?? 12000) + 6000 }), { log: options.log, intervalMs: options.progressIntervalMs });
   let running;
   try {
     running = await supervise({ ...options, lifecycleInstanceId: instance.data.instance, registerGroup: (pid, marker) => instance.trackGroup(pid, marker), onControl(control) {
@@ -361,7 +374,7 @@ export async function startLocal(args = process.argv.slice(2), env = process.env
   for (const [signal, handler] of handlers) process.on(signal, handler);
   const checkSignal = () => { if (startupSignal) throw new Error('Local startup interrupted.'); };
   try {
-    lease = await claimCheckoutMode(repositoryRoot, 'local');
+    lease = await startupStep('Checking checkout startup mode', () => claimCheckoutMode(repositoryRoot, 'local'));
     checkSignal();
     return await startLocalOwned(args, env, initialize, checkSignal, control => {
       runningControl = control;
@@ -377,21 +390,28 @@ async function startLocalOwned(args, env, initialize, checkSignal, onControl) {
   const minor = Number(process.versions.node.split('.')[1]);
   if (major !== 24 || minor < 19) throw new Error('Use Node.js >=24.19.0 and <25 (npm 11.9.0 recommended).');
   const options = parseArgs(args);
-  await assertNoServerInstance(repositoryRoot);
+  await startupStep('Checking for server instances', () => assertNoServerInstance(repositoryRoot));
   checkSignal();
-  env = await loadLocalEnvironment(env);
-  let environments = await childEnvironments(env);
+  env = await startupStep('Loading local environment', () => loadLocalEnvironment(env));
+  let environments = await startupStep('Checking local configuration and credentials', () => childEnvironments(env));
   checkSignal();
-  if (initialize) { await initializeLocalInstallation(env); environments = await childEnvironments(env); }
+  if (initialize) await startupStep('Preparing private credentials', async () => { await initializeLocalInstallation(env); environments = await childEnvironments(env); });
   console.log(env.DENTITY_MODEL_MASTER_KEY ? 'Model master key source: environment override (back up that override securely, not an unused local file).' : environments.platform.DENTITY_MODEL_MASTER_KEY ? `Model master key source: private file ${secretPath(env)}` : 'Model master key: unconfigured. Model configuration requires explicit initialization; no key was generated.');
   const exists = async target => fs.access(path.join(repositoryRoot, target)).then(() => true, () => false);
-  const installed = await dependenciesInstalled();
+  const installed = await startupStep('Checking locked dependencies', () => dependenciesInstalled());
+  if (installed) console.log('[Identale] Dependencies: reusing installed locked versions; installation skipped.');
+  else console.log(`[Identale] Dependencies: missing or mismatched; ${options.install ? 'locked installation required' : 'installation disabled (--no-install)'}.`);
   if (!installed && !options.install) throw new Error('Dependencies are missing. Run npm ci --ignore-scripts or omit --no-install.');
   const prepare = [];
   if (!installed) prepare.push({ name: 'locked dependency install', file: 'npm', args: ['ci', '--ignore-scripts', '--no-audit', '--no-fund'], env: environments.build });
   prepare.push({ name: 'Argon2 native preflight', file: process.execPath, args: ['scripts/shared/local-native-preflight.mjs', ...(!options.install ? ['--no-repair'] : [])], env: environments.build });
   if (options.build) prepare.push({ name: 'build', file: 'npm', args: ['run', 'build'], env: environments.build });
-  else for (const command of localCommands(environments, options)) if (!await exists(command.args[0])) throw new Error('Build output is missing; omit --no-build.');
+  else {
+    await startupStep('Checking existing build outputs (--no-build)', async () => {
+      for (const command of localCommands(environments, options)) if (!await exists(command.args[0])) throw new Error('Build output is missing; omit --no-build.');
+    });
+    console.log('[Identale] Build: skipped (--no-build); reusing existing outputs.');
+  }
   const commands = localCommands(environments, options);
   if (options.mock) {
     console.log(`Local rule model: manually configure http://127.0.0.1:${environments.mockModel.DENTITY_MOCK_MODEL_PORT}/v1 · model mock · public test token identity-local-test-token. No platform model or employee binding is created automatically.`);

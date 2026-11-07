@@ -294,18 +294,25 @@ test(`R7 exact project entry ${relative} is cleaned but the same entry in anothe
 });
 test('R8 preparatory and each partial four-service failure clean this instance only', async t => {
   for (const failed of [-1, 0, 1, 2, 3]) {
-    const root = await fixture(t), ports = await freePorts(4), list = commands(ports);
+    const root = await fixture(t), ports = await freePorts(4), list = commands(ports), messages = [];
     const prepare = failed === -1 ? [{ name: 'failed preparation', file: process.execPath, args: ['-e', 'process.exit(7)'], env: { HOME: testHome } }] : [];
     if (failed >= 0) list[failed].args = ['-e', 'process.exit(7)'];
-    const running = await run(t, root, list, { prepare });
+    const running = await run(t, root, list, { prepare, log: message => messages.push(message) });
     assert.equal(await running.completion, 1); await released(ports); await assert.rejects(fs.access(statePath(root)));
+    const label = failed === -1 ? 'Running failed preparation' : `Starting fixture-${failed}`;
+    assert.ok(messages.some(message => message.includes(label) && message.includes('failed (code=7')), messages.join('\n'));
+    assert.ok(!messages.some(message => message.includes('Local services listening')));
   }
 });
 test('R8 startup timeout cleans its owned group and releases reservations', async t => {
   const root = await fixture(t), ports = await freePorts(2), list = commands(ports);
   list[1].args = ['-e', 'setInterval(()=>{},1000)'];
-  const running = await run(t, root, list, { timeoutMs: 150 });
+  const messages = [];
+  const running = await run(t, root, list, { timeoutMs: 150, log: message => messages.push(message), progressIntervalMs: 20 });
   assert.equal(await running.completion, 1); await released(ports);
+  assert.ok(messages.some(message => /Starting fixture-1.*: failed/.test(message)));
+  assert.ok(messages.some(message => message.includes('fixture-1 did not start in time')));
+  const count = messages.length; await pause(80); assert.equal(messages.length, count);
 });
 test('R8 a port stolen after reservation release never becomes fake readiness or a kill target', async t => {
   const root = await fixture(t), ports = await freePorts(), list = commands(ports);
@@ -320,10 +327,13 @@ test('R8 a port stolen after reservation release never becomes fake readiness or
 });
 test('R9 SIGINT/SIGTERM/SIGHUP during preparation release gate, state and owned preparation', async t => {
   for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP']) {
-    const root = await fixture(t), ports = await freePorts(), source = new EventEmitter();
-    const pending = run(t, root, commands(ports), { signalSource: source, prepare: [{ name: 'held preparation', file: process.execPath, args: ['-e', "require('node:fs').writeFileSync('held','1');setInterval(()=>{},1000)"], env: { HOME: testHome } }] });
+    const root = await fixture(t), ports = await freePorts(), source = new EventEmitter(), messages = [];
+    const pending = run(t, root, commands(ports), { signalSource: source, log: message => messages.push(message), progressIntervalMs: 20, prepare: [{ name: 'held preparation', file: process.execPath, args: ['-e', "require('node:fs').writeFileSync('held','1');setInterval(()=>{},1000)"], env: { HOME: testHome } }] });
     await until(() => fs.access(path.join(root, 'held')).then(() => true, () => false)); source.emit(signal);
     const running = await pending; assert.equal(await running.completion, ({ SIGINT: 130, SIGTERM: 143, SIGHUP: 129 })[signal]); await released(ports); await assert.rejects(fs.access(statePath(root)));
+    assert.ok(messages.some(message => /Running held preparation: interrupted/.test(message)));
+    assert.ok(!messages.some(message => /Running held preparation: completed|Local services listening/.test(message)));
+    const count = messages.length; await pause(80); assert.equal(messages.length, count);
   }
 });
 test('R9 interrupting an old/new handover releases the new gate without signalling stale identities', async t => {

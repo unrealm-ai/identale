@@ -1,4 +1,5 @@
 // Modified for Identale; see the root NOTICE.
+import './helpers/local-home.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import * as fs from 'node:fs/promises';
@@ -182,9 +183,36 @@ test('partial startup failure cleans up the first server and reservations', asyn
   const ports = await freePorts(3);
   const list = commands(ports);
   list[1].args = ['-e', 'process.exit(7)'];
-  const running = await supervise({ commands: list, cwd: repositoryRoot, signalSource: new EventEmitter(), log() {}, killAfterMs: 500 });
+  const messages = [];
+  const running = await supervise({ commands: list, cwd: repositoryRoot, signalSource: new EventEmitter(), log: message => messages.push(message), killAfterMs: 500 });
   t.after(() => running.stop());
   assert.equal(await running.completion, 1);
+  assert.ok(messages.some(message => /Starting fixture-0.*: ready/.test(message)));
+  assert.ok(messages.some(message => /Starting fixture-1.*: failed \(code=7/.test(message)));
+  assert.ok(!messages.some(message => /Starting fixture-2|Local services listening/.test(message)));
+  const reserved = await reservePorts(ports);
+  await Promise.all(reserved.map(server => new Promise(resolve => server.close(resolve))));
+});
+
+test('preparation and readiness show elapsed progress, then stop reporting after completion', async t => {
+  const { dir } = await fixture(t), ports = await freePorts(1), messages = [];
+  const prepare = [{ name: 'slow preparation', file: process.execPath, args: ['-e', 'setTimeout(()=>{},200)'], env: {} }];
+  const list = commands(ports);
+  list[0].args = ['-e', `setTimeout(()=>{${serverCode}},200)`, String(ports[0])];
+  const running = await supervise({ commands: list, prepare, cwd: dir, signalSource: new EventEmitter(), log: message => messages.push(message), killAfterMs: 500, progressIntervalMs: 20 });
+  t.after(() => running.stop());
+  assert.equal(running.started, true);
+  assert.ok(messages.some(message => /Running slow preparation: still running \([\d.]+s elapsed\)/.test(message)));
+  const prepared = messages.findIndex(message => /Running slow preparation: completed/.test(message));
+  const starting = messages.findIndex(message => /Starting fixture-0.*: starting/.test(message));
+  assert.ok(prepared >= 0 && starting > prepared);
+  assert.ok(messages.some(message => /Starting fixture-0.*: still running/.test(message)));
+  assert.ok(messages.some(message => /Starting fixture-0.*: ready/.test(message)));
+  const count = messages.length;
+  await new Promise(resolve => setTimeout(resolve, 80));
+  assert.equal(messages.length, count);
+  await running.stop();
+  assert.equal(await running.completion, 0);
   const reserved = await reservePorts(ports);
   await Promise.all(reserved.map(server => new Promise(resolve => server.close(resolve))));
 });

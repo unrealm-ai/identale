@@ -3,6 +3,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import * as fs from 'node:fs/promises';
 import path from 'node:path';
+import net from 'node:net';
 import { spawnSync } from 'node:child_process';
 import { loadLocalEnvironment } from '../local/local-environment.mjs';
 import { localLauncherDirectory, prepareLauncherDirectory, localHome } from '../shared/local-paths.mjs';
@@ -189,4 +190,35 @@ for (const entry of ['scripts/start.sh', 'scripts/local/local-start.mjs']) test(
   assert.equal(result.status, 1, result.stderr); assert.match(result.stderr, /Dependencies are missing/);
   assert.ok(result.stdout.includes(custom), 'the actual entry reports the configured private-file source');
   assert.deepEqual(await fs.readFile(custom), first);
+});
+
+test('--no-install and --no-build report dependency reuse and validate outputs before starting services', { timeout: 15000 }, async t => {
+  const { root, env } = await fixture(t);
+  await fs.cp(path.join(repositoryRoot, 'scripts'), path.join(root, 'scripts'), { recursive: true, filter: source => !path.relative(path.join(repositoryRoot, 'scripts'), source).split(path.sep).includes('test') });
+  // Reuse the sparse lock fixture used by the dependency-check unit test.
+  // Native provenance checks will reject it before any business service runs.
+  await fs.mkdir(path.join(root, 'node_modules'));
+  await fs.writeFile(path.join(root, 'node_modules/.package-lock.json'), '{}');
+  await fs.writeFile(path.join(root, 'package-lock.json'), JSON.stringify({ packages: {} }));
+  const run = () => spawnSync(process.execPath, [path.join(root, 'scripts/local/local-start.mjs'), '--no-install', '--no-build'], { cwd: root, env, encoding: 'utf8', timeout: 10000 });
+  let result = run();
+  assert.equal(result.status, 1, result.stderr);
+  assert.match(result.stdout, /Dependencies: reusing installed locked versions; installation skipped/);
+  assert.match(result.stdout, /Checking existing build outputs \(--no-build\): failed/);
+  assert.match(result.stderr, /Build output is missing/);
+  for (const file of ['apps/control-plane/dist/main.js', 'apps/control-plane/dist/runtime-main.js', 'apps/runtime-host-pi/dist/main.js', 'node_modules/vite/bin/vite.js']) {
+    const target = path.join(root, file);
+    await fs.mkdir(path.dirname(target), { recursive: true }); await fs.writeFile(target, '');
+  }
+  const listeners = Array.from({ length: 4 }, () => net.createServer());
+  t.after(() => Promise.all(listeners.map(server => new Promise(resolve => server.close(resolve)))));
+  for (const server of listeners) await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  for (const [index, key] of ['DENTITY_CONTROL_PLANE_PORT', 'DENTITY_RUNTIME_SERVICE_PORT', 'DENTITY_RUNTIME_HOST_PI_PORT', 'DENTITY_WEB_PORT'].entries()) env[key] = String(listeners[index].address().port);
+  env.DENTITY_APP_ORIGIN = `http://127.0.0.1:${env.DENTITY_WEB_PORT}`;
+  await Promise.all(listeners.map(server => new Promise(resolve => server.close(resolve))));
+  result = run();
+  assert.equal(result.status, 1, result.stderr);
+  assert.match(result.stdout, /Build: skipped \(--no-build\); reusing existing outputs/, result.stderr);
+  assert.match(result.stderr, /Argon2 package identity could not be verified/);
+  assert.doesNotMatch(result.stdout, /Running locked dependency install|Running build|Starting platform|Local services listening/);
 });

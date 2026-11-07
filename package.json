@@ -12,7 +12,7 @@
     "apps/*"
   ],
   "scripts": {
-    "build": "tsc -b && npm run build --workspace @dentity/web",
+    "build": "node scripts/build/build.mjs backend && npm run build --workspace @dentity/web",
     "typecheck": "tsc -b --force && npm run typecheck --workspace @dentity/web",
     "clean": "tsc -b --clean",
     "start:control-plane": "node apps/control-plane/dist/main.js",

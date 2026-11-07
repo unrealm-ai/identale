@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "vue-tsc --noEmit && vite build",
+    "build": "node ../../scripts/build/build.mjs web",
     "typecheck": "vue-tsc --noEmit",
     "preview": "vite preview --host 127.0.0.1",
     "test:ui": "cd ../.. && tsc -b apps/control-plane && node --test apps/web/test/*.test.mjs"

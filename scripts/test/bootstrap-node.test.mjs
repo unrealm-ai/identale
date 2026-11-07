@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import * as fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
-import {execFileSync,spawn} from 'node:child_process';
+import {execFileSync,spawn,spawnSync} from 'node:child_process';
 import {createHash} from 'node:crypto';
 import {once} from 'node:events';
 import {repositoryRoot,initializeSecrets,secretPath} from '../shared/local-secrets.mjs';
@@ -11,7 +11,7 @@ const bootstrap=path.join(repositoryRoot,'scripts/shared/bootstrap-node.sh');
 async function fixture(t){
  const root=await fs.mkdtemp(path.join(await fs.realpath(os.tmpdir()),'identity-node-bootstrap-'));t.after(()=>fs.rm(root,{recursive:true,force:true}));
  const bin=path.join(root,'bin');await fs.mkdir(bin);
- for(const name of ['uname','curl','tar','gzip','mkdir','rm','rmdir','mktemp','awk','sha256sum','mv','shasum']){
+ for(const name of ['uname','curl','tar','gzip','mkdir','rm','rmdir','mktemp','awk','sha256sum','mv','shasum','sleep']){
   let file;try{file=execFileSync('/bin/sh',['-c','command -v "$1"','find-tool',name],{encoding:'utf8'}).trim();}catch{continue;}
   // Apple's shasum dispatches by its script path; a symlink in the isolated
   // PATH breaks that dispatch. Execute the real installed script unchanged.
@@ -62,7 +62,10 @@ test('managed-runtime symlink rejection still precedes downloads and credential 
 });
 test('compatible installed Node/npm are reused without creating any managed runtime directory',async t=>{
  const{root}=await fixture(t);
- assert.match(shell('identity_ensure_node local; node --version',[],{env:{HOME:root,PATH:process.env.PATH}}),/^v24\./);
+ const result=spawnSync('/bin/bash',['-c','set -euo pipefail; source "$1"; identity_ensure_node local; node --version','bootstrap-test',bootstrap],{env:{HOME:root,PATH:process.env.PATH},encoding:'utf8'});
+ assert.equal(result.status,0,result.stderr);assert.match(result.stdout,/^v24\./);
+ assert.match(result.stderr,/Checking Node.js and npm/);assert.match(result.stderr,/Reusing installed Node.js v24\..*and npm/);
+ assert.doesNotMatch(result.stderr,/Downloading/);
  assert.deepEqual(await fs.readdir(root),['bin']);
 });
 test('server Node selection excludes root-private nvm without changing local Node selection',async t=>{
@@ -90,11 +93,32 @@ test('incomplete managed Node and a concurrent install gate fail without deletin
  assert.throws(()=>shell('identity_ensure_node local',[],{env}),/Another Node installation/);
  assert.equal((await fs.stat(path.join(base,'.node-install.lock'))).isDirectory(),true);
 });
+test('a real curl connection failure reports its phase and removes only owned download staging',async t=>{
+ const{root,env}=await fixture(t),base=path.join(root,'.identale/node');
+ await fs.mkdir(base,{recursive:true});await fs.writeFile(path.join(base,'sentinel'),'keep');
+ // Port zero cannot host a proxy listener; force an immediate real curl
+ // connection error without replacing curl or contacting an external service.
+ const proxy='http://127.0.0.1:0';
+ assert.throws(()=>shell('identity_ensure_node local',[],{env:{...env,HTTPS_PROXY:proxy,https_proxy:proxy,NO_PROXY:'',no_proxy:''},timeout:10000}),error=>{
+  const output=String(error.stderr);
+  assert.match(output,/Downloading Node.js 24\.19\.0.*: failed \(exit code 7/);
+  assert.doesNotMatch(output,/unbound variable/);return true;
+ });
+ assert.deepEqual(await fs.readdir(base),['sentinel']);assert.equal(await fs.readFile(path.join(base,'sentinel'),'utf8'),'keep');
+});
 test('real official Node download, hash validation, local install and second-run reuse', {skip:process.env.DENTITY_TEST_NODE_DOWNLOAD!=='1',timeout:360000},async t=>{
  const{root,env}=await fixture(t);
  const child=spawn('/bin/bash',['-c','set -euo pipefail; source "$1"; identity_ensure_node local; node --version; npm --version; identity_ensure_node local; node --version','bootstrap-test',bootstrap],{env,stdio:['ignore','pipe','pipe']});
  let out='',err='';child.stdout.on('data',d=>out+=String(d));child.stderr.on('data',d=>err+=String(d));
  const[code]=await once(child,'exit');assert.equal(code,0,err);assert.equal((out.match(/v24\.19\.0/g)||[]).length,2);
+ for(const label of ['Downloading Node.js 24.19.0','Downloading Node.js checksums','Verifying Node.js SHA-256','Extracting Node.js','Checking extracted Node.js','Installing managed Node.js']) {
+  const lines=err.split('\n').filter(line=>line.includes(label));
+  assert.ok(lines.some(line=>line.includes('starting')),label);assert.ok(lines.some(line=>line.includes('completed')),label);
+ }
+ const elapsed=Number(err.match(/Downloading Node.js 24\.19\.0[^\n]*completed \((\d+)s\)/)?.[1]);
+ if(elapsed>=11)assert.match(err,/Downloading Node.js: still running \(\d+s elapsed\)/);
+ t.diagnostic(`Real Node download: ${elapsed}s; periodic wait message: ${err.includes('Downloading Node.js: still running')}`);
+ assert.match(err,/Reusing installed Node.js/);assert.doesNotMatch(err,/\[Identale\].*: failed/);
  const base=path.join(root,'.identale/node');
  assert.equal((await fs.readdir(base)).length,1);assert.equal((await fs.readdir(root)).includes('.config'),false);
 });
