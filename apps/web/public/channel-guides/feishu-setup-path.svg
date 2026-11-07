@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="480" height="664" viewBox="0 0 480 664" role="img" aria-labelledby="title desc">
+<title id="title">飞书机器人配置路径示意</title><desc id="desc">在飞书开放平台创建企业自建应用，添加机器人能力，选择权限和事件，经管理员审核发布后加入指定群。部署端接线和身份验证是独立步骤。这是原创示意图，不是控制台截图。</desc>
+<rect width="480" height="664" rx="18" fill="#f3f6fa"/>
+<g font-family="system-ui, sans-serif" text-anchor="middle">
+<text x="240" y="38" font-size="22" font-weight="650" fill="#23323d">飞书 · 应用机器人准备路径</text>
+<text x="240" y="66" font-size="15" fill="#697b8c">配置路径示意，非控制台截图</text>
+<g fill="#fff" stroke="#ccd8e3"><rect x="38" y="90" width="404" height="76" rx="12"/><rect x="38" y="196" width="404" height="76" rx="12"/><rect x="38" y="302" width="404" height="76" rx="12"/><rect x="38" y="408" width="404" height="76" rx="12"/><rect x="38" y="514" width="404" height="76" rx="12"/></g>
+<g fill="#263746" font-size="20" font-weight="600"><text x="240" y="122">1  创建企业自建应用</text><text x="240" y="228">2  添加应用能力 → 机器人</text><text x="240" y="334">3  配置权限 + 接收消息事件</text><text x="240" y="440">4  创建版本 → 审核发布</text><text x="240" y="546">5  添加到指定群 → 联调验收</text></g>
+<g fill="#697b8c" font-size="15"><text x="240" y="148">不是仅能推送的自定义 Webhook 机器人</text><text x="240" y="254">填写名称与描述，确认应用所在企业</text><text x="240" y="360">@接收与普通群消息权限分别确认</text><text x="240" y="466">设置应用可用范围，由企业管理员审核</text><text x="240" y="572">部署端完成接线后，再验证收发与身份</text></g>
+<g stroke="#8ba5ba" stroke-width="2" fill="none"><path d="M240 174v14m-5-5 5 5 5-5"/><path d="M240 280v14m-5-5 5 5 5-5"/><path d="M240 386v14m-5-5 5 5 5-5"/><path d="M240 492v14m-5-5 5 5 5-5"/></g>
+<text x="240" y="625" font-size="15" fill="#697b8c">identity 不会在本页收集凭据或创建外部应用</text>
+</g></svg>

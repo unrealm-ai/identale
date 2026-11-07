@@ -1,0 +1,12 @@
+import test from'node:test';import assert from'node:assert/strict';import{modelFailureDiagnostic,sanitizeModelDiagnostic}from'../dist/model-diagnostics.js';
+const facts={phase:'body',startedAt:new Date().toISOString(),receivedBytes:123,httpStatus:200,providerRequestId:'request-safe-0001',abortObserved:false};
+test('cause diagnostics keep only bounded codes and names, never messages, stacks, credentials or URLs',()=>{
+ const secret='synthetic-private-key-12345',inner=Object.assign(new Error('https://private.invalid/'+secret),{code:'UND_ERR_SOCKET'}),outer=new TypeError('terminated',{cause:inner});inner.cause=outer;
+ const d=modelFailureDiagnostic(outer,{...facts,providerRequestId:secret},[secret]);assert.equal(d.providerRequestId,undefined);assert.equal(d.causes.length,2);assert.deepEqual(d.causes.map(x=>x.kind),['terminated','other']);assert.equal(d.causes[1].code,'UND_ERR_SOCKET');assert.equal(d.abortObserved,false);assert.equal(d.timeoutObserved,false);assert.equal(JSON.stringify(d).includes(secret),false);assert.equal(JSON.stringify(d).includes('private.invalid'),false);assert.equal(JSON.stringify(d).includes('stack'),false);
+ const unsafe={...d,providerRequestId:'request-safe-0001',prompt:secret,causes:[{name:'TypeError',kind:'terminated',message:secret,stack:secret}]};const clean=sanitizeModelDiagnostic(unsafe,[secret]);assert.equal(clean.providerRequestId,'request-safe-0001');assert.equal(JSON.stringify(clean).includes(secret),false);assert.equal(sanitizeModelDiagnostic({...d,causes:[{name:secret,kind:'other'}]}),undefined);
+});
+test('timeout flags require observed error type/code and identity or credential-like request IDs are not forwarded',()=>{
+ const timeout=Object.assign(new Error('do not retain'),{name:'TimeoutError'}),d=modelFailureDiagnostic(timeout,{...facts,phase:'request',abortObserved:true});assert.equal(d.timeoutObserved,true);assert.equal(d.abortObserved,true);assert.equal(d.causes[0].kind,'timeout');assert.ok(Number.isFinite(d.elapsedMs));
+ for(const providerRequestId of ['https://host/path','request\nsecret','短ID', 'short'])assert.equal(sanitizeModelDiagnostic({...d,providerRequestId}).providerRequestId,undefined);
+ assert.equal(sanitizeModelDiagnostic({...d,providerRequestId:'partial-key'},['synthetic-partial-key-secret']).providerRequestId,undefined);assert.equal(sanitizeModelDiagnostic({...d,causes:Array(5).fill({name:'Error',kind:'other'})}),undefined);
+});

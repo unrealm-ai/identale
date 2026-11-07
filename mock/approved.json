@@ -1,0 +1,20 @@
+[
+  {
+    "id": "local-mock-mcp-alpha",
+    "kind": "mcp",
+    "shared": true,
+    "serverRef": "local_mock_alpha",
+    "allowedTools": [
+      "lookup"
+    ]
+  },
+  {
+    "id": "local-mock-mcp-beta",
+    "kind": "mcp",
+    "shared": true,
+    "serverRef": "local_mock_beta",
+    "allowedTools": [
+      "lookup"
+    ]
+  }
+]

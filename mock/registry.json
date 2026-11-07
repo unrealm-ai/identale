@@ -1,0 +1,52 @@
+{
+  "skills": [
+    {
+      "resourceId": "local-mock-skill-alpha",
+      "version": "1",
+      "name": "local-mock-alpha",
+      "description": "Local Mock alpha trial skill",
+      "content": "---\nname: local-mock-alpha\ndescription: 本地合成业务甲的MCP查询与结果核对，用于能力包授权试用。\n---\n\n# 本地业务甲查询\n\nLOCAL_MOCK_SKILL_ALPHA\n\n仅在用户明确要求本地测试业务甲时使用已注册的 `mcp__local_mock_alpha__lookup`，参数为 `{}`。\n核对工具返回的 `LOCAL_MOCK_MCP_ALPHA_OK`，再用中文说明这是本地合成结果，不是正式业务数据。\n若工具未装配或调用失败，说明实际情况，不猜测结果，不寻找另一账号或其他业务资源代替。\n此Skill本身不授予权限，不改变平台的身份、能力包使用范围或工具清单。\n",
+      "digest": "beb2d834692b776fbea505aac26d49079a32ddf1f769475c35bd64418dd0c927"
+    },
+    {
+      "resourceId": "local-mock-skill-beta",
+      "version": "1",
+      "name": "local-mock-beta",
+      "description": "Local Mock beta trial skill",
+      "content": "---\nname: local-mock-beta\ndescription: 本地合成业务乙的MCP查询与结果核对，用于能力包授权试用。\n---\n\n# 本地业务乙查询\n\nLOCAL_MOCK_SKILL_BETA\n\n仅在用户明确要求本地测试业务乙时使用已注册的 `mcp__local_mock_beta__lookup`，参数为 `{}`。\n核对工具返回的 `LOCAL_MOCK_MCP_BETA_OK`，再用中文说明这是本地合成结果，不是正式业务数据。\n若工具未装配或调用失败，说明实际情况，不猜测结果，不寻找另一账号或其他业务资源代替。\n此Skill本身不授予权限，不改变平台的身份、能力包使用范围或工具清单。\n",
+      "digest": "cbdbe0984c5a01c503297d8842052cb24f392b7d053c69887b4ceccc7f7299cb"
+    }
+  ],
+  "mcpServers": [
+    {
+      "serverRef": "local_mock_alpha",
+      "endpoint": "http://127.0.0.1:18303/alpha",
+      "tools": [
+        {
+          "name": "lookup",
+          "description": "Local synthetic alpha business lookup",
+          "inputSchema": {
+            "type": "object",
+            "properties": {},
+            "additionalProperties": false
+          }
+        }
+      ]
+    },
+    {
+      "serverRef": "local_mock_beta",
+      "endpoint": "http://127.0.0.1:18303/beta",
+      "tools": [
+        {
+          "name": "lookup",
+          "description": "Local synthetic beta business lookup",
+          "inputSchema": {
+            "type": "object",
+            "properties": {},
+            "additionalProperties": false
+          }
+        }
+      ]
+    }
+  ]
+}

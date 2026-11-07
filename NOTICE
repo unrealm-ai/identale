@@ -1,0 +1,20 @@
+Identale
+https://github.com/unrealm-ai/identale
+
+License and third-party material
+--------------------------------
+Project source is provided under the Apache License, Version 2.0; see LICENSE.
+Existing copyright, license and attribution notices remain applicable.
+Third-party software and assets retain their respective licenses and notices.
+See THIRD_PARTY_NOTICES.md and the asset-specific notice files.
+
+Frontend builds include generated distribution licenses and notices in
+THIRD_PARTY_NOTICES.txt and third-party-licenses.json, with the unresolved
+vdirs attribution evidence identified in those notices.
+
+The web-interface attribution is a default presentation choice, not an
+additional license restriction or a requirement to retain that UI. This NOTICE
+is informational and does not modify the terms of the Apache License.
+
+Channel product names, logos and trademarks belong to their respective owners.
+Their inclusion identifies integrations and does not imply endorsement.

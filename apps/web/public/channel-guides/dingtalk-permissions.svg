@@ -1,0 +1,30 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="960" height="540" viewBox="0 0 960 540" role="img" aria-labelledby="title desc">
+<title id="title">钉钉：机器人 / Stream 与目录读取</title><desc id="desc">位置：机器人与消息推送 → Stream；权限管理 → 通讯录读取及可见范围</desc>
+<rect width="960" height="540" rx="16" fill="#f8fafc"/>
+<g font-family="PingFang SC,Microsoft YaHei,sans-serif">
+<text x="32" y="44" font-size="25" font-weight="600" fill="#1d2939">钉钉：机器人 / Stream 与目录读取</text>
+<text x="32" y="76" font-size="14" fill="#53616b">位置：机器人与消息推送 → Stream；权限管理 → 通讯录读取及可见范围</text>
+<rect x="32" y="105" width="438" height="220" rx="12" fill="white" stroke="#167060" stroke-width="1.5"/>
+<rect x="32" y="105" width="6" height="220" rx="3" fill="#167060"/>
+<text x="52" y="139" font-size="19" font-weight="600" fill="#1d2939">应用内机器人与消息</text>
+<text x="52" y="170" font-size="15" fill="#344054">创建企业内部应用 → 开启机器人配置</text>
+<text x="52" y="197" font-size="15" fill="#344054">消息接收模式：Stream</text>
+<text x="52" y="224" font-size="15" fill="#344054">发送 / 回复：机器人 OpenAPI</text>
+<text x="52" y="251" font-size="15" fill="#344054">按接口要求启用发送能力</text>
+<text x="52" y="278" font-size="15" fill="#344054">发布并限定应用可用范围</text>
+<rect x="490" y="105" width="438" height="220" rx="12" fill="white" stroke="#167060" stroke-width="1.5"/>
+<rect x="490" y="105" width="6" height="220" rx="3" fill="#167060"/>
+<text x="510" y="139" font-size="19" font-weight="600" fill="#1d2939">目录所需读取能力</text>
+<text x="510" y="170" font-size="15" fill="#344054">通讯录部门信息读权限</text>
+<text x="510" y="197" font-size="15" fill="#344054">成员信息读权限</text>
+<text x="510" y="224" font-size="15" fill="#344054">通讯录部门成员读权限</text>
+<text x="510" y="251" font-size="15" fill="#344054">限定需要的部门 / 人员</text>
+<text x="510" y="278" font-size="15" fill="#344054">不需要通讯录维护写权限</text>
+<rect x="32" y="345" width="896" height="120" rx="12" fill="white" stroke="#c08722" stroke-width="1.5"/>
+<rect x="32" y="345" width="6" height="120" rx="3" fill="#c08722"/>
+<text x="52" y="379" font-size="19" font-weight="600" fill="#1d2939">能力边界：不扩大基础授权</text>
+<text x="52" y="410" font-size="15" fill="#344054">Stream 不等于全群监听；普通应用机器人主要接收群 @消息</text>
+<text x="52" y="437" font-size="15" fill="#344054">群历史 / 听记的独立用户授权不在本向导提供，不要求全部会议或个人数据权限</text>
+<text x="32" y="498" font-size="14" fill="#53616b">Client ID = AppKey；Client Secret = AppSecret。无公网入站回调 URL。</text>
+<text x="32" y="523" font-size="12" fill="#687780">identity 原创操作示意 · 非官方控制台截图 · 核对日期 2026-10-24</text>
+</g></svg>

@@ -1,0 +1,8 @@
+import test from'node:test';import assert from'node:assert/strict';import{mkdtemp,mkdir,writeFile,readFile,rm,symlink}from'node:fs/promises';import{tmpdir}from'node:os';import{join}from'node:path';
+import{HostArtifacts}from'../dist/artifacts.js';
+test('explicit publication snapshots bytes, fences runs and refuses unsafe sources and conflicting operation reuse',async t=>{
+ const root=await mkdtemp(join(tmpdir(),'identity-artifacts-')),work=join(root,'work'),store=new HostArtifacts(join(root,'private'));await mkdir(work,{mode:0o700});t.after(()=>rm(root,{recursive:true,force:true}));const scope={workspaceId:'w',entityId:'e',runId:'run'};
+ await writeFile(join(work,'report.txt'),'version one');const first=await store.publish(scope,work,'report.txt','call-1');assert.equal(first.availability,'available');assert.equal(first.name,'report.txt');assert.equal(first.kind,'file');assert.deepEqual(await store.publish(scope,work,'report.txt','call-1'),first);
+ await writeFile(join(work,'report.txt'),'version two');assert.equal(await readFile((await store.read('run',first.content)).path,'utf8'),'version one');await assert.rejects(store.publish(scope,work,'report.txt','call-1'),/conflict/);await assert.rejects(store.read('different-run',first.content),/not_granted/);
+ await writeFile(join(root,'outside.txt'),'private');await assert.rejects(store.publish(scope,work,join(root,'outside.txt'),'call-2'),/outside/);await symlink(join(work,'report.txt'),join(work,'linked'));await assert.rejects(store.publish(scope,work,'linked','call-3'),/unsafe/);assert.equal((await store.list('run')).length,1);
+});

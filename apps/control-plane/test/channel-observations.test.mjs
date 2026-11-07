@@ -1,0 +1,103 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import {mkdtempSync,rmSync} from 'node:fs';
+import {tmpdir} from 'node:os';
+import {join} from 'node:path';
+import Fastify from 'fastify';
+import {Store} from '../dist/store.js';
+import {EmployeeChannelRepository} from '../dist/employee-channels/repository.js';
+import {EmployeeChannelService} from '../dist/employee-channels/service.js';
+import {registerChannelObservationApi,installChannelObservationReporter} from '../dist/split/channel-observations.js';
+const token='synthetic-configuration-observation-token';
+const record=()=>({id:'c',sourceId:'source',workspaceId:'w',entityId:'e',provider:'dingtalk',appId:'app',identity:{appId:'app',tenantId:'app',tenantIdNamespace:'app_id'},revision:3,authRevision:1,stateVersion:0,status:'pending_verification',enabled:true,inboundVerified:false,directoryStatus:'available',lastError:null,credential:{ciphertext:'synthetic-private-ciphertext',nonce:'synthetic-nonce',tag:'synthetic-tag'},createdBy:'u',updatedBy:'u',context:{historyEnabled:false,groupListenEnabled:false,listenGeneration:4,meetingRefs:[]},verification:{challengeId:'challenge',challengeText:'challenge-text',expiresAt:9999999999999}});
+function fixture(t,customize=r=>r){
+ const dir=mkdtempSync(join(tmpdir(),'identity-channel-observations-'));
+ const stores=[];const setup=name=>{const store=new Store(join(dir,name+'.sqlite'),{role:name==='platform'?'platform':'runtime'});stores.push(store);store.run("INSERT INTO users(id,username,display_name) VALUES('u','fixture','Fixture')");store.run("INSERT INTO workspaces(id,name,created_by) VALUES('w','Fixture','u')");store.run("INSERT INTO members(id,workspace_id,user_id,role) VALUES('m','w','u','owner')");store.run("INSERT INTO entities(id,workspace_id,name,owner_member_id,created_by_member_id,own_web_use,web_use_user_id,interaction_runtime) VALUES('e','w','Employee','m','m',1,'u','builtin')");const repository=new EmployeeChannelRepository(store),service=new EmployeeChannelService(repository);const initial=customize(record());if(initial.directoryBinding)store.run("INSERT INTO employee_channel_directory_credentials(id,workspace_id,provider,corp_id,agent_id,state_version,record_json) VALUES(?,?,'wecom','corp','agent',1,'{}')",initial.directoryBinding.credentialId,'w');repository.save(initial,undefined);return{store,repository,service};};
+ const platform=setup('platform'),runtime=setup('runtime'),server=Fastify();registerChannelObservationApi(server,{token,channels:platform.service,store:platform.store});
+ const sent=[];let loseResponse=false;const transport=async(url,init)=>{assert.equal(String(url),'http://127.0.0.1:1/internal/config/channel-observation');sent.push(JSON.parse(init.body));const result=await server.inject({method:'POST',url:'/internal/config/channel-observation',headers:init.headers,payload:JSON.parse(init.body)});if(loseResponse){loseResponse=false;throw Error('synthetic lost response');}return new Response(result.body,{status:result.statusCode,headers:{'content-type':'application/json'}});};
+ const reporter=installChannelObservationReporter(runtime.store,runtime.repository,{url:'http://127.0.0.1:1',token,fetch:transport});
+ t.after(async()=>{await reporter.close();await server.close();for(const store of stores)store.close();rmSync(dir,{recursive:true,force:true});});
+ return{platform,runtime,reporter,server,sent,async reopen(){await reporter.close();runtime.store.close();stores.splice(stores.indexOf(runtime.store),1);const reopened=new Store(join(dir,'runtime.sqlite'),{role:'runtime'});stores.push(reopened);return reopened;},lose(){loseResponse=true;}};
+}
+const candidate={appId:'app',botId:'observed-bot',tenantId:'tenant',robotCode:'robot',challengeText:'challenge-text',eventId:'event-1',messageId:'message-1'};
+test('real installation candidate and verification markers reach platform, survive authoritative confirmation',async t=>{
+ const f=fixture(t);f.runtime.service.recordVerifiedCandidate('c','3',candidate);
+ assert.equal(f.platform.service.verification('w','e','dingtalk').status,'waiting');
+ assert.equal(f.runtime.store.one('SELECT count(*) n FROM channel_state_reports').n,2);
+ await f.reporter.flush();
+ const observed=f.platform.service.verification('w','e','dingtalk');assert.equal(observed.status,'observed');
+ assert.equal(f.platform.service.isVerificationEvent('c','event-1'),true);assert.equal(f.platform.service.isVerificationEvent('c','other','message-1'),true);
+ const before=f.platform.repository.byId('c'),confirmed=f.platform.service.confirmVerification('w','e','dingtalk','u',{expectedRevision:observed.revision,candidateId:observed.candidateId});
+ assert.equal(confirmed.status,'verified');assert.equal(confirmed.inboundVerified,true);assert.equal(confirmed.revision,before.revision+1);assert.equal(f.platform.repository.byId('c').context.listenGeneration,4);
+ const json=JSON.stringify(f.sent);assert.equal(json.includes('synthetic-private'),false);assert.equal(json.includes('credential'),false);
+});
+test('accepted-but-unknown network response reuses report ID and does not repeat CAS update',async t=>{
+ const f=fixture(t);const old=f.runtime.repository.byId('c');f.runtime.repository.save({...old,directoryStatus:'unavailable',lastError:'authentication_failed',status:'invalid',revision:old.revision+1},old);f.lose();await f.reporter.flush();
+ assert.equal(f.reporter.status()[0].status,'pending');const version=f.platform.repository.byId('c').stateVersion;
+ await f.reporter.flush();assert.equal(f.platform.repository.byId('c').stateVersion,version);assert.equal(f.sent[0].reportId,f.sent[1].reportId);assert.equal(f.reporter.status()[0].status,'accepted');
+ assert.equal(f.platform.store.one('SELECT count(*) n FROM channel_observation_receipts').n,1);
+});
+test('admin revision/auth revision/state changes conflict without changing enabled, credentials or context',async t=>{
+ for(const field of ['revision','authRevision','stateVersion']){
+  const f=fixture(t),old=f.runtime.repository.byId('c');f.runtime.repository.save({...old,status:'invalid',lastError:'authentication_failed',revision:old.revision+1},old);
+  const current=f.platform.repository.byId('c');if(field==='stateVersion')f.platform.repository.save({...current,enabled:false,status:'disabled'},current);else f.platform.repository.save({...current,[field]:current[field]+1},current);
+  const before=f.platform.repository.byId('c');await f.reporter.flush();assert.deepEqual(f.platform.repository.byId('c'),before);assert.equal(f.reporter.status()[0].status,'conflict');
+ }
+});
+test('authentication, extra configuration fields and report-ID content changes fail closed',async t=>{
+ const f=fixture(t),old=f.runtime.repository.byId('c');f.runtime.repository.save({...old,inboundVerified:true},old);await f.reporter.flush();const report=f.sent[0];
+ assert.equal((await f.server.inject({method:'POST',url:'/internal/config/channel-observation',payload:report})).statusCode,401);
+ for(const field of ['enabled','credential','context','authRevision'])assert.equal((await f.server.inject({method:'POST',url:'/internal/config/channel-observation',headers:{authorization:'Bearer '+token},payload:{...report,observation:{...report.observation,[field]:true}}})).statusCode,400);
+ assert.equal((await f.server.inject({method:'POST',url:'/internal/config/channel-observation',headers:{authorization:'Bearer '+token},payload:{...report,verificationEvents:['event:changed']}})).statusCode,409);
+});
+test('outer transaction rollback removes both local mutation and durable report',t=>{
+ const f=fixture(t),old=f.runtime.repository.byId('c');assert.throws(()=>f.runtime.store.transaction(()=>{f.runtime.repository.save({...old,inboundVerified:true},old);throw Error('rollback');}),/rollback/);
+ assert.deepEqual(f.runtime.repository.byId('c'),old);assert.equal(f.runtime.store.one('SELECT count(*) n FROM channel_state_reports').n,0);
+});
+test('snapshot reconciliation reapplies pending observation without generating another report',async t=>{
+ const f=fixture(t),old=f.runtime.repository.byId('c');f.runtime.service.recordVerifiedCandidate('c','3',candidate);
+ f.runtime.store.run('UPDATE employee_channel_connections SET record_json=?,state_version=? WHERE id=?',JSON.stringify(old),old.stateVersion,old.id);
+ f.runtime.store.run('DELETE FROM employee_channel_verification_events');f.reporter.reconcile();
+ assert.equal(f.runtime.service.verification('w','e','dingtalk').status,'observed');assert.equal(f.runtime.service.isVerificationEvent('c','event-1'),true);assert.equal(f.runtime.store.one('SELECT count(*) n FROM channel_state_reports').n,2);
+ await f.reporter.flush();assert.equal(f.platform.service.verification('w','e','dingtalk').status,'observed');
+});
+test('runtime cannot turn an operational report into configuration or credential edit',t=>{
+ const f=fixture(t),old=f.runtime.repository.byId('c');for(const patch of [{enabled:false},{context:{...old.context,groupListenEnabled:true}},{credential:{...old.credential,tag:'changed'}},{authRevision:2}])assert.throws(()=>f.runtime.repository.save({...old,...patch},old),/readonly/);
+ assert.equal(f.runtime.store.one('SELECT count(*) n FROM channel_state_reports').n,0);
+});
+
+test('runtime queue is durable while platform channel configuration remains memory-only',t=>{
+ const f=fixture(t),old=f.runtime.repository.byId('c');f.runtime.repository.save({...old,inboundVerified:true},old);
+ assert.equal(f.runtime.store.one("SELECT count(*) n FROM main.channel_state_reports").n,1);
+ assert.equal(f.runtime.store.one("SELECT 1 FROM main.sqlite_master WHERE name='employee_channel_connections'"),undefined);
+ assert.equal(f.platform.store.one("SELECT 1 FROM main.sqlite_master WHERE name='channel_observation_receipts'")!==undefined,true);
+});
+
+test('a stale snapshot arriving after report acceptance keeps candidate and challenge markers',async t=>{
+ const f=fixture(t),old=f.runtime.repository.byId('c');f.runtime.service.recordVerifiedCandidate('c','3',candidate);await f.reporter.flush();
+ f.runtime.store.run('UPDATE employee_channel_connections SET record_json=?,state_version=? WHERE id=?',JSON.stringify(old),old.stateVersion,old.id);
+ f.runtime.store.run('DELETE FROM employee_channel_verification_events');f.reporter.reconcile();
+ assert.equal(f.runtime.service.verification('w','e','dingtalk').status,'observed');assert.equal(f.runtime.service.isVerificationEvent('c','event-1'),true);
+});
+
+test('official shared-directory scope revocation reports only reconfirmation downgrade, not credentials',async t=>{
+ const binding={credentialId:'shared',corpId:'corp',agentId:'agent',sourceRevision:1,credentialRevision:1,scopeRevision:'original',status:'confirmed',assertion:{evidence:'admin_asserted',actorId:'u',confirmedAt:1,botId:'app',corpId:'corp',credentialRevision:1}};
+ const f=fixture(t,r=>({...r,provider:'wecom',directoryBinding:binding})),old=f.runtime.repository.byId('c');
+ const {verification,...base}=old;
+ assert.equal(f.runtime.repository.save({...base,sourceId:'revoked-source',revision:old.revision+1,directoryStatus:'unavailable',status:'pending_verification',inboundVerified:false,lastError:'directory_scope_changed',directoryBinding:{...binding,status:'reconfirmation_required',sourceRevision:2}},old),true);
+ await f.reporter.flush();const current=f.platform.repository.byId('c');assert.equal(current.directoryBinding.status,'reconfirmation_required');assert.equal(current.sourceId,'revoked-source');assert.equal(current.directoryStatus,'unavailable');assert.deepEqual(current.credential,old.credential);assert.equal(current.enabled,true);assert.equal(current.authRevision,old.authRevision);assert.equal(current.verification,undefined);
+});
+test('pending durable reports survive runtime restart without persisting platform configuration',async t=>{
+ const f=fixture(t),old=f.runtime.repository.byId('c');f.runtime.repository.save({...old,inboundVerified:true},old);
+ const store=await f.reopen(),repository=new EmployeeChannelRepository(store);
+ assert.equal(repository.byId('c'),undefined);
+ const reporter=installChannelObservationReporter(store,repository,{url:'http://127.0.0.1:1',token,fetch:async(_url,init)=>{const r=await f.server.inject({method:'POST',url:'/internal/config/channel-observation',headers:init.headers,payload:JSON.parse(init.body)});return new Response(r.body,{status:r.statusCode});}});
+ try{await reporter.flush();assert.equal(f.platform.repository.byId('c').inboundVerified,true);assert.equal(reporter.status()[0].status,'accepted');}finally{await reporter.close();}
+});
+
+test('a rejected parent observation prevents dependent challenge markers from crossing a colliding state version',async t=>{
+ const f=fixture(t);f.runtime.service.recordVerifiedCandidate('c','3',candidate);const current=f.platform.repository.byId('c');
+ // Another legitimate observer wins the same next state version with a different candidate.
+ f.platform.service.recordVerifiedCandidate('c','3',{...candidate,eventId:'other-event',messageId:'other-message',botId:'other-bot'});
+ await f.reporter.flush();assert.equal(f.platform.service.isVerificationEvent('c','event-1'),false);assert.equal(f.platform.service.isVerificationEvent('c','other-event'),true);assert.equal(f.sent.length,1);assert.ok(f.reporter.status().every(r=>r.status==='conflict'));assert.equal(f.platform.repository.byId('c').stateVersion,current.stateVersion+1);
+});

@@ -1,0 +1,17 @@
+{
+  "name": "@dentity/application",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "dependencies": {
+    "@dentity/contracts": "0.0.0",
+    "@dentity/domain": "0.0.0"
+  },
+  "license": "Apache-2.0"
+}

@@ -1,0 +1,2 @@
+export type ManagedResource={id:string;name:string;description?:string;version:number;revision?:number;enabled:boolean;fileCount?:number;endpoint?:string;auth?:{kind:string;header:string;configured:boolean};tools?:{name:string;description:string;inputSchema:unknown}[];source?:{kind:string;url?:string;commit?:string;subpath?:string};references:{entityId:string;name:string}[]};
+export type ResourceVersion={version:number;files:{path:string;size:number}[]};

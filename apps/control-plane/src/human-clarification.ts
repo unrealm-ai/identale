@@ -1,0 +1,21 @@
+import {scopeFromJson,type ConversationRepository} from '@dentity/application';
+import type {Store} from './store.js';
+import type {HumanActor} from './human-confirmation.js';
+export interface ClarificationRequest {request_id:string;content_version:number;question_digest:string;status:string}
+export interface ClarificationFocus {messageId:string;deliveredAt:number;requests:{requestId:string;contentVersion:number;currentContentVersion:number;questionDigest:string;stale:boolean;status:string}[]}
+const compact=(s:string)=>s.replace(/\s+/gu,' ').trim();
+/** Derive associations from durable tool intent AND the actual visible/sent assistant message.
+ * No model-provided message ID, RAM focus, latest pending request, or unsent question is authoritative. */
+export function humanClarification(store:Store,conversations:ConversationRepository,a:HumanActor,questions:readonly ClarificationRequest[],quotedMessageId?:string):ClarificationFocus|undefined {
+ const requests=new Map(questions.map(r=>[r.request_id,r]));
+ const refs=(turnId:string,text:string)=>store.all<{request_id:string;candidate_json:string}>('SELECT request_id,candidate_json FROM human_response_messages WHERE message_id=?',turnId).flatMap(m=>{const r=requests.get(m.request_id);if(!r)return[];try{const p=JSON.parse(m.candidate_json);if(p.decision!=='needs_more'||!['current_message','clarification'].includes(p.association)||typeof p.clarificationText!=='string'||!compact(p.clarificationText)||!compact(text).includes(compact(p.clarificationText)))return[];return[{requestId:r.request_id,contentVersion:Number(p.contentVersion),currentContentVersion:r.content_version,questionDigest:r.question_digest,stale:p.contentVersion!==r.content_version||p.questionDigest!==r.question_digest,status:r.status}];}catch{return[];}});
+ if(a.scope.source){
+  if(a.scope.source.conversationKind!=='private'||a.scope.source.threadId||!store.one("SELECT name FROM sqlite_master WHERE type='table' AND name='channel_deliveries'"))return;
+  const rows=store.all<{id:string;text:string|null;scope_json:string;target_json:string;correlation_json:string|null;message_id:string|null;sent_at:number}>(`SELECT d.id,d.text,d.scope_json,d.target_json,d.correlation_json,c.message_id,c.updated_at sent_at FROM channel_deliveries d JOIN channel_message_receipts c ON c.id=d.id AND c.kind='outbox' AND c.status='sent' WHERE c.connection_id=? AND json_extract(d.correlation_json,'$.conversationId')=? ${quotedMessageId?'AND c.message_id=?':'AND c.updated_at<?'} ORDER BY c.updated_at DESC,d.rowid DESC LIMIT 50`,a.scope.source.connectionId,a.conversationId,...(quotedMessageId?[quotedMessageId]:[a.createdAt]));
+  for(const row of rows){try{const scope=scopeFromJson(row.scope_json),s=scope.source,p=scope.principal,t=JSON.parse(row.target_json),correlation=JSON.parse(row.correlation_json??'{}');if(scope.workspaceId!==a.scope.workspaceId||scope.entityId!==a.scope.entityId||!s||s.conversationKind!=='private'||s.threadId||s.connectionId!==a.scope.source.connectionId||s.applicationId!==a.scope.source.applicationId||s.tenantId!==a.scope.source.tenantId||s.conversationId!==a.scope.source.conversationId||p?.externalUserId!==a.scope.principal?.externalUserId||p?.identityNamespace!==a.scope.principal?.identityNamespace||t.threadId||t.conversation?.conversationKind!=='private'||t.conversation.externalId!==s.conversationId)continue;return{messageId:row.message_id??row.id,deliveredAt:row.sent_at,requests:row.text&&typeof correlation.turnId==='string'?refs(correlation.turnId,row.text):[]};}catch{continue;}}
+  return;
+ }
+ if(quotedMessageId)return; // Web has no provider quote IDs; exact persistent conversation is the boundary.
+ const visible=store.one<{id:string;created_at:number}>("SELECT id,created_at FROM conversation_message_index WHERE conversation_id=? AND role='assistant' AND simulated=0 AND created_at<? ORDER BY created_at DESC,rowid DESC LIMIT 1",a.conversationId,a.createdAt);if(!visible)return;
+ const turn=store.one<{id:string}>('SELECT id FROM interaction_turns WHERE conversation_id=? AND reply_id=? AND status=\'succeeded\'',a.conversationId,visible.id.replace(/^assistant:/,'')),message=conversations.getRetainedRealMessage(a.conversationId,visible.id,a.createdAt);return{messageId:visible.id,deliveredAt:visible.created_at,requests:turn&&message?refs(turn.id,message.text):[]};
+}

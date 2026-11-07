@@ -1,0 +1,47 @@
+import{extractJsonText}from'./json-text-stream.js';
+import type{SharedMessageAsset}from'@dentity/application';
+import type{AssetTransport,AssetSourceScope,AssetReadKind,AssetUnavailable}from'./service.js';
+const segment=(v:string)=>encodeURIComponent(v);
+const unavailable=(state:AssetUnavailable['state'],reason:string):AssetUnavailable=>({state,reason});
+const object=(v:unknown):Record<string,unknown>=>{if(!v||typeof v!=='object'||Array.isArray(v))throw Error('provider_shape_invalid');return v as Record<string,unknown>;};
+const seconds=(v:unknown)=>{if(typeof v!=='string'||!/^\d+$/.test(v))return;const n=Number(v);return Number.isSafeInteger(n)?n>1e12?Math.floor(n/1000):n:undefined;};
+/** Application identity only. Vendor credentials never leave this platform transport. */
+export class FeishuAssetTransport implements AssetTransport{
+ private readonly signals=new WeakMap<AssetSourceScope,AbortSignal>();
+ constructor(private readonly options:{accessToken:(scope:AssetSourceScope)=>Promise<string>;assertSource:(scope:AssetSourceScope)=>void|Promise<void>;fetch?:typeof fetch;now?:()=>number}){}
+ private async request(scope:AssetSourceScope,path:string){await this.options.assertSource(scope);if(!path.startsWith('/open-apis/'))throw Error('invalid_asset_endpoint');const url=new URL(path,'https://open.feishu.cn');if(url.origin!=='https://open.feishu.cn')throw Error('invalid_asset_endpoint');const token=await this.options.accessToken(scope);await this.options.assertSource(scope);return(this.options.fetch??fetch)(url,{redirect:'error',headers:{authorization:`Bearer ${token}`},signal:this.signals.get(scope)??AbortSignal.timeout(30000)});}
+ private async data(scope:AssetSourceScope,path:string):Promise<Record<string,unknown>|AssetUnavailable>{const response=await this.request(scope,path);if(!response.ok)return this.httpState(response.status);const result=object(await response.json());if(result.code!==0){const code=Number(result.code);return[99991672,99991668,40004,234002].includes(code)?unavailable('no_permission','provider_permission_denied'):[2091003].includes(code)?unavailable('pending','provider_material_processing'):unavailable('failed','provider_business_error');}return object(result.data);}
+ private httpState(status:number){return status===401||status===403?unavailable('no_permission','provider_permission_denied'):status===404?unavailable('not_available','provider_resource_unavailable'):status===429?unavailable('pending','provider_rate_limited'):unavailable('failed','provider_http_failure');}
+ async read(scope:AssetSourceScope,asset:SharedMessageAsset,kind:AssetReadKind):Promise<Response|AssetUnavailable>{const requestScope={...scope},signal=AbortSignal.timeout(30000);this.signals.set(requestScope,signal);try{return await this.readScoped(requestScope,asset,kind);}catch(error){if(signal.aborted)return unavailable('pending','provider_timeout');throw error;}}
+ async readAlternative(scope:AssetSourceScope,asset:SharedMessageAsset,kind:AssetReadKind){const requestScope={...scope};this.signals.set(requestScope,AbortSignal.timeout(30000));return this.readScoped(requestScope,asset,kind,true);}
+ private async readScoped(scope:AssetSourceScope,asset:SharedMessageAsset,kind:AssetReadKind,skipMinutes=false):Promise<Response|AssetUnavailable>{
+  if(scope.provider!=='feishu')return unavailable('failed','provider_unsupported');
+  if(asset.kind!=='meeting'){if(kind!=='content'||!asset.resourceKey)return unavailable('not_available','asset_content_kind_unavailable');const response=await this.request(scope,`/open-apis/im/v1/messages/${segment(scope.messageId)}/resources/${segment(asset.resourceKey)}?type=${asset.kind==='image'?'image':'file'}`);return response.ok?response:this.httpState(response.status);}
+  if(kind==='content')kind='summary';
+  const start=seconds(asset.startAt),end=seconds(asset.endAt);if(!asset.meetingNumber||start===undefined||end===undefined||end<start)return unavailable('not_available','meeting_instance_unresolved');
+  const now=Math.floor((this.options.now??Date.now)()/1000);if(start<now-90*86400)return unavailable('not_available','meeting_query_outside_window');
+  let token:string|undefined;const seen=new Set<string>(),matches:Record<string,unknown>[]=[];
+  do{const query=new URLSearchParams({meeting_no:asset.meetingNumber,start_time:String(start),end_time:String(end),page_size:'100',...(token?{page_token:token}:{})});const page=await this.data(scope,'/open-apis/vc/v1/meetings/list_by_no?'+query);if('state'in page)return page as AssetUnavailable;if(!Array.isArray(page.meeting_briefs))return unavailable('failed','meeting_response_invalid');for(const brief of page.meeting_briefs){const id=object(brief).id;if(typeof id!=='string')return unavailable('failed','meeting_response_invalid');const detail=await this.data(scope,`/open-apis/vc/v1/meetings/${segment(id)}`);if('state'in detail)continue;const meeting=object(detail.meeting);if(meeting.meeting_no===asset.meetingNumber&&seconds(meeting.start_time)===start&&seconds(meeting.end_time)===end)matches.push({...detail,meeting:{...meeting,id}});}
+   if(!page.has_more)break;if(typeof page.page_token!=='string'||!page.page_token||seen.has(page.page_token))return unavailable('failed','meeting_pagination_invalid');token=page.page_token;seen.add(token);
+  }while(true);
+  if(matches.length!==1)return unavailable(matches.length?'failed':'not_available',matches.length?'meeting_instance_ambiguous':'meeting_instance_unresolved');
+  const selected=matches[0]!,meeting=object(selected.meeting);let fallback:AssetUnavailable=unavailable('not_available','meeting_material_unresolved');
+  // A readable complete Minutes source wins; recording absence does not prove no note/summary.
+  const recording=skipMinutes?unavailable('not_available','minutes_material_unavailable'):await this.data(scope,`/open-apis/vc/v1/meetings/${segment(String(meeting.id))}/recording`);
+  if(!('state'in recording)){const url=recording.recording&&typeof recording.recording==='object'?object(recording.recording).url:undefined;if(typeof url==='string'){let minute:string|undefined;try{const parsed=new URL(url);if(parsed.protocol==='https:'&&/(^|\.)(feishu\.cn|larksuite\.com|larkoffice\.com)$/.test(parsed.hostname))minute=/\/minutes\/([a-zA-Z0-9]+)(?:\/|$)/.exec(parsed.pathname)?.[1];}catch{}if(minute){if(kind==='summary'){const result=await this.request(scope,`/open-apis/minutes/v1/minutes/${segment(minute)}/artifacts`);if(result.ok)return extractJsonText(result,'summary');fallback=this.httpState(result.status);}else{const result=await this.request(scope,`/open-apis/minutes/v1/minutes/${segment(minute)}/transcript?need_speaker=true&need_timestamp=true&file_format=txt`);if(result.ok)return result;fallback=this.httpState(result.status);}}}}
+  else fallback=recording as AssetUnavailable;
+  const related=selected.related_artifacts&&typeof selected.related_artifacts==='object'?object(selected.related_artifacts):{};const doc=kind==='summary'?related.note_doc_token:related.verbatim_doc_token;
+  if(typeof doc==='string'&&doc){const result=await this.request(scope,`/open-apis/docx/v1/documents/${segment(doc)}/raw_content`);if(result.ok)return extractJsonText(result,'content');fallback=this.httpState(result.status);}
+  if(typeof meeting.note_id==='string'&&meeting.note_id){const note=await this.data(scope,`/open-apis/vc/v1/notes/${segment(meeting.note_id)}`);if('state'in note)return note as AssetUnavailable;
+   // Official larksuite/cli shortcuts/note/note.go: main=1, verbatim=2; normal=1, unified=2.
+   const detail=object(note.note),display=Number(detail.note_display_type??detail.display_type);
+   if(kind==='transcript'&&display===2)return unavailable('no_permission','unified_transcript_user_identity_required');
+   const wanted=kind==='summary'?1:2,artifacts=Array.isArray(detail.artifacts)?detail.artifacts:[];
+   const tokens=[...new Set(artifacts.flatMap(raw=>{const value=object(raw);return Number(value.artifact_type)===wanted&&typeof value.doc_token==='string'&&value.doc_token?[value.doc_token]:[];}))];
+   if(tokens.length>1)return unavailable('failed','note_artifact_ambiguous');
+   if(tokens.length===1){const document=await this.request(scope,`/open-apis/docx/v1/documents/${segment(tokens[0]!)}/raw_content`);if(document.ok)return extractJsonText(document,'content');return this.httpState(document.status);}
+   return unavailable('not_available','note_material_unresolved');
+  }
+  return fallback;
+ }
+}

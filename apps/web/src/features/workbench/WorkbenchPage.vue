@@ -1,0 +1,22 @@
+<script setup lang="ts">
+import HumanRequestsPage from '../work-items/HumanRequestsPage.vue';
+import {computed} from 'vue';
+import {NButton,NEmpty,NSelect,NTabPane,NTabs} from 'naive-ui';
+import type {Entity,Workspace} from '../../shared/api';
+import PageHeader from '../../shared/ui/PageHeader.vue';
+import {useAccessibleTabs,vAccessibleTablist} from '../../shared/ui/useAccessibleTabs';
+import PlatformTasks from '../tasks/PlatformTasks.vue';
+import EmployeeTasks from '../tasks/EmployeeTasks.vue';
+import ConnectionOverview from '../management/ConnectionOverview.vue';
+import SystemRuntimeStatus from './SystemRuntimeStatus.vue';
+import TaskOverview from './TaskOverview.vue';
+const props=defineProps<{workspace:Workspace;entities:Entity[];section:'tasks'|'monitor'|'human';entityId?:string|undefined;conversationId?:string|undefined;disabled:boolean}>();
+const emit=defineEmits<{sectionChanged:[value:'tasks'|'monitor'|'human'];filtersChanged:[entityId:string,conversationId:string|undefined];sessionExpired:[];openWorkItem:[id:string];openEmployee:[id:string,section:string];openConversation:[entity:Entity,id:string]}>();
+const admin=computed(()=>['owner','admin'].includes(props.workspace.role)),selected=computed(()=>props.entities.find(e=>e.id===props.entityId));
+const current=computed({get:()=>props.section,set:(v:'tasks'|'monitor'|'human')=>{if(!props.disabled)emit('sectionChanged',v);}});
+const {tabProps,panelProps}=useAccessibleTabs(current,()=>['tasks','monitor','human'],()=>props.disabled);
+</script>
+<template><section class="workbench-page"><PageHeader title="工作台" description="查看任务进展与运行情况。"/><TaskOverview v-if="admin&&current==='tasks'" :workspace-id="workspace.id" @session-expired="emit('sessionExpired')"/><NTabs v-accessible-tablist="'工作台分区'" v-model:value="current" type="line"><NTabPane name="tasks" tab="任务" :tab-props="tabProps('tasks')" v-bind="panelProps('tasks')" :disabled="disabled" display-directive="if"><PlatformTasks v-if="admin" :key="workspace.id" :workspace="workspace" :entities="entities" :entity-id="entityId" :conversation-id="conversationId" @filters-changed="(id,conversation)=>emit('filtersChanged',id,conversation)" @session-expired="emit('sessionExpired')"/><template v-else><label class="employee-task-select">数字员工<NSelect aria-label="查看任务的数字员工" :value="entityId||null" :options="entities.map(e=>({label:e.name,value:e.id}))" filterable clearable :disabled="disabled" @update:value="id=>emit('filtersChanged',id??'',undefined)"/></label><EmployeeTasks v-if="selected" :key="`${workspace.id}:${selected.id}`" :entity="selected" :workspace="workspace" embedded :conversation-id="conversationId" @conversation-selected="id=>emit('filtersChanged',selected!.id,id)" @open-conversation="id=>emit('openConversation',selected!,id)" @session-expired="emit('sessionExpired')"/><NEmpty v-else description="选择员工，查看你的会话任务。"><template #extra><NButton @click="emit('openEmployee','','overview')">前往数字员工</NButton></template></NEmpty></template></NTabPane><NTabPane name="monitor" tab="运行监控" :tab-props="tabProps('monitor')" v-bind="panelProps('monitor')" :disabled="disabled" display-directive="if"><SystemRuntimeStatus v-if="admin" :workspace-id="workspace.id" @session-expired="emit('sessionExpired')"/><ConnectionOverview :key="workspace.id" :workspace="workspace" @open="id=>emit('openEmployee',id,'channels')" @session-expired="emit('sessionExpired')"/></NTabPane><NTabPane name="human" tab="待人工确认" :tab-props="tabProps('human')" v-bind="panelProps('human')" :disabled="disabled" display-directive="if"><HumanRequestsPage :workspace="workspace" :entities="entities" @session-expired="emit('sessionExpired')" @open-conversation="(entity,id)=>emit('openConversation',entity,id)" @open-work-item="id=>emit('openWorkItem',id)"/></NTabPane></NTabs></section></template>
+<style scoped>
+.workbench-page{min-width:0}.employee-task-select{display:grid;gap:.5rem;max-width:28rem;margin:1rem 0 1.5rem}.workbench-page:has(.full-task-page) :deep(.task-overview){display:none}.workbench-page> :deep(.n-tabs>.n-tabs-nav){margin-bottom:1rem}.workbench-page> :deep(.n-tabs>.n-tabs-nav .n-tabs-tab){border-radius:999px;padding:.625rem 1.25rem}.workbench-page> :deep(.n-tabs>.n-tabs-nav .n-tabs-tab--active){background:var(--id-primary);color:var(--id-on-primary)}.workbench-page> :deep(.n-tabs>.n-tabs-nav .n-tabs-tab--active .n-tabs-tab__label){color:var(--id-on-primary)}.workbench-page> :deep(.n-tabs>.n-tabs-nav .n-tabs-bar){display:none}
+</style>

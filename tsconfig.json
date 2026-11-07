@@ -1,0 +1,23 @@
+{
+  "files": [],
+  "references": [
+    {
+      "path": "packages/domain"
+    },
+    {
+      "path": "packages/application"
+    },
+    {
+      "path": "packages/contracts"
+    },
+    {
+      "path": "apps/control-plane"
+    },
+    {
+      "path": "apps/runtime-host-pi"
+    },
+    {
+      "path": "apps/mock-model"
+    }
+  ]
+}

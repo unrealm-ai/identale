@@ -1,0 +1,61 @@
+{
+  "name": "dentity",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=24.19.0 <25"
+  },
+  "packageManager": "npm@11.9.0",
+  "workspaces": [
+    "packages/*",
+    "apps/*"
+  ],
+  "scripts": {
+    "build": "tsc -b && npm run build --workspace @dentity/web",
+    "typecheck": "tsc -b --force && npm run typecheck --workspace @dentity/web",
+    "clean": "tsc -b --clean",
+    "start:control-plane": "node apps/control-plane/dist/main.js",
+    "start:runtime": "node apps/control-plane/dist/runtime-main.js",
+    "start:runtime-host-pi": "node apps/runtime-host-pi/dist/main.js",
+    "test:accounts": "tsc -b apps/control-plane && node --test apps/control-plane/test/accounts.test.mjs",
+    "test:domain": "tsc -b packages/domain && node --test packages/domain/test/*.test.mjs",
+    "test": "npm run test:domain && npm run test:mock-model && npm run test:control-plane && npm run test:builtin && npm run test:runtime-host && npm run test:local",
+    "dev:web": "npm run dev --workspace @dentity/web",
+    "test:control-plane": "tsc -b apps/control-plane apps/runtime-host-pi apps/mock-model && node --test --test-concurrency=4 apps/control-plane/test/*.test.mjs",
+    "test:builtin": "tsc -b packages/runtime-builtin && node --test packages/runtime-builtin/test/*.test.mjs",
+    "test:runtime-host": "tsc -b apps/runtime-host-pi apps/mock-model && node --test apps/runtime-host-pi/test/*.test.mjs",
+    "local:init": "node scripts/local/local-init.mjs",
+    "local:start": "node scripts/local/local-start.mjs",
+    "test:local": "node --test scripts/test/*.test.mjs",
+    "test:web": "tsc -b apps/control-plane && npm run test:ui --workspace @dentity/web",
+    "start:mock-model": "node apps/mock-model/dist/main.js",
+    "start:mock-mcp": "node apps/mock-model/dist/mcp-main.js",
+    "test:mock-model": "tsc -b apps/mock-model && node --test apps/mock-model/test/*.test.mjs"
+  },
+  "devDependencies": {
+    "@types/node": "24.19.2",
+    "typescript": "6.0.3"
+  },
+  "license": "Apache-2.0",
+  "description": "Persistent digital employee identity, interaction and task coordination",
+  "keywords": [
+    "ai-agent",
+    "digital-employee",
+    "task-coordination",
+    "human-in-the-loop",
+    "mcp",
+    "skills",
+    "feishu",
+    "dingtalk",
+    "wecom"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/unrealm-ai/identale.git"
+  },
+  "bugs": {
+    "url": "https://github.com/unrealm-ai/identale/issues"
+  },
+  "homepage": "https://github.com/unrealm-ai/identale#readme"
+}

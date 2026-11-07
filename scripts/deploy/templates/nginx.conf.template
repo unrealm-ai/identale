@@ -1,0 +1,53 @@
+# Modified for Identale; see the root NOTICE.
+{{REDIRECTS}}
+server {
+    listen {{PORT}} ssl;
+    server_name {{HOST}};
+    ssl_certificate /etc/identity/tls/server.crt;
+    ssl_certificate_key /etc/identity/tls/server.key;
+    ssl_protocols TLSv1.2 TLSv1.3;
+    root /srv/identity/web;
+    index index.html;
+    client_max_body_size 16k;
+
+    location /api/ {
+        proxy_pass http://127.0.0.1:18300;
+        proxy_http_version 1.1;
+        proxy_set_header Host $http_host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $remote_addr;
+        proxy_set_header X-Forwarded-Proto https;
+        proxy_read_timeout 300s;
+
+        # Keep the hidden-path guard ahead of the API exceptions below.
+        location ~ /\. { return 404; }
+
+        # Match the platform's explicit route limits, not a larger global cap.
+        # A 20 MiB ZIP is base64-encoded inside JSON by the Skill importer.
+        location ~ ^/api/workspaces/[^/]+/skills/imports$ {
+            client_max_body_size 29m;
+            proxy_pass http://127.0.0.1:18300;
+        }
+        location ~ ^/api/workspaces/[^/]+/(?:skill-resources|skills/[^/]+/status|mcp-resources(?:/discover|/[^/]+/status)?)$ {
+            client_max_body_size 400000;
+            proxy_pass http://127.0.0.1:18300;
+        }
+        location ~ ^/api/workspaces/[^/]+/entities/[^/]+/group-sharing$ {
+            client_max_body_size 1m;
+            proxy_pass http://127.0.0.1:18300;
+        }
+        location ~ ^/api/workspaces/[^/]+/entities/[^/]+/(?:triggers(?:/[^/]+(?:/credentials(?:/[^/]+/revoke)?)?)?|trigger-history-policy|trigger-preview)$ {
+            client_max_body_size 128000;
+            proxy_pass http://127.0.0.1:18300;
+        }
+        # The public platform relay uses 128000 bytes, including GitHub ingress.
+        location ~ ^/api/triggers/(?:webhook|github)/[^/]+$ {
+            client_max_body_size 128000;
+            proxy_pass http://127.0.0.1:18300;
+        }
+    }
+
+    location /internal/ { return 404; }
+    location ~ /\. { return 404; }
+    location / { try_files $uri $uri/ /index.html; }
+}

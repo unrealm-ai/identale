@@ -1,0 +1,37 @@
+import test from 'node:test';
+import {Store} from '../dist/store.js';
+import {ModelProfileService} from '../dist/model-profiles.js';
+import {DatabaseSync} from 'node:sqlite';
+import assert from 'node:assert/strict';
+import {mkdtemp,rm} from 'node:fs/promises';
+import {tmpdir} from 'node:os';
+import {join} from 'node:path';
+import {createServer as createPlatform} from '../dist/server.js';
+import {createServer as createHost} from '../../runtime-host-pi/dist/server.js';
+import {PiRuntimeAdapter} from '../../runtime-host-pi/dist/adapter.js';
+const origin='http://127.0.0.1:5173';
+test('passive Host completes persistent run, retries lost receipt and never calls a business resolver',async t=>{
+ const dir=await mkdtemp(join(tmpdir(),'dentity-loopback-contract-'));const hostToken='synthetic-loopback-host-token-0000000000',resolverToken='synthetic-loopback-resolver-token-000000';let app,service;let starts=0;
+ const internal=async(path,body)=>{const response=await app.inject({method:'POST',url:'/internal/runtime/'+path,payload:body,headers:{authorization:`Bearer ${resolverToken}`}});assert.equal(response.statusCode,200,response.body);return response.json();};
+ let reverseCalls=0;const blocked=async()=>{reverseCalls++;throw Error('Reverse business access forbidden');};const resolver={verify:blocked,content:blocked,model:blocked,storeOutput:blocked};
+ const driver={start(input){starts++;assert.equal(input.context.trigger.requester.identityNamespace,'platform-user');assert.equal(input.profile.apiKey,'synthetic-key-only');assert.equal(input.spec.thinkingLevel,'medium');assert.equal('executionThinking' in input.profile,false);assert.ok(input.prompt.includes('Please summarize'));return{done:Promise.resolve('Synthetic completed result'),cancel:async()=> 'confirmed'};}};
+ const adapter=new PiRuntimeAdapter(join(dir,'host'),resolver,driver);const host=createHost({token:hostToken,adapter});await host.listen({host:'127.0.0.1',port:0});
+ app=createPlatform({databasePath:join(dir,'platform.sqlite'),origin,pollIntervalMs:0,onService:s=>service=s,runtimeHost:{url:`http://127.0.0.1:${host.server.address().port}`,token:hostToken,resolverToken},modelProfiles:{masterKey:Buffer.alloc(32,9),allowLoopbackHttp:true}});await app.ready();
+ const db=new DatabaseSync(join(dir,'platform.sqlite'));
+ t.after(async()=>{fixtureStore.close();db.close();await app.close();await host.close();await rm(dir,{recursive:true,force:true});});
+ const call=(method,url,payload,cookie)=>app.inject({method,url,payload,headers:{origin,...(cookie?{cookie}:{})}});
+ const registered=await call('POST','/api/auth/register',{username:'loopback-user',password:'Synthetic loopback password 2026!'});const user=registered.json(),cookie=registered.headers['set-cookie'].split(';')[0];const prefix=`/api/workspaces/${user.workspace.id}`;
+ const entity=(await call('POST',prefix+'/entities',{name:'Loopback',ownWebUse:true},cookie)).json().entity;const base=prefix+`/entities/${entity.id}`;
+ const fixtureStore=new Store(join(dir,'platform.sqlite'));
+ const profiles=new ModelProfileService(fixtureStore,{masterKey:Buffer.alloc(32,9),allowLoopbackHttp:true});
+ profiles.save(user.workspace.id,entity.id,{provider:'openai-compatible',endpoint:'http://127.0.0.1:4545/v1',modelId:'fake-model',apiKey:'synthetic-key-only'});
+ const conversation=(await call('POST',base+'/conversations',{operationId:'conversation',mode:'real'},cookie)).json().conversation;
+ const taskBase=`${base}/conversations/${conversation.id}/tasks`;
+ const created=await call('POST',taskBase,{operationId:'task',conversationId:conversation.id,input:'Please summarize the synthetic fixture'},cookie);assert.equal(created.statusCode,202,created.body);const id=created.json().task.id;
+ const originalFetch=globalThis.fetch;let lostSessionReceipt=false;
+ const transport=t.mock.method(globalThis,'fetch',async(url,options)=>{const response=await originalFetch(url,options);if(!lostSessionReceipt&&String(url).endsWith('/v1/createSession')){lostSessionReceipt=true;await response.text();throw Error('Synthetic lost createSession response after host committed');}return response;});
+ await service.tick();transport.mock.restore();assert.equal(lostSessionReceipt,true);assert.equal(starts,0);db.prepare('UPDATE task_outbox SET retry_at=0').run();
+ await new Promise(resolve=>setTimeout(resolve,5));await service.tick();for(let i=0;i<20;i++){await new Promise(resolve=>setTimeout(resolve,5));await service.tick();if(db.prepare('SELECT status FROM tasks WHERE id=?').get(id).status==='succeeded')break;}
+ const task=(await call('GET',taskBase+`/${id}`,undefined,cookie)).json().task;assert.equal(task.status,'succeeded',JSON.stringify(task));assert.equal(task.run.result,'Synthetic completed result');assert.equal(task.run.resultInputRevision,1);assert.equal(starts,1);
+ const repeated=await call('POST',taskBase,{operationId:'task',conversationId:conversation.id,input:'Please summarize the synthetic fixture'},cookie);assert.equal(repeated.json().task.id,id);await service.tick();assert.equal(starts,1);assert.equal(reverseCalls,0);
+});

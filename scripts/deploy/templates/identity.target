@@ -1,0 +1,7 @@
+[Unit]
+Description=Identity application services
+Wants={{SERVICES}}
+After=network.target
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,31 @@
+{
+  "css-render@0.15.14": {
+    "license": "MIT",
+    "integrity": "sha512-9nF4PdUle+5ta4W5SyZdLCCmFd37uVimSjg1evcTqKJCyvCEEj12WKzOSBNak6r4im4J4iYXKH1OWpUV5LBYFg==",
+    "file": "css-render-0.15.14-LICENSE.txt",
+    "sha256": "306f57de421d7ef77f7dc145e1234f9c0ec76b710d28769b4d98ef3c4f8a64bd",
+    "source": "https://github.com/07akioni/css-render/blob/4fd3b95ecedb17bffafabc00e93ce6eab843e716/LICENSE"
+  },
+  "@css-render/plugin-bem@0.15.14": {
+    "license": "MIT",
+    "integrity": "sha512-QK513CJ7yEQxm/P3EwsI+d+ha8kSOcjGvD6SevM41neEMxdULE+18iuQK6tEChAWMOQNQPLG/Rw3Khb69r5neg==",
+    "file": "css-render-0.15.14-LICENSE.txt",
+    "sha256": "306f57de421d7ef77f7dc145e1234f9c0ec76b710d28769b4d98ef3c4f8a64bd",
+    "source": "https://github.com/07akioni/css-render/blob/4fd3b95ecedb17bffafabc00e93ce6eab843e716/LICENSE"
+  },
+  "@css-render/vue3-ssr@0.15.14": {
+    "license": "MIT",
+    "integrity": "sha512-//8027GSbxE9n3QlD73xFY6z4ZbHbvrOVB7AO6hsmrEzGbg+h2A09HboUyDgu+xsmj7JnvJD39Irt+2D0+iV8g==",
+    "file": "css-render-0.15.14-LICENSE.txt",
+    "sha256": "306f57de421d7ef77f7dc145e1234f9c0ec76b710d28769b4d98ef3c4f8a64bd",
+    "source": "https://github.com/07akioni/css-render/blob/4fd3b95ecedb17bffafabc00e93ce6eab843e716/LICENSE"
+  },
+  "vdirs@0.1.8": {
+    "license": "MIT",
+    "integrity": "sha512-H9V1zGRLQZg9b+GdMk8MXDN2Lva0zx72MPahDKc30v+DtwKjfyOSXWRIX4t2mhDubM1H09gPhWeth/BJWPHGUw==",
+    "file": "vdirs-0.1.8-MIT-terms.txt",
+    "sha256": "9645fb6e878aebd5e959be648a71973a108d4aa0d18eee478d0579066ad99958",
+    "source": "https://github.com/spdx/license-list-data/blob/main/text/MIT.txt (standard terms only; copyright template line omitted, not an upstream vdirs LICENSE)",
+    "warning": "The published vdirs@0.1.8 package declares MIT but supplies no copyright notice or license text. Standard MIT terms are included without inventing a copyright holder or year. Upstream copyright attribution still needs maintainer confirmation."
+  }
+}

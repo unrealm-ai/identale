@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 880 300" role="img" aria-labelledby="title desc">
+<title id="title">钉钉智能体应用创建流程示意</title><desc id="desc">在有开发者权限的组织内进入应用列表，使用一键创建 OpenClaw 机器人应用入口，复制 Client ID 和 Client Secret 到平台。原创示意，不是官方后台截图。</desc>
+<rect width="880" height="300" rx="18" fill="#f5f8fb"/>
+<text x="36" y="46" fill="#213e51" font-size="21" font-family="sans-serif" font-weight="600">创建独立的钉钉机器人应用</text>
+<g font-family="sans-serif">
+<rect x="36" y="80" width="238" height="140" rx="12" fill="white" stroke="#d5e3ed"/><text x="55" y="111" font-size="13" fill="#357bd5">01 · 开发者后台</text><text x="55" y="150" font-size="19" fill="#213e51">进入钉钉应用列表</text><text x="55" y="184" font-size="14" fill="#647886">选择有开发者权限的组织</text>
+<path d="M285 148h24m-8-8 8 8-8 8" stroke="#718da3" fill="none" stroke-width="2"/>
+<rect x="321" y="80" width="238" height="140" rx="12" fill="white" stroke="#d5e3ed"/><text x="340" y="111" font-size="13" fill="#357bd5">02 · 一键创建入口</text><text x="340" y="150" font-size="19" fill="#213e51">创建 OpenClaw 机器人</text><text x="340" y="184" font-size="14" fill="#647886">名称、头像对应这位数字员工</text>
+<path d="M570 148h24m-8-8 8 8-8 8" stroke="#718da3" fill="none" stroke-width="2"/>
+<rect x="606" y="80" width="238" height="140" rx="12" fill="white" stroke="#d5e3ed"/><text x="625" y="111" font-size="13" fill="#357bd5">03 · 凭证与基础信息</text><text x="625" y="150" font-size="19" fill="#213e51">回填 Client ID / Secret</text><text x="625" y="184" font-size="14" fill="#647886">再到下一卡补权限并验证</text>
+<text x="36" y="260" font-size="13" fill="#647886">identity 原创操作示意 · 后台无一键入口时，可用企业内部应用 + 机器人能力的兼容路径。</text>
+</g></svg>

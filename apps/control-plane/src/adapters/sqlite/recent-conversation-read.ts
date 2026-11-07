@@ -1,0 +1,17 @@
+import {conversationOwnerKey,type RecentConversationCursor,type RecentConversationFact,type RecentConversationReadPort} from '@dentity/application';
+import type {Store} from '../../store.js';import type {SqliteConversationRepository} from './conversation-repository.js';
+export class SqliteRecentConversationRead implements RecentConversationReadPort {
+ constructor(private readonly store:Store,private readonly conversations:SqliteConversationRepository){store.db.exec('CREATE INDEX IF NOT EXISTS recent_web_owner ON conversations(workspace_id,owner_key,channel,entity_id,created_at,id); CREATE INDEX IF NOT EXISTS recent_web_messages ON conversation_message_index(conversation_id,created_at,id)');}
+ private owner(s:{workspaceId:string;userId:string}){return conversationOwnerKey({...s,entityId:''});}
+ ceiling(s:{workspaceId:string;userId:string}){return{conversationCeiling:this.store.one<{n:number}>('SELECT COALESCE(MAX(rowid),0) n FROM conversations WHERE workspace_id=? AND owner_key=? AND channel=\'web\'',s.workspaceId,this.owner(s))!.n,messageCeiling:this.store.one<{n:number}>('SELECT COALESCE(MAX(rowid),0) n FROM conversation_message_index')!.n};}
+ page(s:{workspaceId:string;userId:string},c:RecentConversationCursor,limit:number,at:number):RecentConversationFact[]{return this.store.all<RecentConversationFact>(`WITH candidates AS (
+ SELECT cv.*,CASE WHEN b.conversation_id=cv.id OR (b.conversation_id IS NULL AND cv.mode='real' AND cv.expires_at=0) THEN 1 ELSE 0 END AS canonical,ROW_NUMBER() OVER(PARTITION BY cv.entity_id ORDER BY CASE WHEN b.conversation_id=cv.id THEN 0 WHEN cv.mode='real' AND cv.expires_at=0 THEN 1 ELSE 2 END,CASE WHEN cv.mode='real' AND cv.expires_at=0 THEN cv.created_at ELSE -cv.created_at END,cv.id) AS choice
+ FROM conversations cv LEFT JOIN web_private_conversations b ON b.workspace_id=cv.workspace_id AND b.entity_id=cv.entity_id AND b.owner_key=cv.owner_key
+ WHERE cv.workspace_id=? AND cv.owner_key=? AND cv.channel='web' AND cv.rowid<=? AND (cv.expires_at=0 OR cv.expires_at>?)
+ ), facts AS (SELECT c.*,(SELECT m.id FROM conversation_message_index m WHERE m.conversation_id=c.id AND m.rowid<=? AND (m.expires_at=0 OR m.expires_at>?) ORDER BY m.created_at DESC,m.rowid DESC LIMIT 1) AS messageId,
+ COALESCE((SELECT MAX(m.created_at) FROM conversation_message_index m WHERE m.conversation_id=c.id AND m.rowid<=? AND (m.expires_at=0 OR m.expires_at>?)),c.created_at) AS activityAt FROM candidates c WHERE choice=1)
+ SELECT * FROM facts WHERE activityAt<? OR (activityAt=? AND id<?) ORDER BY activityAt DESC,id DESC LIMIT ?`,s.workspaceId,this.owner(s),c.conversationCeiling,at,c.messageCeiling,at,c.messageCeiling,at,c.activityAt,c.activityAt,c.id,limit);}
+ canonicalId(s:{workspaceId:string;userId:string;entityId:string}){return this.store.one<{id:string}>("SELECT COALESCE((SELECT conversation_id FROM web_private_conversations WHERE workspace_id=? AND entity_id=? AND owner_key=?),(SELECT id FROM conversations WHERE workspace_id=? AND entity_id=? AND owner_key=? AND channel='web' AND mode='real' AND expires_at=0 ORDER BY created_at,id LIMIT 1)) id",s.workspaceId,s.entityId,this.owner(s),s.workspaceId,s.entityId,this.owner(s))?.id??undefined;}
+ get(id:string){return this.conversations.get(id);}
+ preview(c:string,m:string,at:number){const r=this.store.one<{text:string|null}>('SELECT excerpt AS text FROM web_conversation_previews WHERE message_id=? AND conversation_id=? AND (expires_at=0 OR expires_at>?)',m,c,at);return typeof r?.text==='string'?{text:r.text}:undefined;}
+}

@@ -1,0 +1,19 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import {createServer} from 'node:http';
+import {mkdtemp,rm} from 'node:fs/promises';
+import {tmpdir} from 'node:os';
+import {join} from 'node:path';
+import {Store} from '../dist/store.js';
+import {ModelProfileService} from '../dist/model-profiles.js';
+for(const protocol of ['chat_completions','openai_responses','anthropic_messages'])test(`${protocol} connection observation is server-produced, protocol-bound and survives catalog restart`,async t=>{
+ const requests=[],secret='synthetic-protocol-key',root=await mkdtemp(join(tmpdir(),'identity-model-protocol-')),store=new Store(join(root,'isolated.sqlite'));
+ const server=createServer(async(req,res)=>{let raw='';for await(const part of req)raw+=part;const body=JSON.parse(raw);requests.push({url:req.url,body});assert.equal(req.url,'/v1/'+({chat_completions:'chat/completions',openai_responses:'responses',anthropic_messages:'messages'}[protocol]));assert.equal(protocol==='anthropic_messages'?req.headers['x-api-key']:req.headers.authorization,protocol==='anthropic_messages'?secret:'Bearer '+secret);res.setHeader('content-type','application/json');if(requests.length%2===0){res.writeHead(400);res.end(JSON.stringify({error:{code:'unsupported_image_input',message:'Image input is not supported'}}));return;}res.end(JSON.stringify(protocol==='chat_completions'?{choices:[{finish_reason:'stop',message:{role:'assistant',content:'OK'}}]}:protocol==='openai_responses'?{status:'completed',output:[{type:'message',content:[{type:'output_text',text:'OK'}]}]}:{stop_reason:'end_turn',content:[{type:'text',text:'OK'}]}));});
+ await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));t.after(async()=>{server.closeAllConnections();await new Promise(resolve=>server.close(resolve));store.close();await rm(root,{recursive:true,force:true});});
+ store.run("INSERT INTO users(id,username,display_name) VALUES('u','user','User')");store.run("INSERT INTO workspaces(id,name,created_by) VALUES('w','Workspace','u')");store.run("INSERT INTO members(id,workspace_id,user_id,role) VALUES('m','w','u','owner')");store.run("INSERT INTO entities(id,workspace_id,name,owner_member_id,created_by_member_id,own_web_use,web_use_user_id,interaction_runtime) VALUES('e','w','Entity','m','m',1,'u','builtin')");
+ const options={masterKey:Buffer.alloc(32,7),allowLoopbackHttp:true},service=new ModelProfileService(store,options),input={provider:'openai-compatible',protocol,endpoint:`http://127.0.0.1:${server.address().port}/v1`,modelId:'fixture',apiKey:secret,bindEntityId:'e'};
+ const tested=await service.testConnection('w',null,'u',input);assert.equal(requests.length,2);assert.deepEqual(tested.inputCapabilities,{text:'passed',image:'unsupported',testedAt:tested.inputCapabilities.testedAt,probeVersion:1});assert.ok(JSON.stringify(requests[1].body).includes('base64'));assert.throws(()=>service.saveValidated('w',null,'u',{...input,protocol:protocol==='chat_completions'?'openai_responses':'chat_completions',connectionTestReceipt:tested.connectionTestReceipt}),/required|stale/);
+ const saved=service.saveValidated('w',null,'u',{...input,connectionTestReceipt:tested.connectionTestReceipt});assert.equal(saved.protocol,protocol);assert.equal(saved.inputCapabilities.image,'unsupported');assert.equal(JSON.stringify(saved).includes(secret),false);
+ const restarted=new ModelProfileService(store,options),resolved=await restarted.resolve({workspaceId:'w',entityId:'e',profileId:saved.id,configRevision:saved.configRevision,purpose:'model-inference'},()=>true);assert.equal(resolved.protocol??'chat_completions',protocol);assert.equal(resolved.apiKey,secret);assert.equal(resolved.inputCapabilities.image,'unsupported');
+ assert.throws(()=>service.save('w','e',{...input,inputCapabilities:{image:'passed'}}),/invalid_model_profile/);
+});

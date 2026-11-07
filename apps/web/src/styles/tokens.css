@@ -1,0 +1,263 @@
+/* identale 视觉设计方案 v1 · Design Tokens（由 build/gen.py 生成，勿手改色值）
+ * 用法：<html data-theme="light|dark">；页面只消费 --id-* 语义变量。 */
+:root {
+  /* 品牌色阶 relay green（Logo 绿 = 400） */
+  --id-brand-50: #EAF8F3;
+  --id-brand-100: #CDEFE3;
+  --id-brand-200: #9EDFC8;
+  --id-brand-300: #67C9A9;
+  --id-brand-400: #3BBD9B;
+  --id-brand-500: #1E9E7F;
+  --id-brand-600: #0F8167;
+  --id-brand-700: #0B6A55;
+  --id-brand-800: #095544;
+  --id-brand-900: #073F33;
+  /* 中性色阶（微冷灰，带极轻青调） */
+  --id-neutral-0: #FFFFFF;
+  --id-neutral-25: #FAFBFB;
+  --id-neutral-50: #F4F6F7;
+  --id-neutral-100: #ECEFF1;
+  --id-neutral-200: #DFE4E7;
+  --id-neutral-300: #C9D0D4;
+  --id-neutral-400: #9AA5AC;
+  --id-neutral-500: #6F7B83;
+  --id-neutral-600: #56626A;
+  --id-neutral-700: #3E4950;
+  --id-neutral-800: #283137;
+  --id-neutral-900: #182024;
+  --id-neutral-950: #0E1316;
+  /* 字体 */
+  --id-font-sans: "PingFang SC","Microsoft YaHei","Hiragino Sans GB","Noto Sans SC","Noto Sans CJK SC",-apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,sans-serif;
+  --id-font-mono: "JetBrains Mono","SFMono-Regular","Cascadia Mono",Menlo,Consolas,"Liberation Mono","Noto Sans Mono CJK SC","PingFang SC","Microsoft YaHei",monospace;
+  --id-text-caption-size: 12px;
+  --id-text-caption-line: 18px;
+  --id-text-caption-weight: 400;
+  --id-text-meta-size: 13px;
+  --id-text-meta-line: 20px;
+  --id-text-meta-weight: 400;
+  --id-text-body-size: 14px;
+  --id-text-body-line: 22px;
+  --id-text-body-weight: 400;
+  --id-text-reading-size: 15px;
+  --id-text-reading-line: 24px;
+  --id-text-reading-weight: 400;
+  --id-text-title-sm-size: 16px;
+  --id-text-title-sm-line: 24px;
+  --id-text-title-sm-weight: 600;
+  --id-text-title-size: 18px;
+  --id-text-title-line: 26px;
+  --id-text-title-weight: 600;
+  --id-text-h2-size: 20px;
+  --id-text-h2-line: 28px;
+  --id-text-h2-weight: 600;
+  --id-text-h1-size: 24px;
+  --id-text-h1-line: 32px;
+  --id-text-h1-weight: 600;
+  --id-text-display-size: 30px;
+  --id-text-display-line: 38px;
+  --id-text-display-weight: 650;
+  /* 间距：4px 基准 */
+  --id-space-0: 0px;
+  --id-space-2: 2px;
+  --id-space-4: 4px;
+  --id-space-8: 8px;
+  --id-space-12: 12px;
+  --id-space-16: 16px;
+  --id-space-20: 20px;
+  --id-space-24: 24px;
+  --id-space-32: 32px;
+  --id-space-40: 40px;
+  --id-space-48: 48px;
+  --id-space-64: 64px;
+  /* 圆角 */
+  --id-radius-xs: 4px;
+  --id-radius-sm: 6px;
+  --id-radius-md: 8px;
+  --id-radius-lg: 12px;
+  --id-radius-xl: 16px;
+  --id-radius-pill: 999px;
+  /* 尺寸 */
+  --id-rail-width: 72px;
+  --id-topbar-height: 56px;
+  --id-control-sm: 28px;
+  --id-control-md: 36px;
+  --id-control-lg: 44px;
+  --id-content-max: 1440px;
+  --id-reading-max: 720px;
+  --id-motion-fast: 120ms;
+  --id-motion-normal: 200ms;
+  --id-ease: cubic-bezier(.2,.8,.2,1);
+}
+:root, [data-theme="light"] {
+  --id-bg-canvas: #F4F6F7;
+  --id-bg-rail: #0F1A1D;
+  --id-bg-surface: #FFFFFF;
+  --id-bg-raised: #FFFFFF;
+  --id-bg-sunken: #ECEFF1;
+  --id-bg-hover: #F0F3F4;
+  --id-bg-selected: #EAF8F3;
+  --id-border-subtle: #E6EAEC;
+  --id-border-default: #DFE4E7;
+  --id-border-strong: #7E8A92;
+  --id-text-primary: #182024;
+  --id-text-secondary: #4C575E;
+  --id-text-tertiary: #5F6B73;
+  --id-text-disabled: #8C979E;
+  --id-text-inverse: #FFFFFF;
+  --id-text-on-rail: #C9D6D9;
+  --id-text-on-rail-active: #FFFFFF;
+  --id-brand: #0F8167;
+  --id-brand-hover: #0B6A55;
+  --id-brand-pressed: #095544;
+  --id-brand-soft: #EAF8F3;
+  --id-brand-text: #0B6A55;
+  --id-on-brand: #FFFFFF;
+  --id-brand-logo: #3BBD9B;
+  --id-focus-ring: #1E9E7F;
+  --id-link: #0B6A55;
+  --id-status-info-fg: #1D5FD1;
+  --id-status-info-bg: #EAF1FD;
+  --id-status-info-border: #BCD2F8;
+  --id-status-success-fg: #1B7A3A;
+  --id-status-success-bg: #E9F6EC;
+  --id-status-success-border: #B7E0C2;
+  --id-status-warning-fg: #9A5300;
+  --id-status-warning-bg: #FFF4E0;
+  --id-status-warning-border: #F3D19B;
+  --id-status-danger-fg: #C0262D;
+  --id-status-danger-bg: #FDECEC;
+  --id-status-danger-border: #F4C0C2;
+  --id-status-neutral-fg: #4C575E;
+  --id-status-neutral-bg: #EEF1F2;
+  --id-status-neutral-border: #D3DADD;
+  --id-status-unknown-fg: #6B3FC2;
+  --id-status-unknown-bg: #F2EDFC;
+  --id-status-unknown-border: #D6C8F3;
+  --id-shadow-xs: 0 1px 2px rgb(16 24 28 / 6%);
+  --id-shadow-sm: 0 1px 3px rgb(16 24 28 / 8%), 0 1px 2px rgb(16 24 28 / 4%);
+  --id-shadow-md: 0 6px 16px -4px rgb(16 24 28 / 10%), 0 2px 4px rgb(16 24 28 / 4%);
+  --id-shadow-lg: 0 16px 40px -8px rgb(16 24 28 / 18%), 0 4px 8px rgb(16 24 28 / 6%);
+  color-scheme: light;
+}
+[data-theme="dark"] {
+  --id-bg-canvas: #0C1114;
+  --id-bg-rail: #080C0E;
+  --id-bg-surface: #141B1F;
+  --id-bg-raised: #1A2227;
+  --id-bg-sunken: #0F1518;
+  --id-bg-hover: #1F292E;
+  --id-bg-selected: #10302A;
+  --id-border-subtle: #222C31;
+  --id-border-default: #2C383E;
+  --id-border-strong: #6B7A82;
+  --id-text-primary: #E8EDEF;
+  --id-text-secondary: #AEB9BF;
+  --id-text-tertiary: #93A0A7;
+  --id-text-disabled: #66737A;
+  --id-text-inverse: #0C1114;
+  --id-text-on-rail: #9FB0B5;
+  --id-text-on-rail-active: #FFFFFF;
+  --id-brand: #3BBD9B;
+  --id-brand-hover: #67C9A9;
+  --id-brand-pressed: #9EDFC8;
+  --id-brand-soft: #10302A;
+  --id-brand-text: #5FD3B2;
+  --id-on-brand: #04221B;
+  --id-brand-logo: #3BBD9B;
+  --id-focus-ring: #67C9A9;
+  --id-link: #5FD3B2;
+  --id-status-info-fg: #8DB6FF;
+  --id-status-info-bg: #132542;
+  --id-status-info-border: #26406B;
+  --id-status-success-fg: #7FD99A;
+  --id-status-success-bg: #12301C;
+  --id-status-success-border: #245233;
+  --id-status-warning-fg: #F6BE62;
+  --id-status-warning-bg: #33240C;
+  --id-status-warning-border: #5A4115;
+  --id-status-danger-fg: #FF9A9E;
+  --id-status-danger-bg: #3A1517;
+  --id-status-danger-border: #62282B;
+  --id-status-neutral-fg: #B4BFC5;
+  --id-status-neutral-bg: #1F282D;
+  --id-status-neutral-border: #36434A;
+  --id-status-unknown-fg: #C3A8FF;
+  --id-status-unknown-bg: #261B3E;
+  --id-status-unknown-border: #423165;
+  --id-shadow-xs: 0 1px 2px rgb(0 0 0 / 40%);
+  --id-shadow-sm: 0 1px 3px rgb(0 0 0 / 45%);
+  --id-shadow-md: 0 8px 20px -6px rgb(0 0 0 / 60%);
+  --id-shadow-lg: 0 18px 44px -10px rgb(0 0 0 / 70%);
+  color-scheme: dark;
+}
+@media (prefers-color-scheme: dark) { :root:not([data-theme]) {
+  --id-bg-canvas: #0C1114;
+  --id-bg-rail: #080C0E;
+  --id-bg-surface: #141B1F;
+  --id-bg-raised: #1A2227;
+  --id-bg-sunken: #0F1518;
+  --id-bg-hover: #1F292E;
+  --id-bg-selected: #10302A;
+  --id-border-subtle: #222C31;
+  --id-border-default: #2C383E;
+  --id-border-strong: #6B7A82;
+  --id-text-primary: #E8EDEF;
+  --id-text-secondary: #AEB9BF;
+  --id-text-tertiary: #93A0A7;
+  --id-text-disabled: #66737A;
+  --id-text-inverse: #0C1114;
+  --id-text-on-rail: #9FB0B5;
+  --id-text-on-rail-active: #FFFFFF;
+  --id-brand: #3BBD9B;
+  --id-brand-hover: #67C9A9;
+  --id-brand-pressed: #9EDFC8;
+  --id-brand-soft: #10302A;
+  --id-brand-text: #5FD3B2;
+  --id-on-brand: #04221B;
+  --id-brand-logo: #3BBD9B;
+  --id-focus-ring: #67C9A9;
+  --id-link: #5FD3B2;
+  --id-status-info-fg: #8DB6FF;
+  --id-status-info-bg: #132542;
+  --id-status-info-border: #26406B;
+  --id-status-success-fg: #7FD99A;
+  --id-status-success-bg: #12301C;
+  --id-status-success-border: #245233;
+  --id-status-warning-fg: #F6BE62;
+  --id-status-warning-bg: #33240C;
+  --id-status-warning-border: #5A4115;
+  --id-status-danger-fg: #FF9A9E;
+  --id-status-danger-bg: #3A1517;
+  --id-status-danger-border: #62282B;
+  --id-status-neutral-fg: #B4BFC5;
+  --id-status-neutral-bg: #1F282D;
+  --id-status-neutral-border: #36434A;
+  --id-status-unknown-fg: #C3A8FF;
+  --id-status-unknown-bg: #261B3E;
+  --id-status-unknown-border: #423165;
+  --id-shadow-xs: 0 1px 2px rgb(0 0 0 / 40%);
+  --id-shadow-sm: 0 1px 3px rgb(0 0 0 / 45%);
+  --id-shadow-md: 0 8px 20px -6px rgb(0 0 0 / 60%);
+  --id-shadow-lg: 0 18px 44px -10px rgb(0 0 0 / 70%);
+  color-scheme: dark;
+} }
+
+/* ---------- 备选：墨色主操作（与 design.md 现有"黑色主按钮"基线一致） ----------
+ * 在 <html> 上加 data-primary="ink" 即可切换；绿色仍用于选中、链接与品牌位。
+ * 对比度：浅色 #FFFFFF / #182024 = 16.52:1；深色 #0E1316 / #E8EDEF = 15.84:1。 */
+[data-theme="light"][data-primary="ink"] {
+  --id-brand: #182024;
+  --id-brand-hover: #283137;
+  --id-brand-pressed: #0E1316;
+  --id-on-brand: #FFFFFF;
+}
+[data-theme="dark"][data-primary="ink"] {
+  --id-brand: #E8EDEF;
+  --id-brand-hover: #FFFFFF;
+  --id-brand-pressed: #C9D0D4;
+  --id-on-brand: #0E1316;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root { --id-motion-fast: 0ms; --id-motion-normal: 0ms; }
+}

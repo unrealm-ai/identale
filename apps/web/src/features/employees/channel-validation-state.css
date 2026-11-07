@@ -1,0 +1,5 @@
+.channel-status-block { border:1px solid var(--border); border-radius:.5rem; padding:1rem; background:var(--surface); }
+.channel-status-block[data-tone="success"] { border-color:var(--success);background:var(--successTint); }
+.channel-status-block[data-tone="error"] { border-color:var(--danger);background:var(--dangerTint); }
+.channel-status-block[data-tone="warning"] { border-color:var(--warning);background:var(--warningTint); }
+.channel-status-block[data-tone="idle"] { border-color:var(--border); }

@@ -1,0 +1,4 @@
+<script setup lang="ts">
+import {NFormItem,NRadio,NRadioGroup} from 'naive-ui';
+defineProps<{profiles:{id:string;name:string;modelId:string;enabled:boolean}[];disabled?:boolean}>();const value=defineModel<string|null>('value',{required:true});
+</script><template><NFormItem label="员工使用的模型"><NRadioGroup :value="value??''" :disabled="disabled" aria-label="员工使用的模型" @update:value="v=>value=String(v)||null"><div class="model-option"><NRadio value="">继承工作区默认模型</NRadio></div><div v-for="p in profiles" :key="p.id" class="model-option"><NRadio :value="p.id" :disabled="!p.enabled">{{p.name}} <small>{{p.modelId}}{{p.enabled?'':' · 已停用'}}</small></NRadio></div></NRadioGroup></NFormItem></template><style scoped>.model-option{padding:.75rem 0;border-bottom:1px solid var(--subtle)}small{display:block;color:var(--muted);overflow-wrap:anywhere}.n-radio-group{width:100%}</style>

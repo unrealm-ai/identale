@@ -1,0 +1,27 @@
+# Modified for Identale; see the root NOTICE.
+[Unit]
+Description={{DESCRIPTION}}
+After=network.target
+PartOf=identity.target
+
+[Service]
+Type=simple
+User=identity
+Group=identity
+NoNewPrivileges=true
+CapabilityBoundingSet=
+AmbientCapabilities=
+WorkingDirectory={{ROOT}}
+Environment=NODE_ENV=production
+Environment=HOME=/var/lib/identity/service-home
+EnvironmentFile=/etc/identity/{{ENV_FILE}}
+{{SECRETS_DIRECTIVE}}
+ExecStart="{{NODE}}" "{{ROOT}}/{{ENTRY}}"
+Restart=on-failure
+RestartSec=3
+KillSignal=SIGTERM
+TimeoutStopSec=20
+UMask=0077
+
+[Install]
+WantedBy=identity.target
