@@ -28,11 +28,16 @@ export class JsonlJournal {
     if(!options.ownerId)throw new Error('Journal database owner is required');
     const requested=resolve(options.root);
     if(existsSync(requested)&&lstatSync(requested).isSymbolicLink())throw new Error('Journal root must not be a symbolic link');
-    mkdirSync(dirname(requested),{recursive:true,mode:0o700});
-    // Resolve trusted platform aliases (e.g. macOS /var) before enforcing the owned root.
-    this.root=join(realpathSync(dirname(requested)),basename(requested));
+    // Resolve existing platform aliases (e.g. macOS /var), but let directory()
+    // create and sync each missing parent instead of an unsynced recursive mkdir.
+    let parent=dirname(requested);const missing:string[]=[];
+    while(!existsSync(parent)){missing.unshift(basename(parent));parent=dirname(parent);}
+    this.root=join(realpathSync(parent),...missing,basename(requested));
     this.hostId=this.withLock(()=>{
-      this.directory();let ancestor=dirname(this.root);while(true){const fd=openSync(ancestor,constants.O_RDONLY|constants.O_DIRECTORY|constants.O_NOFOLLOW);try{fsyncSync(fd);}finally{closeSync(fd);}const next=dirname(ancestor);if(next===ancestor)break;ancestor=next;}chmodSync(this.root,0o700);
+      // The provisioner owns pre-existing ancestors. Only our root's directory
+      // entry (including a constructor retry) needs its parent synced here.
+      // In particular, a root-owned 0711 data container is traversal-only.
+      this.directory();this.syncDirectory(dirname(this.root));chmodSync(this.root,0o700);
       const path=join(this.root,'owner.json');
       if(!existsSync(path)) {
         const fd=openSync(path,constants.O_WRONLY|constants.O_CREAT|constants.O_EXCL|constants.O_NOFOLLOW,0o600);
@@ -49,7 +54,7 @@ export class JsonlJournal {
   withLock<T>(fn:()=>T):T{return this.options.serialize(fn);}
   private directory(){
     const parts=this.root.slice(parse(this.root).root.length).split('/').filter(Boolean);let current=parse(this.root).root;
-    for(const part of parts){current=join(current,part);if(!existsSync(current)){mkdirSync(current,{mode:0o700});const parent=openSync(dirname(current),constants.O_RDONLY|constants.O_DIRECTORY|constants.O_NOFOLLOW);try{fsyncSync(parent);}finally{closeSync(parent);}}const s=lstatSync(current);if(s.isSymbolicLink()||!s.isDirectory())throw new Error('Journal path must contain only trusted directories');}
+    for(const part of parts){current=join(current,part);if(!existsSync(current)){mkdirSync(current,{mode:0o700});try{this.syncDirectory(dirname(current));}catch(error){try{rmdirSync(current);}catch{/* Preserve a concurrently populated directory. */}throw error;}}const s=lstatSync(current);if(s.isSymbolicLink()||!s.isDirectory())throw new Error('Journal path must contain only trusted directories');}
   }
   private safeFile(path:string){const s=lstatSync(path);if(s.isSymbolicLink()||!s.isFile()||s.nlink!==1)throw new Error('Journal file is not a private regular file');}
   private syncFile(fd:number){this.options.beforeSync?.('file');fsyncSync(fd);}

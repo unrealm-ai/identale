@@ -65,6 +65,11 @@ test('compatible installed Node/npm are reused without creating any managed runt
  assert.match(shell('identity_ensure_node local; node --version',[],{env:{HOME:root,PATH:process.env.PATH}}),/^v24\./);
  assert.deepEqual(await fs.readdir(root),['bin']);
 });
+test('server Node selection excludes root-private nvm without changing local Node selection',async t=>{
+ const{root}=await fixture(t);
+ shell('identity_server_node_allowed /usr/bin/node; identity_server_node_allowed /opt/identity/node/bin/node; identity_server_node_allowed /home/owner/node/bin/node; if identity_server_node_allowed /root/.nvm/versions/node/v24.19.0/bin/node; then exit 1; fi; if identity_server_node_allowed /root; then exit 1; fi; identity_ensure_node local',[],{env:{HOME:root,PATH:process.env.PATH}});
+ assert.deepEqual(await fs.readdir(root),['bin']);
+});
 test('archive verification rejects altered archives, missing and ambiguous official entries before extraction',async t=>{
  const{root,env}=await fixture(t);const archive=path.join(root,'archive.tar.gz'),manifest=path.join(root,'SHASUMS256.txt');
  await fs.writeFile(archive,'expected bytes');const hash=createHash('sha256').update('expected bytes').digest('hex');

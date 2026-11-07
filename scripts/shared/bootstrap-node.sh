@@ -16,10 +16,16 @@ identity_create_runtime_base() {
   if [[ ${2:-local} == server ]]; then mkdir -p -- "$1"
   else (umask 077; mkdir -p -- "$1"); fi
 }
+identity_server_node_allowed() {
+  local installed_node=${1:-}
+  if [[ -z $installed_node ]]; then installed_node=$(node -p 'process.execPath') || return 1; fi
+  case "$installed_node" in /root|/root/*) return 1 ;; esac
+}
 identity_ensure_node() {
   local purpose=${1:-local} skip_install=${2:-false} skip_flag=${3:---skip-install} system architecture archive base destination temporary checksum actual
   if command -v node >/dev/null 2>&1 && command -v npm >/dev/null 2>&1 &&
-    node -e 'const [a,b]=process.versions.node.split(".").map(Number);process.exit(a===24&&b>=19?0:1)' 2>/dev/null; then
+    node -e 'const [a,b]=process.versions.node.split(".").map(Number);process.exit(a===24&&b>=19?0:1)' 2>/dev/null &&
+    { [[ $purpose != server ]] || identity_server_node_allowed; }; then
     return
   fi
   case "$(uname -s)" in Darwin) system=darwin ;; Linux) system=linux ;; *) printf 'Supported systems: macOS and Linux.\n' >&2; return 1 ;; esac

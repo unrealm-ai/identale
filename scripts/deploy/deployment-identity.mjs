@@ -73,7 +73,7 @@ export async function planServicePermissions(storage, { protectedPaths = [], con
   const forbidden = ['/etc', '/usr', '/bin', '/sbin', '/lib', '/lib64', '/boot', '/dev', '/proc', '/sys', '/root'];
   const assertTarget = file => {
     if (!file || file.split(path.sep).filter(Boolean).length < 2 || ['/var/lib', '/var/log', '/var/cache', '/var/tmp'].includes(file) || forbidden.some(root => contains(root, file)) ||
-        protectedPaths.some(root => contains(root, file) || contains(file, root))) throw new Error('Unsafe deployment storage scope; relocate storage instead of changing system, source or private configuration permissions.');
+        protectedPaths.some(root => contains(root, file) || contains(file, root))) throw new Error(`Unsafe deployment storage scope: ${file}. Relocate storage instead of changing system, source or private configuration permissions; existing configuration is preserved, not reset.`);
   };
   const add = async (file, { directory = false, recursive = false, container = false } = {}) => {
     assertTarget(file);
@@ -183,12 +183,13 @@ export async function probeServiceAccess(input) {
 
 /** Exercise real OS access as the service account, with supplementary groups and capabilities removed. */
 export function assertServiceAccess({ uid, gid }, { root, node = process.execPath, entries, storage, extraFiles = [], registryPath }) {
-  const script = `import { probeServiceAccess } from ${JSON.stringify(import.meta.url)}; await probeServiceAccess(JSON.parse(process.argv[1]));`;
+  const script = `try { const { probeServiceAccess } = await import(${JSON.stringify(import.meta.url)}); await probeServiceAccess(JSON.parse(process.argv[1])); } catch (error) { console.error('Service access failed: ' + (error.code || error.name) + ' ' + (error.path || '(dependency/registry validation)')); process.exitCode = 1; }`;
   try {
     execFileSync('setpriv', ['--reuid', String(uid), '--regid', String(gid), '--clear-groups', '--no-new-privs', '--bounding-set=-all',
       node, '--input-type=module', '-e', script, JSON.stringify({ uid, gid, root, node, entries, storage, extraFiles, registryPath })], { ...commandOptions, cwd: root });
-  } catch {
-    throw new Error('The identity service account cannot access the configured Node, checkout, dependencies, resources or storage. Use a service-readable checkout/Node (for example under /opt), and explicitly migrate private storage; private ancestors such as /root were not opened.');
+  } catch (error) {
+    const detail = error.stderr?.toString().trim() || 'Unable to execute the configured Node.';
+    throw new Error(`The identity service account cannot access the configured runtime. ${detail} Explicitly migrate private storage if needed; /root was not opened.`);
   }
 }
 

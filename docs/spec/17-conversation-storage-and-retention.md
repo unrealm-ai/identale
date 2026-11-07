@@ -6,6 +6,8 @@
 
 内置 Runtime 的正文保存在运行库旁的 `builtin-records` JSONL 目录，SQL 保存可信记录引用与状态。新本地 PI Host 默认状态根为 `~/.identale/runtime-host-pi`，在状态、Session 与执行资源目录中保存原生记录、文件和产物。Skill 原件默认位于 `~/.identale/resources/skills`，由 `DENTITY_SKILL_RESOURCE_ROOT` 覆盖。本地不再探测旧 PI 状态或 `~/.identity/resources/skills`，使用自定义资源位置需显式配置。
 
+服务器默认 `/var/lib/identity` 为 root 所有的 `0711` 遍历容器，数据库父目录和正文根由 `identity` 持有并保持 `0700`。[JsonlJournal](../../packages/runtime-builtin/src/journal.ts)创建缺失目录时逐级同步发生变更的父目录，并在初始化 / 重试时同步记录根的直接父目录与 owner manifest，不再无条件打开、同步所有既存祖先目录。既存系统容器的持久化由安装器 / 管理员负责；日志启动不要求读取遍历容器。同步失败仍必须失败，不能跳过错误后宣称写入成功。
+
 ## 保留与摘要
 
 会话压缩摘要不等于删除原文。内置实现使用当前记录、摘要与归档文件，维护任务的状态和发布结果需要可靠记录。保留策略、近期原文尾部与触发设置以运行服务配置和 `packages/runtime-builtin` 的实际实现为准，不能推断所有外部 Runtime 已支持同一策略。

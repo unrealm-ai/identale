@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {mkdtempSync,rmSync,readFileSync,writeFileSync,appendFileSync,symlinkSync,statSync} from 'node:fs';
+import {mkdtempSync,rmSync,readFileSync,writeFileSync,appendFileSync,symlinkSync,statSync,existsSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {DatabaseSync} from 'node:sqlite';
@@ -15,3 +15,10 @@ test('missing referenced files and denied writes fail rather than produce empty 
 test('different processes serialize appends through the same real SQLite write lock',async t=>{const f=fixture(t);const moduleUrl=new URL('../dist/index.js',import.meta.url).href;const code=`import {DatabaseSync} from 'node:sqlite';import {JsonlJournal} from ${JSON.stringify(moduleUrl)};const db=new DatabaseSync(process.argv[1]);db.exec('PRAGMA busy_timeout=10000');const serialize=fn=>{db.exec('BEGIN IMMEDIATE');try{const x=fn();db.exec('COMMIT');return x;}catch(e){db.exec('ROLLBACK');throw e;}};const j=new JsonlJournal({root:process.argv[2],ownerId:'test-db',serialize});for(let n=0;n<15;n++)j.put(${JSON.stringify(scope)},'text',process.argv[3]+':'+n);db.close();`;await Promise.all(['a','b'].map(id=>new Promise((resolve,reject)=>{const child=spawn(process.execPath,['--input-type=module','-e',code,f.dbPath,f.options.root,id],{stdio:['ignore','ignore','pipe']});let error='';child.stderr.on('data',d=>error+=d);child.on('error',reject);child.on('exit',code=>code===0?resolve():reject(Error(error)));})));const lines=readFileSync(f.path,'utf8').trim().split('\n').map(JSON.parse);assert.equal(lines.length,30);assert.equal(new Set(lines.map(x=>x.id)).size,30);});
 test('retry after an injected pre-fsync failure reconfirms real file and directory durability',t=>{const f=fixture(t);for(const failedKind of ['file','directory']){let fail=true,armed=false;const observed=[];const journal=new JsonlJournal({...f.options,beforeSync:kind=>{observed.push(kind);if(armed&&fail&&kind===failedKind){fail=false;throw Error('injected before sync');}}});armed=true;assert.throws(()=>journal.put(scope,'text',`retry-${failedKind}`),/injected/);observed.length=0;const ref=journal.put(scope,'text',`retry-${failedKind}`);assert.ok(observed.includes('file'));assert.ok(observed.includes('directory'));assert.equal(journal.read(scope,ref),`retry-${failedKind}`);}});
 test('parseable owner manifest left by failed sync is synced on constructor retry',t=>{const f=fixture(t);const options={...f.options,root:join(f.dir,'fresh-owner')};let fail=true;assert.throws(()=>new JsonlJournal({...options,beforeSync:kind=>{if(fail&&kind==='file'){fail=false;throw Error('manifest sync failure');}}}),/manifest sync/);const observed=[];const journal=new JsonlJournal({...options,beforeSync:kind=>observed.push(kind)});assert.ok(observed.includes('file'));assert.ok(observed.includes('directory'));assert.equal(journal.location(scope).storage,'local');});
+test('nested directory creation fails before publication when parent sync fails and can be retried',t=>{
+  const f=fixture(t),parent=join(f.dir,'new-parent'),options={...f.options,root:join(parent,'nested/records')};
+  assert.throws(()=>new JsonlJournal({...options,beforeSync:kind=>{if(kind==='directory')throw Error('parent sync failure');}}),/parent sync failure/);
+  assert.equal(existsSync(parent),false);
+  const journal=new JsonlJournal(options),ref=journal.put(scope,'text','retry after parent sync');
+  assert.equal(new JsonlJournal(options).read(scope,ref),'retry after parent sync');
+});

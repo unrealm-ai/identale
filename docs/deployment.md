@@ -18,7 +18,7 @@
 
 本地 SIGHUP 与 SIGINT / SIGTERM 共用停止流程，覆盖端口预留、准备命令及运行服务，清理已登记进程组、控制 socket 和实例状态；SIGHUP 正常清理后退出码为 129。SIGKILL、原生崩溃和外层观察进程单独丢失仍依赖下次启动核验恢复，不承诺捕获不可处理的信号。
 
-本地 `--no-install` 与部署 `--skip-install` 都允许复用 PATH 中兼容的 Node/npm 或已存在的脚本管理版本；两者均缺少时直接报错，不下载 Node。本地参数也禁止项目依赖安装与原生包自动修复，构建仍由 `--no-build` 单独控制。
+本地 `--no-install` 与部署 `--skip-install` 都允许复用兼容 Node/npm 或已存在的脚本管理版本；服务器不会复用 `/root` 下的 Node，而会选择 `/opt/identity` 的受管版本。可用版本均缺少时直接报错，不下载 Node；部署的 `--skip-install` 还要求预装 `getfacl` / `setfacl`（Debian / Ubuntu 的 `acl` 包）。本地参数也禁止项目依赖安装与原生包自动修复，构建仍由 `--no-build` 单独控制。
 
 前端发布复制整个 `apps/web/dist/`，包含项目许可、NOTICE、实际打包依赖许可与校验清单。安装器在修改服务配置前及复制后检查通知与产物摘要；`--skip-build` 也不能跳过许可完整性检查，缺文件或锁文件 / 许可变化时需先重建。来源证据和 `vdirs` 未确认版权通知的限制见[前端分发许可](frontend-distribution-licenses.md)。
 
@@ -32,15 +32,32 @@
 
 上述配置语义参考 [systemd 官方执行环境文档](https://github.com/systemd/systemd/blob/main/man/systemd.exec.xml)和 [useradd 手册](https://man7.org/linux/man-pages/man8/useradd.8.html)；这是降权措施，不是完整多租户安全方案。不应直接用于不可信任务或公开多租户服务。
 
+## 在用户 home 中原目录部署
+
+用户可在 `/home/<用户>/identale` 下载代码，进入该目录后执行 `sudo bash scripts/start.sh --host IP_OR_DOMAIN`。即使 home 为 `0700`，安装器也会向 `identity` 添加必要的定向 ACL；代码不复制到 `/opt`，不递归更换源码属主。源码位于 `/root` 时仍会拒绝，不为该私有目录授权。
+
+[ACL 实现](../scripts/deploy/checkout-access.mjs)仅处理以下范围：
+
+- 代码目录及必要上级目录：home 上级只补遍历 `x`，代码根需要读和遍历；不会递归开放 home。`x` 允许访问已知路径，不等于 home 内其他文件完全不可读，原有文件权限仍生效。
+- 运行入口所在应用的 `dist/` 与 manifest、各包 `dist/` 与 manifest、已安装的 `node_modules/`，以及访问检查模块和 Node 程序：补充必要的读取和执行 / 遍历，不额外授予写权限。保留现有文件属主。
+- `.git`、`.env` / `.env.*`、`.ssh`、`.identale`、`.dentity` 与 `local-secrets.json` 不纳入额外授权；仓库源代码和 Web 源文件也不整树授权。这不撤销这些文件原本已有的可见性，不应将私人文件混放到获准的运行产物目录。
+- npm workspace 链接仅解析到已知工作区的 manifest / 运行产物；依赖内的链接不得指向其他目录。需要修改 ACL 的普通文件不能有外部硬链接；不沿任意链接递归改权。
+
+依赖安装 / 构建前先检查根路径、ACL 工具和旧存储范围，记录并授予基础访问；构建后重新枚举运行文件并授权。ACL mask 扩展时保持其他用户 / 组原先的有效权限，避免顺带开放被 mask 限制的授权。每个涉及的文件系统先用一次性文件验证具名 ACL 支持，失败会明确退出，不静默改为开放普通权限位。规则参考 [acl(5)](https://man7.org/linux/man-pages/man5/acl.5.html) 与 [setfacl(1)](https://man7.org/linux/man-pages/man1/setfacl.1.html)。
+
+每次变更前，原访问 ACL、目标 inode 与拟写入的 ACL 会写入 `/etc/identity/backups/<本次部署>/checkout-acl.jsonl`（`0600`），同步到磁盘后再应用。不修改默认继承 ACL。普通部署失败会逆序尝试恢复；目标被替换、ACL 被其他操作修改或异常断电时可能需要管理员按备份处理，不覆盖新文件 / 外部权限变更。成功部署的 ACL 会保留供服务运行；删除部署或收回访问前应先停服务，再由管理员核对备份。
+
+运行中的服务依赖原代码目录。更新代码后须重新执行部署命令，以验证新文件、原生依赖和 ACL；移动 / 删除目录或后续 `chmod` 改变 ACL mask 可能使服务不可用。私有存储与自定义外部资源不会因源码 ACL 授权而自动迁移或开放。
+
 ## 新安装和旧部署兼容
 
-- 将源码与 Node 放在普通服务账号可读取 / 执行的位置，例如 `/opt/identale` 和脚本管理的 `/opt/identity/`。如果 Node 来自 root 的 nvm 或源码位于 `/root`，部署会在停止旧服务前拒绝；先由管理员准备服务可用的路径，不要开放整个家目录。
+- 源码可以保留在 `/home/<用户>/identale` 等原下载目录，由上述定向 ACL 提供运行访问。源码位于 `/root` 仍拒绝；root 的 nvm Node 不会直接复用，缺少可用系统 Node 时按下载策略准备 `/opt/identity/` 下的 Node，不开放 `/root`。
 - 部署时停止既有应用服务，再调整明确的数据目录、会话 / 执行目录、Skill 存储及 SQLite 数据库与 sidecar 的归属。目录使用 0700，普通文件使用 0600，文件原有的属主执行位保留。数据库父目录中的无关文件不会递归改权；源码、Node、`/etc/identity`、备份和证书不交给服务账号。默认 `/var/lib/identity` 作为 root 所有的 0711 遍历目录，其下服务数据仍为私有目录。
 - 保留已有数据库、记录、PI 状态、自定义 Skill 路径及主密钥，不自动迁移数据或轮换密钥。新安装默认 Skill 路径为平台数据库目录下的 `skills/`。若旧部署隐式使用 root 家目录中的 Skill 存储，安装器保留该位置并拒绝自动改权，需先评审资源及其数据库路径的显式迁移，不能仅复制文件后切换为空目录。
 - 数据路径中的符号链接、硬链接和特殊文件，以及系统目录或与源码 / 私有配置重叠的存储范围，需要管理员单独处理。安装器拒绝这些路径，不沿链接递归修改权限。自定义数据路径的私有祖先目录不会被自动放宽；自定义 Host registry 应允许 `identity` 读取，其中的执行根需预先归属 `identity` 并保持私有，或处于该账号可创建目录的位置。
 - 正常模型调用、任务目录读写、脚本执行与网络请求仍按配置运行。系统软件安装、系统配置变更等提权操作默认失败，依赖由管理员预先准备。服务标准输出继续进入 systemd journal。
 
-改权前在 `/etc/identity/backups/` 本次备份中写入 `permissions.json`，记录原 UID / GID、权限和文件身份。部署失败时尝试恢复配置、前端链接、原权限和先前运行的服务；不回滚任务副作用，不删除启动后新生成的业务数据。文件被替换等情况可能需要按备份人工处理。失败后保留专用系统账号和备份，不自动删除账号或业务数据。
+存储改权前在 `/etc/identity/backups/` 本次备份中写入 `permissions.json`，记录原 UID / GID、权限和文件身份；源码访问 ACL 单独使用上述 `checkout-acl.jsonl`。部署失败时尝试恢复配置、前端链接、原权限 / ACL 和先前运行的服务；不回滚任务副作用，不删除启动后新生成的业务数据。文件被替换等情况可能需要按备份人工处理。失败后保留专用系统账号和备份，不自动删除账号或业务数据。
 
 ## 配置与数据位置
 

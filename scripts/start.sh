@@ -16,7 +16,8 @@ New local data and credentials default to ~/.identale; existing paths are preser
 Local startup and host deployment cannot share a running/building checkout.
 --host: deploy on Debian/Ubuntu with systemd and HTTPS through Nginx.
 Services and tasks run as the dedicated identity account; installation uses root.
-The checkout and Node must be readable/executable by identity (avoid /root).
+The checkout stays in place; targeted ACLs grant identity runtime access, including
+traversal through private /home directories. No grants are made under /root.
   --mock            Start the optional local rule model and Mock MCP (both modes)
   --port PORT       HTTPS port (default 15173; existing configuration is reused)
   --cert PATH       Existing certificate/full chain; requires --key PATH
@@ -83,14 +84,17 @@ start_server() {
   fi
 
   setup_missing=false
-  for setup_tool in curl openssl nginx tar gzip sha256sum getent useradd groupadd setpriv; do
-    if ! command -v "$setup_tool" >/dev/null 2>&1; then setup_missing=true; fi
+  for setup_tool in curl openssl nginx tar gzip sha256sum getent useradd groupadd setpriv getfacl setfacl; do
+    if ! command -v "$setup_tool" >/dev/null 2>&1; then
+      printf 'Missing required server tool: %s\n' "$setup_tool" >&2
+      setup_missing=true
+    fi
   done
   if $setup_missing; then
     if $setup_skip_install; then printf 'Required tools are missing; omit --skip-install.\n' >&2; exit 1; fi
     if ! command -v apt-get >/dev/null 2>&1; then printf 'Automatic package installation requires Debian/Ubuntu apt-get.\n' >&2; exit 1; fi
     apt-get update
-    DEBIAN_FRONTEND=noninteractive apt-get install -y ca-certificates curl openssl nginx tar gzip coreutils util-linux passwd libc-bin
+    DEBIAN_FRONTEND=noninteractive apt-get install -y ca-certificates curl openssl nginx tar gzip coreutils util-linux passwd libc-bin acl
   fi
 
   source "$start_root/scripts/shared/bootstrap-node.sh"

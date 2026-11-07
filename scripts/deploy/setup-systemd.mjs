@@ -21,6 +21,7 @@ import { dependenciesInstalled } from '../local/local-start.mjs';
 import { copyWebDistribution, validateWebDistribution } from './web-distribution.mjs';
 import { initializeSecrets, readSecrets, repositoryRoot } from '../shared/local-secrets.mjs';
 import { serviceIdentity, ensureServiceAccount, deploymentStorage, planServicePermissions, applyServicePermissions, restoreServicePermissions, assertServiceAccess, assertEffectiveServiceIdentity, assertServiceProcessIdentity } from './deployment-identity.mjs';
+import { planCheckoutAcls, applyCheckoutAcls, restoreCheckoutAcls, assertCheckoutAccess } from './checkout-access.mjs';
 
 const configRoot = '/etc/identity';
 const serviceNames = serviceCatalog.map(service => service.name);
@@ -311,19 +312,21 @@ async function setupOwned(args) {
     credentials = primaryCredentials([], stored);
   }
   console.log(`Preparing deployment for ${origin}`);
-  if (!await dependenciesInstalled(repositoryRoot)) {
-    if (options.skipInstall) throw new Error('Locked dependencies are missing; omit --skip-install.');
-    run('npm', ['ci', '--ignore-scripts', '--no-audit', '--no-fund']);
-  }
-  run(process.execPath, ['scripts/shared/local-native-preflight.mjs', ...(options.skipInstall ? ['--no-repair'] : [])]);
-  if (!options.skipBuild) run('npm', ['run', 'build']);
-  for (const entry of [...services.map(service => service.entry), 'apps/web/dist/index.html']) await fs.access(path.join(repositoryRoot, entry));
-  await validateWebDistribution(path.join(repositoryRoot, 'apps/web/dist'), repositoryRoot);
+  if (oldPlatform.DENTITY_DATABASE_PATH) console.log('Existing deployment detected: preserving configured storage and credentials; this is not a fresh install.');
   await assertStorageOwnership(platformDatabase, runtimeDatabase);
   const identity = ensureServiceAccount();
   const access = { root: repositoryRoot, entries: services.map(service => path.join(repositoryRoot, service.entry)) };
-  // Refuse an inaccessible checkout/Node before stopping any installed service.
-  assertServiceAccess(identity, { ...access, storage: { directories: [], trees: [], files: [] } });
+  const aclInput = { ...access, node: process.execPath };
+  // Validate private paths, tools and storage scopes before dependency installation/build.
+  const initialAcls = await planCheckoutAcls(identity, { ...aclInput, runtime: false });
+  const legacySkillRoot = hasData ? existingSkillRoot(platformDatabase, oldPlatform) : undefined;
+  const permissionOptions = { protectedPaths: [repositoryRoot, configRoot, path.dirname(process.execPath)] };
+  const storagePreview = deploymentStorage({ platformDatabase, runtimeDatabase,
+    records: path.resolve(oldRuntime.DENTITY_BUILTIN_RECORD_ROOT || path.join(path.dirname(runtimeDatabase), 'builtin-records')),
+    state: path.resolve(oldHost.DENTITY_RUNTIME_HOST_STATE_DIR || path.join(options.dataDir || '/var/lib/identity', 'runtime-host-pi')),
+    platform: { DENTITY_SKILL_RESOURCE_ROOT: path.resolve(oldPlatform.DENTITY_SKILL_RESOURCE_ROOT || legacySkillRoot || path.join(path.dirname(platformDatabase), 'skills')) } });
+  for (const file of [...storagePreview.directories, ...storagePreview.trees, ...storagePreview.files]) safePath(file);
+  await planServicePermissions(storagePreview, permissionOptions);
   await privateDirectory(configRoot);
   await privateDirectory(`${configRoot}/tls`);
   await privateDirectory(`${configRoot}/backups`);
@@ -340,10 +343,33 @@ async function setupOwned(args) {
   };
   const managed = [`${configRoot}/control-plane.env`, `${configRoot}/runtime.env`, `${configRoot}/runtime-host.env`, `${configRoot}/rule-model.env`, `${configRoot}/mock-mcp.env`, `${configRoot}/tls/server.crt`, `${configRoot}/tls/server.key`,
     '/etc/systemd/system/identity.target', ...serviceNames.flatMap(name => [`/etc/systemd/system/identity-${name}.service`, override(`identity-${name}.service`)]), '/etc/nginx/sites-available/identity', '/etc/nginx/sites-enabled/identity', '/srv/identity/web'];
-  let entries, permissions, applied = false;
+  let entries, permissions, aclJournal, applied = false;
+  const aclChanges = [];
   const mockBefore = mockAutostartState();
   const activeBefore = units.filter(unit => {try {return run('systemctl', ['is-active', '--quiet', unit], {capture:true}) === '';} catch {return false;}});
   try {
+    await fs.mkdir(backup, { mode: 0o700 });
+    aclJournal = await fs.open(path.join(backup, 'checkout-acl.jsonl'), 'wx', 0o600);
+    await aclJournal.sync();
+    // Make the journal's name and newly created backup hierarchy durable before
+    // granting access. These are root-owned deployment paths, not user ancestors.
+    for (const directory of [backup, path.dirname(backup), configRoot, path.dirname(configRoot)]) {
+      const handle = await fs.open(directory, 'r'); try { await handle.sync(); } finally { await handle.close(); }
+    }
+    console.log(`Checkout ACL backup: ${backup}/checkout-acl.jsonl`);
+    await applyCheckoutAcls(initialAcls, aclChanges, aclJournal);
+    assertCheckoutAccess(identity, aclInput);
+    if (!await dependenciesInstalled(repositoryRoot)) {
+      if (options.skipInstall) throw new Error('Locked dependencies are missing; omit --skip-install.');
+      run('npm', ['ci', '--ignore-scripts', '--no-audit', '--no-fund']);
+    }
+    run(process.execPath, ['scripts/shared/local-native-preflight.mjs', ...(options.skipInstall ? ['--no-repair'] : [])]);
+    if (!options.skipBuild) run('npm', ['run', 'build']);
+    for (const entry of [...services.map(service => service.entry), 'apps/web/dist/index.html']) await fs.access(path.join(repositoryRoot, entry));
+    await validateWebDistribution(path.join(repositoryRoot, 'apps/web/dist'), repositoryRoot);
+    await applyCheckoutAcls(await planCheckoutAcls(identity, aclInput), aclChanges, aclJournal);
+    // Exercise real dependency/native imports after grants, before stopping installed services.
+    assertServiceAccess(identity, { ...access, storage: { directories: [], trees: [], files: [] } });
     const certificate = await prepareCertificate(options, host, stage);
     const nginx = renderNginx(await template('nginx.conf.template'), host, port);
     await fs.writeFile(`${stage}/nginx-site.conf`, nginx.replaceAll('/etc/identity/tls/server.', `${stage}/server.`));
@@ -360,11 +386,10 @@ async function setupOwned(args) {
     }
     // Preserve an old implicit Skill path rather than silently switching to an empty store.
     const configuration = deploymentConfiguration({platform:oldPlatform, runtime:oldRuntime, host:oldHost, credentials, origin,
-      ...(options.dataDir ? {dataDir:options.dataDir} : {}), ...(hasData ? {legacySkillRoot:existingSkillRoot(platformDatabase, oldPlatform)} : {})});
+      ...(options.dataDir ? {dataDir:options.dataDir} : {}), ...(legacySkillRoot ? {legacySkillRoot} : {})});
     for (const value of [configuration.platformDatabase, configuration.runtimeDatabase, configuration.records, configuration.state]) safePath(value);
     safePath(configuration.platform.DENTITY_SKILL_RESOURCE_ROOT);
     const storage = deploymentStorage(configuration);
-    const permissionOptions = { protectedPaths: [repositoryRoot, configRoot, path.dirname(process.execPath)] };
     // Validate scopes/links before stopping. Collect authoritative metadata again after stopping.
     await planServicePermissions(storage, permissionOptions);
     const files = new Map([
@@ -390,7 +415,7 @@ async function setupOwned(args) {
       }
     }
     run('systemd-analyze', ['verify', ...stagedUnits]);
-    await fs.mkdir(backup, {mode:0o700}); entries = await snapshot(managed, backup);
+    entries = await snapshot(managed, backup);
     await fs.mkdir(release, {recursive:true, mode:0o755});
     await copyWebDistribution(path.join(repositoryRoot, 'apps/web/dist'), release, repositoryRoot);
     for (const directory of ['/srv/identity', '/srv/identity/releases', path.dirname(release)]) await fs.chmod(directory, 0o755);
@@ -446,13 +471,17 @@ async function setupOwned(args) {
         try { configureMockAutostart(false); } catch { /* Restore configuration even if optional-link cleanup fails. */ }
         await restore(entries);
         if (permissions) await restoreServicePermissions(permissions);
+        await restoreCheckoutAcls(aclChanges);
         restoreMockAutostart(mockBefore); run('systemctl', ['daemon-reload']);
         const apps = activeBefore.filter(unit => unit !== 'nginx.service'); if (apps.length) run('systemctl', ['start', ...apps]);
         if (activeBefore.includes('nginx.service')) {run('nginx', ['-t']); run('systemctl', ['reload-or-restart', 'nginx.service']);} else run('systemctl', ['stop', 'nginx.service']);
         console.error(`Previous configuration restored; backup retained at ${backup}.`);
-      } catch {console.error(`Automatic configuration restore needs attention. Backup: ${backup}`);}
+      } catch (restoreError) {console.error(`Automatic configuration restore needs attention: ${restoreError.message}. Backup: ${backup}`);}
+    } else {
+      try { await restoreCheckoutAcls(aclChanges); }
+      catch (restoreError) { console.error(`Checkout ACL restore needs attention: ${restoreError.message}. Backup: ${backup}`); }
     }
     throw error;
-  } finally {await fs.rm(stage, {recursive:true, force:true});}
+  } finally {await aclJournal?.close(); await fs.rm(stage, {recursive:true, force:true});}
 }
 if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href) setup().catch(error => {console.error(error.message); process.exitCode = 1;});

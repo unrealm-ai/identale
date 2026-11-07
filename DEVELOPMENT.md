@@ -22,7 +22,7 @@ Debian / Ubuntu、systemd 环境的服务器入口为：
 sudo bash scripts/start.sh --host IP_OR_DOMAIN
 ```
 
-该分支按需安装系统工具、Node 和项目依赖，构建并配置 systemd、Nginx 与 HTTPS。安装使用 root，应用服务与任务使用禁止登录的 `identity` 普通账号；源码和 Node 需允许该账号读取 / 执行，避免放在 `/root`。参数、旧数据兼容及验证边界见[部署说明](docs/deployment.md)。
+该分支按需安装系统工具（含 `acl`）、Node 和项目依赖，构建并配置 systemd、Nginx 与 HTTPS。安装使用 root，应用服务与任务使用禁止登录的 `identity` 普通账号。代码留在原目录，安装器通过定向 ACL 授权运行文件及必要上级目录的遍历，支持 `/home/<用户>/identale` 与私有 home，不递归开放 home 或更换代码属主。源码仍需放在 `/root` 之外；root 的 nvm Node 会改用受管版本。文件系统需支持 ACL，更新后重新部署以检查新增文件；旧数据和密钥仍按原配置保留。参数、ACL 备份 / 回退和验证边界见[部署说明](docs/deployment.md)。
 
 已有兼容 Node 和 npm 时，可分步执行；`npm run local:start` 与统一入口共用本地启动实现，新安装自动创建缺失的私有凭据，已有数据缺少原凭据时拒绝启动：
 
