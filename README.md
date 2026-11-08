@@ -40,7 +40,8 @@
 ## 典型使用场景
 
 - **个人与团队 AI 数字员工工作台**：在 Web 端集中管理多个不同职责的数字员工（如代码助手、文档整理员、运营分析员），共享工作区模型配置，按能力包精细分配 Skill 与 MCP 资源。
-- **企业 IM 群聊与私聊协同**：接入飞书（WebSocket）、钉钉（Stream）或企业微信（智能机器人），团队成员在群话题或私聊中委派工作，员工在后台执行完成后自动将结果回告至原会话（各渠道能力边界详见 [渠道能力与扩展](docs/spec/26-channel-capabilities.md)）。
+- **企业 IM 群聊与私聊协同**。接入飞书（WebSocket）、钉钉（Stream）或企业微信（智能机器人），团队成员在获准的会话中委派工作，员工在后台执行后将结果回告至原会话。[渠道配置与能力](docs/spec/26-channel-capabilities.md)
+- **按权限读取飞书群消息**。飞书支持保留近期群消息作为上下文，也支持按授权从飞书补读历史。钉钉和企微的当前机器人接入暂不支持群历史补读。[授权群历史与实时群上下文](docs/spec/26-channel-capabilities.md#授权群历史与实时群上下文)
 - **人机协同长链路任务**：任务执行中遇到高风险操作或缺失业务信息时，自动发起人工确认请求；相关人员确认或补充信息后无缝继续同一任务。
 - **事件驱动与定时作业**：通过 Webhook 或定时触发器，以明确的业务绑定身份自动触发数字员工执行巡检、汇总或处理流程。
 
@@ -201,8 +202,8 @@ flowchart TB
 - [服务器部署说明 (docs/deployment.md)](docs/deployment.md)：Debian / Ubuntu `systemd` + Nginx HTTPS 部署与服务账号说明
 - [安全说明 (SECURITY.md)](SECURITY.md)：执行权限边界、敏感数据保护与漏洞私下报告方式
 
-### 架构设计与模块规格
-- [公开规格索引 (docs/spec/README.md)](docs/spec/README.md)
+### 使用指南与公开规格
+- [使用与配置指南](docs/spec/README.md)
   - [01：架构与模块边界](docs/spec/01-architecture-and-boundaries.md)
   - [02：任务、事件、人工继续与结果投递](docs/spec/02-tasks-events-and-delivery.md)
   - [03：数字员工、角色与配置](docs/spec/03-agents-and-profiles.md)
@@ -210,7 +211,7 @@ flowchart TB
   - [05：Runtime 与执行契约](docs/spec/05-runtime-and-provisioning.md)
   - [06：渠道、权限与安全](docs/spec/06-channels-storage-and-security.md)
   - [17：存储、保留与恢复](docs/spec/17-conversation-storage-and-retention.md)
-  - [26：渠道能力与 Adapter 扩展](docs/spec/26-channel-capabilities.md)
+  - [26 渠道配置与能力](docs/spec/26-channel-capabilities.md)
 
 ### 参与贡献与状态参考
 - [参与贡献指南 (CONTRIBUTING.md)](CONTRIBUTING.md)：Issue 反馈、方案对齐约定与 PR 规范
