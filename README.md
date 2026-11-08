@@ -203,8 +203,8 @@ flowchart TB
 - [服务器部署说明 (docs/deployment.md)](docs/deployment.md)：Debian / Ubuntu `systemd` + Nginx HTTPS 部署与服务账号说明
 - [安全说明 (SECURITY.md)](SECURITY.md)：执行权限边界、敏感数据保护与漏洞私下报告方式
 
-### 架构设计与模块规格
-- [公开规格索引 (docs/spec/README.md)](docs/spec/README.md)
+### 使用指南与公开规格
+- [使用与配置指南 (docs/spec/README.md)](docs/spec/README.md)
   - [01：架构与模块边界](docs/spec/01-architecture-and-boundaries.md)
   - [02：任务、事件、人工继续与结果投递](docs/spec/02-tasks-events-and-delivery.md)
   - [03：数字员工、角色与配置](docs/spec/03-agents-and-profiles.md)
@@ -212,7 +212,7 @@ flowchart TB
   - [05：Runtime 与执行契约](docs/spec/05-runtime-and-provisioning.md)
   - [06：渠道、权限与安全](docs/spec/06-channels-storage-and-security.md)
   - [17：存储、保留与恢复](docs/spec/17-conversation-storage-and-retention.md)
-  - [26：渠道能力与 Adapter 扩展](docs/spec/26-channel-capabilities.md)
+  - [26 渠道配置与能力](docs/spec/26-channel-capabilities.md)
   - [27 读取会议资料与云文档](docs/spec/27-business-resource-reads.md)
 
 ### 参与贡献与状态参考
