@@ -78,10 +78,12 @@ test('confirmation explicitly presents group permission without claiming nobody 
  await mount(t,'summary',{members:[],directoryAccess:{allow:[],deny:[],allowGroupMembers:true}});assert.ok(text().includes('允许群成员在群内使用'));assert.ok(!text().includes('未允许渠道使用者'));
 });
 test('keywords remain an editable draft with honest missing grant; save/cancel and failure preserve input',async t=>{
- let current=connection({context:{historyEnabled:false,groupListenEnabled:false,groupTriggerKeywords:[],meetingRefs:[]}}),fail=true;const dirty=[];
- const env=await mount(t,'settings',{base,canManage:true,onDirtyChanged:v=>dirty.push(v)},async r=>{if(r.method==='GET')return[current];if(fail)return{status:409,data:{error:'channel_configuration_changed'}};current={...current,revision:current.revision+1,context:{...current.context,...r.body}};return current;});
+ const granted={supported:true,availability:'available'},required={supported:true,availability:'authorization_required'};
+ const capabilities={privateMessages:granted,groupMentions:granted,ordinaryGroupMessages:required,keywordTriggers:required,recentGroupContext:required,directoryRead:granted,meetingRead:required,documentRead:required};
+ let current=connection({capabilities,groupListeningStatus:{enabled:false,permission:'unverified',cachedMessages:0},context:{historyEnabled:false,groupListenEnabled:false,groupTriggerKeywords:[],meetingRefs:[]}}),fail=true;const dirty=[];
+ const env=await mount(t,'settings',{base,canManage:true,onDirtyChanged:v=>dirty.push(v)},async r=>{if(r.url==='/api/business-resources/configuration')return{configured:false};if(r.method==='GET')return[current];if(fail)return{status:409,data:{error:'channel_configuration_changed'}};current={...current,revision:current.revision+1,context:{...current.context,...r.body}};return current;});
  assert.ok(text().includes('普通群消息接收权限尚未验证'));
- const field=document.querySelector('textarea[aria-label="群聊触发关键词"]');assert.ok(field);field.value='  HELP  \n 需求';field.dispatchEvent(new InputEvent('input',{bubbles:true}));await flush();assert.equal(dirty.at(-1),true);
+ const field=document.querySelector('textarea[aria-label="群聊触发关键词"]');assert.ok(field);assert.equal(field.disabled,false);assert.equal(current.capabilities.keywordTriggers.availability,'authorization_required');field.value='  HELP  \n 需求';field.dispatchEvent(new InputEvent('input',{bubbles:true}));await flush();assert.equal(dirty.at(-1),true);
  await click('保存');await until(()=>text().includes('channel_configuration_changed'));assert.equal(field.value,'  HELP  \n 需求');assert.equal(dirty.at(-1),true);
  fail=false;await click('保存');await until(()=>text().includes('已保存。'));assert.deepEqual(env.requests.find(r=>r.method==='PUT').body,{enabled:true,expectedRevision:1,groupListenEnabled:false,groupTriggerKeywords:['HELP','需求']});assert.equal(dirty.at(-1),false);
  field.value='unsaved';field.dispatchEvent(new InputEvent('input',{bubbles:true}));await flush();await click('取消');assert.equal(field.value,'HELP\n需求');assert.equal(dirty.at(-1),false);

@@ -1,4 +1,4 @@
-import { DirectoryError, type DirectoryAuthorizedScope, type DirectoryIdentity, type DirectoryPort, type DirectoryProvider } from '@dentity/application';
+import { DirectoryError, type DirectoryAuthorizedScope, type DirectoryIdentity, type DirectoryPort, type DirectoryProvider, type DirectoryPage } from '@dentity/application';
 import { DirectoryRequestError, directoryNameIsVerified,type DirectoryFieldDiagnostic } from '../adapters/directory/http.js';
 
 export type ChannelCheckId = 'scope_inventory' | 'credentials' | 'bot_identity' | 'directory_identity' | 'directory_scope' | 'department_read' | 'user_name' | 'group_history' | 'meeting_materials';
@@ -61,19 +61,45 @@ export async function validateDirectory(directory: DirectoryPort, provider: Dire
     throw new ChannelValidationError(validationReport(provider, checks, now));
   }
   if (!scope.entireOrganization && !scope.departmentIds.length && !scope.userIds.length) stop('directory_scope', scope.disclosed?'scope_not_disclosed':'empty_scope');
-  const departments = [...scope.departmentIds];
+  const departments = [...new Set(scope.departmentIds)];
   if (!departments.length && scope.entireOrganization) departments.push(provider === 'feishu' ? '0' : '1');
   if (departments.length) await validationStep(provider, checks, 'department_read', () => directory.getDepartment(departments[0]!), now);
   else checks[checks.findIndex(c => c.id === 'department_read')] = { id: 'department_read', required: false, supported: true, status: 'unverified', reason: 'no_sample' };
   await validationStep(provider, checks, 'user_name', async () => {
+    // A bounded sample search is not a full synchronization. Only scope roots and
+    // descendants returned by the provider are visited; no root or user is guessed.
+    let remainingReads = 32;
+    async function* pages<T>(read: (cursor?: string) => Promise<DirectoryPage<T>>): AsyncGenerator<readonly T[]> {
+      let cursor: string | undefined;
+      const cursors = new Set<string>();
+      for (;;) {
+        if (remainingReads-- <= 0) throw new DirectoryError('limit_exceeded');
+        const page = await read(cursor);
+        if (typeof page.exhausted !== 'boolean' || !Array.isArray(page.items)) throw new DirectoryError('invalid_response');
+        yield page.items;
+        if (page.exhausted) return;
+        if (!page.nextCursor || cursors.has(page.nextCursor)) throw new DirectoryError('invalid_response');
+        cursors.add(page.nextCursor); cursor = page.nextCursor;
+      }
+    }
     let person = scope.userIds[0] ? await directory.getUser(scope.userIds[0]) : undefined;
-    const seen = new Set<string>();
-    for (let index = 0; !person && index < departments.length && seen.size < 3; index++) {
-      const id = departments[index]!; if (seen.has(id)) continue; seen.add(id);
-      const page = await directory.listDepartmentMembers(id); person = page.items[0];
-      if (!person && seen.size < 3) {
-        const children = await directory.listChildDepartments(id);
-        departments.push(...children.items.map(d => d.id).filter(v => !seen.has(v)).slice(0, 3 - seen.size));
+    if (!person && departments.length > 1000) throw new DirectoryError('limit_exceeded');
+    const queued = new Set(departments);
+    for (let index = 0; !person && index < departments.length; index++) {
+      const id = departments[index]!;
+      for await (const members of pages(cursor => directory.listDepartmentMembers(id, cursor))) {
+        person = members[0];
+        if (person) break;
+      }
+      if (person) break;
+      for await (const children of pages(cursor => directory.listChildDepartments(id, cursor))) {
+        for (const child of children) {
+          if (queued.has(child.id)) continue;
+          // Bound discovered work as well as network reads. Do not report an
+          // empty directory when unexplored authorized departments remain.
+          if (queued.size >= 1000) throw new DirectoryError('limit_exceeded');
+          queued.add(child.id); departments.push(child.id);
+        }
       }
     }
     if (!person) throw new DirectoryRequestError('invalid_response', { reason: 'no_sample' });

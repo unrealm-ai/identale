@@ -17,6 +17,9 @@ export interface RuntimeServerOptions extends Partial<ControlPlaneConfig>{
  platformConfig:{url:string;token:string;pollMs?:number;maxAgeMs?:number};serviceToken:string;transport?:typeof fetch;
 }
 const userRoutes=/^\/api\/workspaces\/[^/]+\/(?:recent-conversations(?:\/|$)|chat-employees(?:\/|$)|task-management(?:\/|$)|entities\/[^/]+\/(?:conversations|tasks|todos)(?:\/|$)|entities\/[^/]+\/channels\/[^/]+\/message-status(?:\?|$)|entities\/[^/]+\/triggers\/[^/]+\/events(?:\?|$))/;
+// OAuth state, code and tokens remain runtime-owned. This is an authenticated
+// browser relay, not a public or generic provider proxy.
+const businessUserRoutes=/^\/api\/business-resources\/(?:configuration|materials|feishu\/(?:authorize|callback))$/;
 function base(options:Partial<ControlPlaneConfig>,path:string):ControlPlaneConfig{return {...options,databasePath:options.databasePath??path,origin:options.origin??'http://127.0.0.1:15173',secureCookies:options.secureCookies??false,sessionTtlMs:options.sessionTtlMs??28800000,now:options.now??Date.now};}
 function alive(server:FastifyInstance,service:ServiceName,ready:()=>boolean,executionAvailable=false){
  server.get('/healthz',{schema:{response:{200:healthResponseSchema}}},():HealthResponse=>({protocolVersion:PROTOCOL_VERSION,service,status:'alive',executionAvailable}));
@@ -75,7 +78,7 @@ export function createPlatformServer(options:PlatformServerOptions){
    });
   });
   app.setNotFoundHandler(async(request,reply)=>{
-   if(!userRoutes.test(request.url.split('?')[0]!))return reply.code(404).send({error:'not_found'});
+   if(!userRoutes.test(request.url.split('?')[0]!)&&!businessUserRoutes.test(request.url.split('?')[0]!))return reply.code(404).send({error:'not_found'});
    try{const response=await relay(request);const opening=request.method==='POST'&&/^\/api\/workspaces\/([^/]+)\/entities\/([^/]+)\/conversations$/.exec(request.url.split('?')[0]!);if(opening&&[403,404,503].includes(response.status)){const error=await response.clone().json().catch(()=>({})) as{error?:string};if(['entity_not_found','workspace_forbidden','workspace_not_found','identity_configuration_not_applied'].includes(error.error??'')){c.entities.requireReader(c.auth(request).id,decodeURIComponent(opening[1]!),decodeURIComponent(opening[2]!));return reply.code(503).header('retry-after','1').send({error:'employee_configuration_pending'});}}reply.code(response.status);const ct=response.headers.get('content-type');if(ct)reply.header('content-type',ct);return reply.send(Buffer.from(await response.arrayBuffer()));}
    catch(error){if(error instanceof TaskError||error instanceof AccountError)throw error;return reply.code(503).send({error:'runtime_service_unavailable'});}
   });

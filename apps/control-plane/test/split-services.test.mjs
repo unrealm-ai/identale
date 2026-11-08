@@ -20,6 +20,16 @@ async function fixture(t,{offline=false,runtimeOptions={},platformOptions={}}={}
  async function register(name){const result=await call('POST','/api/auth/register',{username:name,password:'Synthetic isolated QA password!'});assert.equal(result.statusCode,201,result.body);return{...result.json(),cookie:result.headers['set-cookie'].split(';')[0]};}
  return{p,get r(){return r;},call,poll,root,register,setDown(v){platformDown=v;},async restart(){await r.close();r=createRuntimeServer(runtimeConfig);await r.ready();}};
 }
+test('business OAuth configuration and material routes use the authenticated runtime relay only',async t=>{
+ const f=await fixture(t),owner=await f.register('business-resource-split-owner');await f.poll();
+ let response=await f.call('GET','/api/business-resources/configuration',undefined,owner.cookie);
+ assert.equal(response.statusCode,200,response.body);assert.equal(response.json().configured,false);
+ assert.equal((await f.call('GET','/api/business-resources/configuration')).statusCode,401);
+ response=await f.call('GET','/api/business-resources/materials?taskId=missing',undefined,owner.cookie);
+ assert.equal(response.statusCode,404,response.body);assert.equal(response.json().error,'task_not_found');
+ assert.equal((await f.call('GET','/api/business-resources/configuration/other',undefined,owner.cookie)).statusCode,404);
+ assert.equal((await f.r.inject({url:'/api/business-resources/configuration',headers:{'x-dentity-actor':owner.user.id}})).statusCode,401);
+});
 test('new workspace work item defaults synchronize to runtime and retain requested versus applied state',async t=>{
  const f=await fixture(t),owner=await f.register('default-items-split-owner');
  const settings='/api/workspaces/'+owner.workspace.id+'/work-items/settings';

@@ -24,3 +24,12 @@ test('trusted ordinary, work and acceptance roles narrow tool schemas and explai
  for(const result of[undefined,null,{item:null},{taskRole:'reviewer'},{outcome:'unknown'}, {status:403,error:'denied'}])assert.throws(()=>workItemTaskRole(result),/role_unavailable/);
  for(const role of['ordinary','work','acceptance'])assert.equal(workItemTaskRole({taskRole:role}),role);
 });
+
+test('handoff exposes separate pinned source material refs and minimum-necessary autonomous selection guidance',()=>{
+ for(const role of ['ordinary','work','acceptance']){
+  const runtime=workItemRuntime(role,async()=>({})),tool=runtime.tools.find(t=>t.name==='work_item_handoff'),schema=tool.parameters.properties.materialRefs;
+  assert.equal(schema.maxItems,32);assert.equal(schema.items.additionalProperties,false);assert.deepEqual(schema.items.required,['kind','assetId','readKind','version']);assert.deepEqual(schema.items.properties.kind.enum,['source_asset']);assert.equal(tool.parameters.additionalProperties,false);assert.ok(tool.parameters.properties.artifactRefs);
+  const discovery=runtime.tools.find(t=>t.name==='work_item_list_handoff_employees');assert.match(discovery.description,/necessary/);assert.match(discovery.description,/asset_read/);assert.match(discovery.description,/does not automatically select/);assert.match(discovery.description,/does not require a human/);assert.match(tool.description,/omission shares no files/);assert.match(tool.description,/self-contained/);
+  const current=runtime.tools.find(t=>t.name==='work_item_get_current');if(current){assert.doesNotMatch(current.description,/Earlier business handoffs are paged/);assert.match(current.description,/event history.*not included/);}
+ }
+});

@@ -5,7 +5,7 @@ const digest=(value:unknown)=>createHash('sha256').update(JSON.stringify(value))
 const canonical=(value:unknown)=>JSON.stringify(value,(_key,item)=>item&&typeof item==='object'&&!Array.isArray(item)?Object.fromEntries(Object.entries(item).sort(([a],[b])=>a.localeCompare(b))):item);
 /** Selection is output metadata; external dispatch happens only through the durable channel outbox. */
 export class TaskArtifacts{
- constructor(private readonly store:Store,private readonly tasks:TaskService,private readonly runtime:TaskArtifactReadPort){
+ constructor(private readonly store:Store,private readonly tasks:TaskService,private readonly runtime:TaskArtifactReadPort,private readonly assertOutput?: (run:{workspaceId:string;entityId:string;taskId:string;runId:string},target:{provider:'feishu'|'dingtalk'|'wecom';connectionId:string;tenantId:string;chatId:string;threadId?:string})=>Promise<void>){
   store.db.exec('CREATE TABLE IF NOT EXISTS task_artifact_delivery_grants(delivery_id TEXT PRIMARY KEY,scope_hash TEXT NOT NULL,target_hash TEXT NOT NULL,parent_json TEXT NOT NULL);');
   store.db.exec('CREATE TABLE IF NOT EXISTS task_artifact_selection_inputs(operation_id TEXT NOT NULL,turn_id TEXT NOT NULL,PRIMARY KEY(operation_id,turn_id))');
   store.db.exec('CREATE TABLE IF NOT EXISTS task_artifact_selections(operation_id TEXT PRIMARY KEY,conversation_id TEXT NOT NULL,turn_id TEXT NOT NULL,task_id TEXT NOT NULL,run_id TEXT NOT NULL,ids_json TEXT NOT NULL)');
@@ -21,17 +21,26 @@ export class TaskArtifacts{
  deliveryViews(taskId:string){return this.store.all<{id:string;status:string;error:string|null;created_at:number}>("SELECT d.id,d.status,d.error,d.created_at FROM channel_deliveries d JOIN task_artifact_delivery_grants g ON g.delivery_id=d.id WHERE json_extract(d.target_json,'$.artifact.taskId')=? ORDER BY d.created_at,d.id",taskId).map(r=>({id:r.id,status:r.status,error:r.error,createdAt:r.created_at}));}
  selected(conversationId:string,turnId:string){return this.store.all<{selection_turn_id:string;task_id:string;run_id:string;ids_json:string}>('SELECT turn_id selection_turn_id,task_id,run_id,ids_json FROM task_artifact_selections s WHERE conversation_id=? AND (turn_id=? OR EXISTS(SELECT 1 FROM task_artifact_selection_inputs i WHERE i.operation_id=s.operation_id AND i.turn_id=?)) ORDER BY operation_id',conversationId,turnId,turnId).flatMap(row=>{const ids=JSON.parse(row.ids_json)as string[];return this.runtime.artifacts(row.run_id).filter(a=>ids.includes(a.content.resourceId)).map(artifact=>({selectionTurnId:row.selection_turn_id,taskId:row.task_id,runId:row.run_id,artifact}));});}
  enqueue(outbox:MessageLoopRepository,base:ChannelDeliveryRow,conversationId:string,turnId:string,at:number){
-  const target=JSON.parse(base.targetJson);if(target.conversation?.provider!=='feishu')return;
+  const target=JSON.parse(base.targetJson);if(!['feishu','dingtalk','wecom'].includes(target.conversation?.provider))return;
   for(const selected of this.selected(conversationId,turnId)){const id='artifact-delivery:'+digest(canonical([conversationId,selected.selectionTurnId,selected.taskId,selected.runId,selected.artifact.content,target.conversation,target.threadId??null])),targetJson=JSON.stringify({...target,artifact:{taskId:selected.taskId,runId:selected.runId,ref:selected.artifact.content}});this.store.transaction(()=>{this.store.run('INSERT OR IGNORE INTO task_artifact_delivery_grants VALUES(?,?,?,?)',id,digest(base.scopeJson),digest(targetJson),JSON.stringify(base));outbox.enqueueDelivery({...base,id,text:'',taskDeliveryId:null,targetJson},at);});}
 
  }
  parentDelivery(row:ChannelDeliveryRow):ChannelDeliveryRow|undefined{const target=JSON.parse(row.targetJson);if(!target.artifact)return;const grant=this.store.one<{scope_hash:string;target_hash:string;parent_json:string}>('SELECT * FROM task_artifact_delivery_grants WHERE delivery_id=?',row.id);if(!grant||grant.scope_hash!==digest(row.scopeJson)||grant.target_hash!==digest(row.targetJson))throw new TaskError(403,'artifact_delivery_not_granted');return JSON.parse(grant.parent_json)as ChannelDeliveryRow;}
+ async assertBusinessOutput(row:ChannelDeliveryRow){
+  const target=JSON.parse(row.targetJson);if(!target.artifact)return;
+  this.parentDelivery(row); // Verify immutable granted target/source before reading any run metadata.
+  const task=this.store.one<TaskRow>('SELECT * FROM tasks WHERE id=?',target.artifact.taskId);
+  if(!task||task.run_id!==target.artifact.runId)throw new TaskError(403,'artifact_delivery_changed');
+  const conversation=target.conversation;
+  await this.assertOutput?.({workspaceId:task.workspace_id,entityId:task.entity_id,taskId:task.id,runId:task.run_id!},{provider:conversation.provider,connectionId:conversation.connectionId,tenantId:conversation.tenantId,chatId:conversation.externalId,...(target.threadId?{threadId:target.threadId}:{})});
+ }
  async readDelivery(row:ChannelDeliveryRow){
   const grant=this.store.one<{scope_hash:string;target_hash:string}>('SELECT * FROM task_artifact_delivery_grants WHERE delivery_id=?',row.id);if(!grant||grant.scope_hash!==digest(row.scopeJson)||grant.target_hash!==digest(row.targetJson))throw new TaskError(403,'artifact_delivery_not_granted');
   const target:unknown=JSON.parse(row.targetJson);if(!target||typeof target!=='object'||!('artifact'in target))throw new TaskError(403,'artifact_delivery_invalid');const value=target.artifact as {taskId?:unknown;runId?:unknown;ref?:{resourceId?:unknown;version?:unknown}};
   if(typeof value.taskId!=='string'||typeof value.runId!=='string'||typeof value.ref?.resourceId!=='string'||typeof value.ref.version!=='string')throw new TaskError(403,'artifact_delivery_invalid');
   const original=this.store.one<TaskRow>('SELECT * FROM tasks WHERE id=?',value.taskId);if(!original)throw new TaskError(404,'task_not_found');
   const task=await this.tasks.refreshTaskContext(this.tasks.contextOfTask(original),value.taskId);if(task.run_id!==value.runId||!this.runtime.artifacts(value.runId).some(a=>a.content.resourceId===value.ref!.resourceId&&a.content.version===value.ref!.version))throw new TaskError(403,'artifact_delivery_changed');
+  await this.assertBusinessOutput(row);
   return this.runtime.artifactContent(value.runId,value.ref.resourceId);
  }
 }

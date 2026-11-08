@@ -1,5 +1,5 @@
 /** Ordered content is untrusted presentation data. Authentication lives in the event envelope. */
-export interface SharedMessageAsset {kind:'image'|'file'|'meeting';resourceKey?:string;name?:string;meetingNumber?:string;startAt?:string;endAt?:string;assetId?:string}
+export interface SharedMessageAsset {kind:'image'|'file'|'meeting';resourceKey?:string;name?:string;meetingNumber?:string;startAt?:string;endAt?:string;assetId?:string;businessResource?:{kind:'document'|'minutes'|'meeting';externalId:string}}
 export type MessageContentNode =
  | {type:'text';text:string;styles:readonly string[]}
  | {type:'markdown';text:string}

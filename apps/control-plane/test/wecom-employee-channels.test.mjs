@@ -57,6 +57,42 @@ test('WeCom unbinding one employee leaves shared credentials and other employee 
 
 test('WeCom secret rotation only affects that robot and clears obsolete enterprise assertion',async t=>{const f=await setup(t),{c,d}=await ready(f),second=await ready(f,'e2','bot-b',d);const next=await f.service.save('w','e','wecom','u',{appId:c.appId,appSecret:'rotated-bot-secret',expectedRevision:c.revision});assert.equal(next.directoryBinding,undefined);assert.equal(next.status,'pending_verification');assert.notEqual(next.sourceId,c.sourceId);assert.ok(f.service.currentBindingVersion(second.c.id));});
 
+test('WeCom stored credential revalidation preserves directory association and rules while fencing the old live identity',async t=>{
+ const f=await setup(t),{c,d}=await ready(f),second=await ready(f,'e2','bot-b',d);
+ f.capabilities.saveDirectoryAccess('w','e',{allow:[rule(c)],deny:[]});
+ const oldBinding=f.service.currentBindingVersion(c.id),otherBinding=f.service.currentBindingVersion(second.c.id),sharedBefore=f.service.listDirectoryCredentials('w','e')[0],sourceBefore=f.service.directorySource(c.id),callsBefore=f.state.calls.length;
+ const next=await f.service.revalidate('w','e','wecom','u',c.revision);
+ assert.equal(next.sourceId,c.sourceId);assert.deepEqual(next.directoryBinding,c.directoryBinding);
+ assert.equal(next.directoryStatus,'available');assert.equal(next.tenantId,c.tenantId);
+ assert.equal(next.authRevision,c.authRevision+1);assert.equal(next.status,'pending_verification');assert.equal(next.inboundVerified,false);
+ assert.equal(f.service.currentBindingVersion(c.id),undefined);assert.equal(f.service.currentBindingVersion(second.c.id),otherBinding);
+ assert.deepEqual(f.service.listDirectoryCredentials('w','e')[0],sharedBefore);
+ assert.equal(f.service.directorySource(c.id).sourceVersion,sourceBefore.sourceVersion);
+ assert.deepEqual(f.service.directorySource(c.id).rules(),sourceBefore.rules());
+ assert.equal(f.state.calls.length,callsBefore,'bot retry does not use shared directory credentials as bot authentication');
+ assert.equal(f.service.ingressConfiguration(c.id).credentials.botSecret,'fixture-bot-secret');
+ assert.ok(!JSON.stringify(next).includes('fixture-bot-secret'));
+ const v=f.service.startVerification('w','e','wecom','u',{expectedRevision:next.revision});
+ f.service.recordVerifiedCandidate(c.id,String(v.revision),{appId:c.appId,botId:c.appId,tenantId:c.tenantId,challengeText:v.challengeText,eventId:'event-revalidated',messageId:'message-revalidated'});
+ const candidate=f.service.verification('w','e','wecom');
+ const confirmed=f.service.confirmVerification('w','e','wecom','u',{expectedRevision:candidate.revision,candidateId:candidate.candidateId});
+ assert.notEqual(f.service.currentBindingVersion(c.id),oldBinding);
+ assert.equal(await f.capabilities.authorizeChannel(scope(confirmed),connection(confirmed),'group'),true);
+});
+
+test('WeCom stored revalidation neither invents a directory assertion nor re-enables a disabled channel',async t=>{
+ const f=await setup(t),c=await save(f);
+ const next=await f.service.revalidate('w','e','wecom','u',c.revision);
+ assert.equal(next.sourceId,c.sourceId);assert.equal(next.directoryBinding,undefined);assert.equal(next.directoryStatus,'unavailable');
+ assert.throws(()=>f.service.startVerification('w','e','wecom','u',{expectedRevision:next.revision}),{code:'directory_binding_required'});
+ const disabled=f.service.settings('w','e','wecom','u',{enabled:false,expectedRevision:next.revision});
+ const retried=await f.service.revalidate('w','e','wecom','u',disabled.revision);
+ assert.equal(retried.enabled,false);assert.equal(retried.status,'disabled');assert.equal(f.service.ingressConfiguration(c.id),undefined);
+ const raw=f.repository.byId(c.id);
+ await assert.rejects(f.service.revalidate('w','e','wecom','u',disabled.revision),{code:'channel_configuration_changed'});
+ assert.deepEqual(f.repository.byId(c.id),raw);
+});
+
 test('WeCom service restart restores only persisted binding and secrets, not online status',async t=>{const f=await setup(t),{c}=await ready(f);const service=new EmployeeChannelService(new EmployeeChannelRepository(f.store),f.options);assert.equal(service.list('w','e')[0].transport.state,'stopped');assert.equal(service.currentBindingVersion(c.id),f.service.currentBindingVersion(c.id));assert.equal(service.ingressConfiguration(c.id).credentials.botSecret,'fixture-bot-secret');});
 
 test('WeCom employee routes reject ordinary readers and forged fields; expose no shared secret',async t=>{const f=await setup(t),app=Fastify();t.after(()=>app.close());await registerEmployeeChannelRoutes(app,f.service,{requireReader:()=>({canManage:false}),requireManager:req=>{if(req.headers['x-manager']!=='yes'){const e=new Error('forbidden');e.statusCode=403;throw e;}return'u';}});const base='/api/workspaces/w/entities/e/channels/wecom';assert.equal((await app.inject({url:base+'/directory-credentials'})).statusCode,403);const created=await app.inject({method:'POST',url:base+'/directory-credentials',headers:{'x-manager':'yes'},payload:input});assert.equal(created.statusCode,200);assert.ok(!created.body.includes(input.appSecret));assert.equal((await app.inject({method:'POST',url:base+'/directory-credentials',headers:{'x-manager':'yes'},payload:{...input,identityEvidence:'provider_api'}})).statusCode,400);});

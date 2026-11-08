@@ -1,3 +1,4 @@
+import {validateNativeAttachment} from './native-media.js';
 import { createHmac, timingSafeEqual } from 'node:crypto';
 import {
   ChannelError, assertChannelResource, requireChannelCapability,
@@ -22,6 +23,11 @@ export interface DingTalkBotOptions extends ProviderHttpOptions {
    * DingTalk's official signature authenticates timestamp+secret, NOT body integrity.
    * Never derive this flag from callback headers or request JSON. */
   trustedHttpsBoundary?: boolean;
+}
+export function dingtalkMediaCapabilities(options: Pick<DingTalkBotOptions,'streamIngress'|'privateMessageEventsGranted'|'mentionEventsGranted'|'proactiveSendGranted'>): NonNullable<ConversationCapabilities['media']> {
+  const granted=(allowed:boolean|undefined)=>({supported:true,availability:allowed?'available' as const:'authorization_required' as const});
+  const privateMedia=granted(options.streamIngress && options.privateMessageEventsGranted),groupMedia=granted(options.streamIngress && options.mentionEventsGranted),outbound=granted(options.proactiveSendGranted);
+  return {inbound:{private:{image:privateMedia,file:privateMedia},group:{image:groupMedia,file:{supported:false,availability:'unsupported',reason:'dingtalk_app_bot_group_file_receive_unsupported'}}},outbound:{private:{image:outbound,file:outbound},group:{image:outbound,file:outbound}}};
 }
 /** Pending-installation proof is only a candidate: the caller must enforce its
  * administrator challenge, current revision, expiry, replay policy and confirmation.
@@ -71,7 +77,7 @@ export async function verifyDingTalkBindingCandidate(request: ChannelWebhookRequ
   // Never accept application identity, verification status or a destination URL from JSON.
   return Object.freeze({eventId:row.msgId,messageId:row.msgId,appId:options.appId,botId:row.chatbotUserId,tenantId:row.chatbotCorpId,robotCode:row.robotCode,challengeText:text.trim()});
 }
-/** Official app-bot HTTP callback and send API; Stream is not implemented. */
+/** Official app-bot HTTP callback and send API; production Stream ingress is provided separately. */
 export class DingTalkBotConversationAdapter implements ConversationPort, ChannelWebhookPort {
   readonly connection: ChannelConnection;
   private readonly http: ProviderHttp;
@@ -88,7 +94,7 @@ export class DingTalkBotConversationAdapter implements ConversationPort, Channel
   async inspectCapabilities(ref?: ChannelResourceRef): Promise<ConversationCapabilities> {
     if (ref) this.resource(ref);
     const no = {supported:false,availability:'unsupported' as const};
-    return {privateMessageEvents:{supported:true,availability:(this.options.streamIngress || this.options.trustedHttpsBoundary) && this.options.privateMessageEventsGranted?'available':'authorization_required'},mentionEvents:{supported:true,availability:(this.options.streamIngress || this.options.trustedHttpsBoundary) && this.options.mentionEventsGranted?'available':'authorization_required'},ordinaryMessageEvents:no,historyRead:no,replyToMessage:no,threadRead:no,
+    return {media:dingtalkMediaCapabilities(this.options),privateMessageEvents:{supported:true,availability:(this.options.streamIngress || this.options.trustedHttpsBoundary) && this.options.privateMessageEventsGranted?'available':'authorization_required'},mentionEvents:{supported:true,availability:(this.options.streamIngress || this.options.trustedHttpsBoundary) && this.options.mentionEventsGranted?'available':'authorization_required'},ordinaryMessageEvents:no,historyRead:no,replyToMessage:no,threadRead:no,
       proactiveSend:{supported:true,availability:this.options.proactiveSendGranted?'available':'authorization_required'}};
   }
   async getConversation(ref: ChannelResourceRef): Promise<ChannelConversation> {
@@ -98,8 +104,14 @@ export class DingTalkBotConversationAdapter implements ConversationPort, Channel
     this.resource(ref); throw new ChannelError('unsupported','bot_history_read_requires_separate_authorized_connector');
   }
   async sendMessage(request: SendChannelMessage): Promise<ChannelSendReceipt> {
-    if(request.attachment)throw new ChannelError('unsupported','native_attachments_not_implemented_for_channel');
-    this.resource(request.conversation); validateText(request.text);
+    this.resource(request.conversation);
+    if(request.attachment){
+      if(!['private','group'].includes(request.conversation.conversationKind??''))throw new ChannelError('invalid_request','native_send_target_kind_required');
+      if(request.text)throw new ChannelError('invalid_request','invalid_native_attachment');
+      validateNativeAttachment(request.attachment,{image:20_000_000,file:20_000_000});
+      if(request.attachment.kind==='image'&&!['image/png','image/jpeg','image/gif'].includes(request.attachment.mediaType))throw new ChannelError('unsupported','dingtalk_native_image_format_unsupported');
+      if(request.attachment.kind==='file'&&!/\.(xlsx|pdf|zip|rar|doc|docx)$/i.test(request.attachment.name))throw new ChannelError('unsupported','dingtalk_native_file_format_unsupported');
+    }else validateText(request.text);
     if (!request.operationId || request.operationId.length > 256) throw new ChannelError('invalid_request','invalid_send_operation_id');
     if (request.replyToMessageId || request.threadId) throw new ChannelError('unsupported','bot_message_quote_not_implemented');
     requireChannelCapability((await this.inspectCapabilities(request.conversation)).proactiveSend);
@@ -108,11 +120,21 @@ export class DingTalkBotConversationAdapter implements ConversationPort, Channel
     if (isPrivate && (!recipient || recipient.length > 256)) throw new ChannelError('invalid_request','private_recipient_required');
     if (!isPrivate && recipient) throw new ChannelError('invalid_request','private_recipient_on_group');
     await request.beforeSend?.();
+    let msgKey='sampleText',msgParam:Record<string,string>={content:request.text};
+    if(request.attachment){
+      const attachment=request.attachment;
+      const mediaId=await this.http.uploadDingTalkMedia(attachment,request.assertSendAllowed);
+      await request.beforeSend?.();
+      request.assertSendAllowed?.();
+      msgKey=attachment.kind==='image'?'sampleImageMsg':'sampleFile';
+      msgParam=attachment.kind==='image'?{photoURL:mediaId}:{mediaId,fileName:attachment.name,fileType:attachment.name.split('.').pop()!.toLowerCase()};
+    }
     const response = await this.http.request(isPrivate ? '/v1.0/robot/oToMessages/batchSend' : '/v1.0/robot/groupMessages/send','POST',{
-      robotCode:this.options.robotCode,...(isPrivate?{userIds:[recipient]}:{openConversationId:request.conversation.externalId}),msgKey:'sampleText',msgParam:JSON.stringify({content:request.text}),
+      robotCode:this.options.robotCode,...(isPrivate?{userIds:[recipient]}:{openConversationId:request.conversation.externalId}),msgKey,msgParam:JSON.stringify(msgParam),
     },'json',request.assertSendAllowed);
     let data: Record<string,unknown>;
     try { data = object(response); } catch { throw new ChannelError('delivery_unknown','provider_response_shape_invalid'); }
+    if (data.errcode!==undefined&&data.errcode!==0)throw new ChannelError('delivery_unknown','provider_send_rejected');
     if (isPrivate) {
       for (const field of ['invalidStaffIdList','flowControlledStaffIdList']) {
         if (data[field] !== undefined && !Array.isArray(data[field])) throw new ChannelError('delivery_unknown','provider_response_shape_invalid');

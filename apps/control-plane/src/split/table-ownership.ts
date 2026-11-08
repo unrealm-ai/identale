@@ -18,6 +18,9 @@ export const PLATFORM_TABLES = [
 ] as const;
 
 export const RUNTIME_TABLES = [
+  'business_resource_run_context','business_resource_authorizations','business_resource_cache_authorizations',
+  'business_account_bindings','business_oauth_states','business_oauth_tokens',
+  'source_material_transfers','work_item_resource_transfers',
   'message_asset_conversation_grants',
   'task_artifact_selection_inputs','task_artifact_delivery_grants','task_artifact_manifests','task_artifact_selections',
   'work_item_artifact_materials','work_item_assignment_roles','work_items','work_item_assignments','work_item_task_links','work_item_events','work_item_operations','work_item_dispatches','work_item_beta_state','work_item_tool_grants','work_item_task_tool_snapshots','work_item_intents','work_item_notifications','work_item_notification_cursor',

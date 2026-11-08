@@ -1,6 +1,14 @@
 export type DirectoryProvider = 'feishu' | 'dingtalk' | 'wecom';
 export type ConversationKind = 'private' | 'group' | 'meeting';
+export interface ChannelCapability { supported: boolean; availability: 'available' | 'authorization_required' | 'unsupported' | 'unknown'; reason?: string }
+export interface ChannelConfigurationCapabilities {
+  privateMessages: ChannelCapability; groupMentions: ChannelCapability; directedGroupMessages?: ChannelCapability;
+  ordinaryGroupMessages: ChannelCapability; keywordTriggers: ChannelCapability; recentGroupContext: ChannelCapability;
+  directoryRead: ChannelCapability; meetingRead: ChannelCapability; documentRead: ChannelCapability;
+  media?: { inbound: Record<'private' | 'group', Record<'image' | 'file', ChannelCapability>>; outbound: Record<'private' | 'group', Record<'image' | 'file', ChannelCapability>> };
+}
 export interface DirectoryConnection {
+  capabilities?: ChannelConfigurationCapabilities;
   transport: { state: 'stopped' | 'connecting' | 'connected' | 'reconnecting' | 'failed'; changedAt: number; error?: string; lastConnectedAt?: number; lastDisconnectedAt?: number };
   id: string; sourceId: string; entityId: string; provider: DirectoryProvider; appId: string;
   tenantId: string; tenantIdNamespace: string; botId?: string; revision: number; authRevision: number;

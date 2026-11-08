@@ -30,7 +30,7 @@ test('first handoff grants only explicit immutable outputs after safe commit; re
  const f=await fixture(t);await f.enable();const root=await f.rootTask(),chosen=publish(f,root),hidden=publish(f,root,'private unselected','hidden.txt');
  const intent=f.handoff(root,f.employees[1],'file-handoff',{artifactRefs:refs(chosen)});assert.equal(f.items.store.one('SELECT count(*) n FROM message_asset_run_grants').n,0);
  assert.deepEqual(f.handoff(root,f.employees[1],'file-handoff',{artifactRefs:refs(chosen)}),intent);assert.throws(()=>f.handoff(root,f.employees[1],'file-handoff',{artifactRefs:refs(hidden)}),{code:'work_item_operation_conflict'});
- f.safe(root,intent);await f.items.tick();const task=currentTask(f),restarted=bridge(f),materials=restarted.listForRun(scope(task));assert.equal(materials.length,1);assert.deepEqual(materials[0].content,chosen.artifact.content);assert.equal(materials[0].sourceTaskId,root.id);assert.equal(materials[0].sourceRunId,root.run_id);
+ f.safe(root,intent);await f.items.tick();const task=currentTask(f),restarted=bridge(f),materials=restarted.listForRun(scope(task));assert.equal(materials.length,1);assert.deepEqual(materials[0].content,chosen.artifact.content);assert.equal(materials[0].sourceTaskId,undefined);assert.equal(materials[0].sourceRunId,undefined);
  assert.equal(await(await restarted.streamForRun(scope(task),materials[0].assetId,'content')).text(),'synthetic report');
  f.safe(root,intent);await f.items.tick();assert.equal(f.items.store.one('SELECT count(*) n FROM message_asset_run_grants').n,1);assert.equal(f.items.store.one('SELECT count(*) n FROM tasks').n,2);
  const prepared=JSON.parse(f.items.store.one('SELECT prepared_json FROM work_item_intents WHERE id=?',intent.boundary.intentId).prepared_json);assert.deepEqual(prepared.artifacts[0].artifact,chosen.artifact);assert.equal(JSON.stringify(materials).includes('hidden.txt'),false);
@@ -92,4 +92,94 @@ test('human continuation keeps granted materials in the same Task and may explic
 test('committed source metadata and receiver grants survive closing and reopening the platform store',async t=>{
  const f=await fixture(t);await f.enable();const root=await f.rootTask(),chosen=publish(f,root),intent=f.handoff(root,f.employees[1],'restart',{artifactRefs:refs(chosen)});f.safe(root,intent);await f.items.tick();const receiver=currentTask(f),before=bridge(f).listForRun(scope(receiver)),path=f.items.store.databasePath;await f.app.close();
  const {Store}=await import('../dist/store.js'),reopened=new Store(path);try{const b=new WorkItemArtifacts(reopened,f.runtime,Date.now);assert.deepEqual(b.listForRun(scope(receiver)),before);assert.equal(await(await b.streamForRun(scope(receiver),before[0].assetId,'content')).text(),'synthetic report');}finally{reopened.close();}
+});
+
+test('business-resource consumption blocks summary and artifact transfer, including durable grants after restart',async t=>{
+ const f=await fixture(t);await f.enable();const root=await f.rootTask(),chosen=publish(f,root),b=bridge(f);
+ // Registered but unread business links are not consumed material and do not disable ordinary handoffs.
+ f.items.store.run('INSERT INTO business_resource_run_context VALUES(?,?,?)','unread',root.run_id,'{}');
+ const intent=f.handoff(root,f.employees[1],'before-read',{artifactRefs:refs(chosen)});f.safe(root,intent);await f.items.tick();const receiver=currentTask(f),material=b.listForRun(scope(receiver))[0];assert.ok(material);
+ f.items.store.run('INSERT INTO business_resource_authorizations VALUES(?,?,?,?,?,?)','consumed',root.run_id,'content','document','{}','{}');
+ assert.throws(()=>bridge(f).listForRun(scope(receiver)),{code:'business_resource_transfer_authorization_required'});
+ await assert.rejects(bridge(f).streamForRun(scope(receiver),material.assetId,'content'),{code:'business_resource_transfer_authorization_required'});
+ await f.tasks.tick();assert.throws(()=>f.handoff(f.row(receiver.id),f.employees[2],'second-summary-only'),{code:'business_resource_transfer_authorization_required'});
+ const other=await f.rootTask(0,'resource-reader');publish(f,other);
+ f.items.store.run('INSERT INTO business_resource_authorizations VALUES(?,?,?,?,?,?)','consumed-other',other.run_id,'content','document','{}','{}');
+ assert.throws(()=>f.handoff(other,f.employees[2],'summary-only'),{code:'business_resource_transfer_authorization_required'});
+ assert.equal(f.items.store.one('SELECT count(*) n FROM work_item_intents WHERE task_id=?',other.id).n,0);
+});
+
+test('resource read after boundary preparation prevents safe commit and dispatch without an explicit transfer grant',async t=>{
+ const f=await fixture(t);await f.enable();const root=await f.rootTask(),intent=f.handoff(root,f.employees[1],'read-race');
+ f.items.store.run('INSERT INTO business_resource_authorizations VALUES(?,?,?,?,?,?)','late-read',root.run_id,'content','document','{}','{}');f.safe(root,intent);await f.items.tick();
+ assert.equal(f.items.store.one('SELECT state FROM work_item_intents WHERE id=?',intent.boundary.intentId).state,'safe');assert.equal(f.items.store.one('SELECT count(*) n FROM tasks').n,1);assert.equal(f.items.list(f.w).items.length,0);
+});
+
+async function authorizedHandoff(f,task,target,operation,extra={}){
+ const current=await f.items.executeAuthorized(f.row(task.id),'get_current',{}),item=current.item;
+ return f.items.executeAuthorized(f.row(task.id),'handoff',{operationId:operation,...(item?{expectedAssignmentId:item.currentAssignmentId,expectedVersion:item.version}:{title:'Narrow package',goal:'Use only selected material',criteria:'Return necessary result'}),targetEmployeeId:target.id,summary:'Only this assignment summary',...extra});
+}
+function syntheticConsumption(f,task,id='synthetic-consumed'){
+ // Existing isolated state-machine fixture: no provider request, credential or real material.
+ f.items.store.run('INSERT INTO business_resource_authorizations VALUES(?,?,?,?,?,?)',id,task.run_id,'content','document','{}','{}');
+ f.items.store.run('INSERT INTO message_asset_run_grants VALUES(?,?,?,?,?,?)',id,task.run_id,task.id,task.workspace_id,task.entity_id,Date.now());
+}
+
+test('authorized resource handoff persists the exact package and restricts receiver context while live revocation fences bytes',async t=>{
+ const f=await fixture(t);await f.enable();const root=await f.rootTask(),chosen=publish(f,root),hidden=publish(f,root,'DO_NOT_SHARE_FILE','hidden.txt');syntheticConsumption(f,root);
+ let allowed=true,checks=0;const validate=async run=>{assert.equal(run.taskId,root.id);checks++;if(!allowed)throw Error('synthetic_revoked');};f.items.setResourceValidator(validate);
+ assert.throws(()=>f.handoff(root,f.employees[1]),{code:'business_resource_transfer_authorization_required'});
+ const intent=await authorizedHandoff(f,root,f.employees[1],'explicit',{artifactRefs:refs(chosen)});f.safe(root,intent);await f.items.tick();const receiver=currentTask(f);assert.notEqual(receiver.id,root.id);
+ const saved=f.items.store.one('SELECT * FROM work_item_resource_transfers WHERE target_task_id=?',receiver.id);assert.equal(saved.intent_id,intent.boundary.intentId);assert.equal(saved.package_digest,createHash('sha256').update(f.items.store.one('SELECT prepared_json FROM work_item_intents WHERE id=?',saved.intent_id).prepared_json).digest('hex'));
+ f.items.store.run("INSERT INTO work_item_events(work_item_id,assignment_id,kind,body_json,created_at) VALUES(?,?,'progress',?,?)",f.items.list(f.w).items[0].id,saved.assignment_id,JSON.stringify({summary:'DO_NOT_SHARE_HISTORY'}),Date.now());
+ const visible=await f.items.executeAuthorized(receiver,'get_current',{});assert.equal(visible.item.summary,'Only this assignment summary');assert.deepEqual(visible.events,[]);assert.deepEqual(visible.assignments,[]);assert.ok(!JSON.stringify(visible).includes('DO_NOT_SHARE'));assert.equal(visible.materials.length,1);assert.deepEqual(visible.materials[0].content,chosen.artifact.content);assert.ok(!JSON.stringify(visible).includes(root.id));
+ const b=bridge(f);b.setResourceValidator(validate);assert.equal(await(await b.streamForRun(scope(receiver),visible.materials[0].assetId,'content')).text(),'synthetic report');
+ assert.throws(()=>b.select(receiver,refs(hidden),true),{code:'work_item_artifact_not_authorized'});
+ allowed=false;await assert.rejects(f.items.executeAuthorized(receiver,'get_current',{}),/synthetic_revoked/);await assert.rejects(b.streamForRun(scope(receiver),visible.materials[0].assetId,'content'),/synthetic_revoked/);assert.ok(checks>=5);
+});
+
+test('resource package survives restart and explicit second hop but tampering with its target or summary is denied',async t=>{
+ const f=await fixture(t);await f.enable();const root=await f.rootTask(),chosen=publish(f,root);syntheticConsumption(f,root);const validate=async()=>{};f.items.setResourceValidator(validate);
+ const first=await authorizedHandoff(f,root,f.employees[1],'first',{artifactRefs:refs(chosen)});f.safe(root,first);await f.items.tick();await f.tasks.tick();const middle=currentTask(f),second=await authorizedHandoff(f,middle,f.employees[2],'second',{artifactRefs:refs(chosen)});f.safe(middle,second);await f.items.tick();const receiver=currentTask(f),material=(await f.items.executeAuthorized(receiver,'get_current',{})).materials[0];
+ const {Store}=await import('../dist/store.js');const reopened=new Store(f.items.store.databasePath);try{const b=new WorkItemArtifacts(reopened,f.runtime,Date.now);b.setResourceValidator(validate);assert.equal(await(await b.streamForRun(scope(receiver),material.assetId,'content')).text(),'synthetic report');}finally{reopened.close();}
+ const row=f.items.store.one('SELECT prepared_json FROM work_item_intents WHERE id=?',first.boundary.intentId),altered={...JSON.parse(row.prepared_json),summary:'unapproved replacement'};f.items.store.run('UPDATE work_item_intents SET prepared_json=? WHERE id=?',JSON.stringify(altered),first.boundary.intentId);
+ await assert.rejects(f.items.executeAuthorized(receiver,'get_current',{}),{code:'business_resource_transfer_authorization_required'});
+});
+
+test('resource consumed after an authorized boundary was selected cannot silently expand that package',async t=>{
+ const f=await fixture(t);await f.enable();const root=await f.rootTask();syntheticConsumption(f,root);f.items.setResourceValidator(async()=>{});
+ const intent=await authorizedHandoff(f,root,f.employees[1],'before-new-read');syntheticConsumption(f,root,'another-resource');f.safe(root,intent);await f.items.tick();
+ assert.equal(f.items.store.one('SELECT state FROM work_item_intents WHERE id=?',intent.boundary.intentId).state,'safe');assert.equal(f.items.store.one('SELECT count(*) n FROM tasks').n,1);
+});
+
+for(const terminal of ['handoff','finish'])test(`all ${terminal} model receipts and legacy operation replay exclude predecessor private projection fields`,async t=>{
+ const f=await fixture(t);await f.enable();const root=await f.rootTask(),first=f.handoff(root,f.employees[1],'start-narrow');f.safe(root,first);await f.items.tick();await f.tasks.tick();const receiver=currentTask(f),marker='predecessor-private-marker',view=f.items.list(f.w).items[0];
+ const privateView={...view,summary:marker,step:marker,nextStep:marker,completionEvidence:marker,waitReason:marker};f.items.store.run('UPDATE work_items SET projection_json=? WHERE id=?',JSON.stringify(privateView),view.id);
+ f.items.store.run('UPDATE work_item_assignments SET summary=? WHERE work_item_id=? AND previous_id IS NULL',marker,view.id);
+ const safe=result=>{assert.ok(!JSON.stringify(result).includes(marker));if(result.item){assert.equal(result.item.summary,'Structured necessary business handoff');for(const key of ['step','nextStep','completionEvidence','waitReason','workspaceId','originEmployeeId','pendingDispatch'])assert.equal(key in result.item,false);}return result;};
+ const initial=safe(await f.items.executeAuthorized(receiver,'get_current',{})),progressArgs={operationId:'safe-progress',expectedAssignmentId:initial.item.currentAssignmentId,expectedVersion:initial.item.version};
+ safe(await f.items.executeAuthorized(receiver,'progress',progressArgs));safe(await f.items.executeAuthorized(receiver,'progress',progressArgs));safe(await f.items.executeAuthorized(receiver,'reconcile',{operationId:'safe-progress'}));
+ // Old durable progress receipts could contain the entire shared view; sanitize on every read.
+ f.items.store.run('UPDATE work_item_operations SET result_json=? WHERE task_id=? AND operation_id=?',JSON.stringify({item:privateView,events:[marker],privateData:marker}),receiver.id,'safe-progress');
+ safe(await f.items.executeAuthorized(receiver,'progress',progressArgs));safe(await f.items.executeAuthorized(receiver,'reconcile',{operationId:'safe-progress'}));
+ const current=safe(await f.items.executeAuthorized(receiver,'get_current',{})),args={operationId:'safe-terminal',expectedAssignmentId:current.item.currentAssignmentId,expectedVersion:current.item.version,summary:'Necessary successor instruction',...(terminal==='handoff'?{targetEmployeeId:f.employees[2].id}:{completionEvidence:'Selected result verified'})},accepted=safe(await f.items.executeAuthorized(receiver,terminal,args));
+ assert.equal(accepted.boundaryAccepted,true);safe(await f.items.executeAuthorized(receiver,terminal,args));safe(await f.items.executeAuthorized(receiver,'reconcile',{operationId:'safe-terminal'}));
+ f.items.store.run('UPDATE work_item_operations SET result_json=? WHERE task_id=? AND operation_id=?',JSON.stringify({...accepted,privateData:marker,boundary:{...accepted.boundary,predecessorHistory:marker}}),receiver.id,'safe-terminal');
+ safe(await f.items.executeAuthorized(receiver,terminal,args));safe(await f.items.executeAuthorized(receiver,'reconcile',{operationId:'safe-terminal'}));
+ assert.ok(JSON.stringify(f.items.detail(f.w,view.id)).includes(marker),'Administrative detail retains its separately authorized projection');
+});
+
+test('actual source-material service and work-item safe dispatch integrate without handcrafted intent or receiver grants',async t=>{
+ const f=await fixture(t);await f.enable();const root=await f.rootTask(),{PlatformAssetService}=await import('../dist/assets/service.js'),dir=await mkdtemp(join(tmpdir(),'identale-material-dispatch-'));let allowed=true;const texts={summary:'selected original summary',transcript:'unselected source transcript'},sha=text=>createHash('sha256').update(text).digest('hex');
+ const assets=new PlatformAssetService(f.items.store,dir,{read:async()=>{throw Error('No fallback transport in isolated source-material fixture');}},{assertSource:()=>{if(!allowed)throw Error('synthetic_source_revoked');},businessResources:{identityKind:'application',authorization:{authorize:async request=>allowed?{state:'authorized',identityKind:'application',accountId:'synthetic-app',authorizationRevision:'revision-1',resourceVersion:sha(texts[request.operation]),expiresAt:Date.now()+60000,apiScopeVerified:true,resourceAclVerified:true,outputAudienceVerified:true}:{state:'authorization_required'}},reader:{read:async request=>new Response(texts[request.operation])}}});
+ t.after(async()=>{assets.close();await rm(dir,{recursive:true,force:true});});f.items.setMaterialPort(assets.workItemMaterials());f.items.setResourceValidator(run=>assets.revalidateBusinessResourcesForRun(run));
+ const source={workspaceId:f.w,entityId:root.entity_id,provider:'feishu',tenantId:'synthetic-tenant',applicationId:'synthetic-app',connectionId:'synthetic-connection',bindingVersion:'binding-1',chatId:'synthetic-group',conversationKind:'group',requesterId:'synthetic-sharer',requesterNamespace:'open_id'},binding={...source,appId:source.applicationId,connection:{connectionId:source.connectionId,tenantId:source.tenantId}},event={connectionId:source.connectionId,tenantId:source.tenantId,message:{id:'source-message',conversationKind:'group',author:{identityEvidence:'channel_verified',externalId:source.requesterId,idNamespace:'open_id'},conversation:{provider:source.provider,connectionId:source.connectionId,tenantId:source.tenantId,externalId:source.chatId},text:'feishu:minutes:synthetic-meeting'}};
+ const originalId=assets.ingest(binding,event).message.sharedAssets[0].assetId;assets.grantForRun(scope(root),[originalId],source);for(const kind of ['summary','transcript'])assert.equal((await assets.resolveForRun(scope(root),originalId,kind)).state,'ready');
+ const candidates=await f.items.executeAuthorized(root,'employees',{}),selected=candidates.sourceMaterials.find(m=>m.materialRef.readKind==='summary').materialRef;
+ const accepted=await authorizedHandoff(f,root,f.employees[1],'actual-material-dispatch',{materialRefs:[selected]});assert.equal(f.items.store.one('SELECT count(*) n FROM source_material_transfers').n,0);f.safe(root,accepted);await f.items.tick();
+ const receiver=currentTask(f);assert.notEqual(receiver.id,root.id);const dispatch=f.items.store.one('SELECT * FROM work_item_dispatches WHERE id=?',accepted.boundary.intentId);assert.equal(dispatch.state,'done',JSON.stringify(f.items.list(f.w).items));assert.equal(dispatch.task_id,receiver.id);
+ const visible=await f.items.executeAuthorized(receiver,'get_current',{});assert.equal(visible.sourceMaterials.length,1);const alias=visible.sourceMaterials[0].materialRef.assetId;assert.notEqual(alias,originalId);assert.equal(visible.sourceMaterials[0].materialRef.readKind,'content');assert.equal(await(await assets.streamForRun(scope(receiver),alias,'content')).text(),texts.summary);
+ assert.equal((await assets.streamForRun(scope(receiver),alias,'transcript')).state,'not_available');await assert.rejects(assets.streamForRun(scope(receiver),originalId,'transcript'),/not_authorized/);assert.equal(f.items.store.one('SELECT count(*) n FROM message_asset_run_grants WHERE run_id=?',receiver.run_id).n,0);assert.equal(f.items.store.one('SELECT count(*) n FROM business_resource_run_context WHERE run_id=?',receiver.run_id).n,0);
+ for(const hidden of [originalId,source.chatId,source.requesterId,root.id,root.run_id,'unselected source transcript'])assert.ok(!JSON.stringify(visible).includes(hidden));
+ allowed=false;await assert.rejects(f.items.executeAuthorized(receiver,'get_current',{}));await assert.rejects(assets.streamForRun(scope(receiver),alias,'content'));
 });

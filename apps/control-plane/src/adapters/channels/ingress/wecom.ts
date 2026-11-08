@@ -1,3 +1,5 @@
+import {validateNativeAttachment} from '../native-media.js';
+import {WECOM_MEDIA_LIMITS} from './media-wire.js';
 import {randomUUID} from 'node:crypto';
 import {WSClient, WSAuthFailureError} from '@wecom/aibot-node-sdk';
 import {ChannelError, type ChannelIngressSession, type ChannelSendReceipt, type SendChannelMessage} from '@dentity/application';
@@ -48,7 +50,8 @@ export function startWeComClient(session: ChannelIngressSession, credentials: Ch
     stop(){if(stopped)return;stopped=true;authenticated=false;replies.clear();client.disconnect();},
     async send(request:SendChannelMessage):Promise<ChannelSendReceipt>{
       if(stopped||!authenticated||takenOver||!client.isConnected)throw new ChannelError('not_ready','channel_session_unavailable');
-      if(request.conversation.provider!=='wecom'||request.conversation.connectionId!==session.connectionId||request.threadId||!request.text||Buffer.byteLength(request.text)>16_384||!request.operationId||request.operationId.length>256)throw new ChannelError('invalid_request');
+      if(request.conversation.provider!=='wecom'||request.conversation.connectionId!==session.connectionId||request.threadId||(!request.attachment&&(!request.text||Buffer.byteLength(request.text)>16_384))||!request.operationId||request.operationId.length>256)throw new ChannelError('invalid_request');
+      if(request.attachment){if(request.text)throw new ChannelError('invalid_request');validateNativeAttachment(request.attachment,WECOM_MEDIA_LIMITS);}
       const ref=request.conversation;
       if(ref.conversationKind!=='private'&&ref.conversationKind!=='group')throw new ChannelError('invalid_request');
       const target=ref.conversationKind==='private'?ref.privateRecipientId:ref.externalId;
@@ -58,10 +61,28 @@ export function startWeComClient(session: ChannelIngressSession, credentials: Ch
       const key=reply?.reqId??randomUUID();
       if(busy.has(key)||busy.size>=128)throw new ChannelError('rate_limited','channel_send_busy');
       busy.add(key);
+      let dispatched=false;
       try {
-        const result=reply?await client.replyStream({headers:{req_id:reply.reqId}},randomUUID(),request.text,true):await client.sendMessage(target,{msgtype:'markdown',markdown:{content:request.text}});
+        let mediaId:string|undefined;
+        if(request.attachment){
+          try {
+            const uploaded=await client.uploadMedia(Buffer.from(request.attachment.bytes),{type:request.attachment.kind,filename:request.attachment.name});
+            if(typeof uploaded.media_id!=='string'||!uploaded.media_id||uploaded.media_id.length>2048||uploaded.type!==request.attachment.kind)throw Error('invalid_upload_receipt');
+            mediaId=uploaded.media_id;
+          }catch{throw new ChannelError('temporarily_unavailable','channel_media_upload_failed');}
+        }
+        // The runner's callback requires a fresh host commit after the upload.
+        await request.beforeSend?.();
+        if(stopped||!authenticated||takenOver||!client.isConnected)throw new ChannelError('not_ready','channel_session_unavailable');
+        if(request.replyToMessageId&&replies.get(request.replyToMessageId)!==reply)throw new ChannelError('not_ready','channel_reply_context_expired');
+        request.assertSendAllowed?.();
+        dispatched=true;
+        const result=mediaId&&request.attachment
+          ?reply?await client.replyMedia({headers:{req_id:reply.reqId}},request.attachment.kind,mediaId):await client.sendMediaMessage(target,request.attachment.kind,mediaId)
+          :reply?await client.replyStream({headers:{req_id:reply.reqId}},randomUUID(),request.text,true):await client.sendMessage(target,{msgtype:'markdown',markdown:{content:request.text}});
+        if(typeof result.headers?.req_id!=='string'||!result.headers.req_id)throw Error('invalid_send_receipt');
         return {status:'accepted',idempotent:false,providerRequestId:result.headers.req_id};
-      } catch {throw new ChannelError('delivery_unknown','channel_send_outcome_unknown');}
+      } catch(error) {if(!dispatched&&error instanceof ChannelError)throw error;throw new ChannelError(dispatched?'delivery_unknown':'temporarily_unavailable',dispatched?'channel_send_outcome_unknown':'channel_send_not_dispatched');}
       finally {busy.delete(key);}
     },
   };

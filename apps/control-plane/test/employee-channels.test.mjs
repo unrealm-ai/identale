@@ -134,3 +134,18 @@ test('only first Feishu configuration defaults listening on; legacy missing and 
  c=await f.service.revalidate('w','e','feishu','u',c.revision);assert.equal(c.groupListeningStatus.enabled,false);
  const ding=await ready(f,'dingtalk','e','ding');assert.equal(ding.context.groupListenEnabled,undefined);assert.equal(ding.groupListeningStatus,undefined);
 });
+
+test('business app identity binds source and credential revision, never token refresh or another requester namespace',async t=>{
+ const f=setup(t);let tokens=0,release,block=false;
+ f.options.fetch=async url=>{assert.equal(String(url),'https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal');if(block)await new Promise(resolve=>{release=resolve;});return Response.json({code:0,tenant_access_token:`synthetic-app-token-${++tokens}`,expire:60});};
+ const c=await ready(f),source={workspaceId:'w',entityId:'e',provider:'feishu',connectionId:c.id,applicationId:c.appId,tenantId:'tenant',bindingVersion:f.service.currentBindingVersion(c.id),messageId:'source-message',chatId:'source-group',requesterId:'person',requesterNamespace:'open_id'};
+ const first=await f.service.businessResourceApplication(source);assert.deepEqual(JSON.parse(first.accountId),['application','feishu','tenant','app']);assert.equal(first.expiresAt,f.state.clock+60000);
+ f.state.clock+=60001;const refreshed=await f.service.businessResourceApplication(source);assert.notEqual(refreshed.accessToken,first.accessToken);assert.equal(refreshed.authorizationRevision,first.authorizationRevision);
+ assert.ok(!JSON.stringify(f.service.dto(f.repository.byId(c.id))).includes('synthetic-app-token'));
+ await assert.rejects(f.service.businessResourceApplication({...source,requesterNamespace:'union_id'}),code('business_application_identity_unsupported'));
+ await assert.rejects(f.service.businessResourceApplication({...source,tenantId:'other'}),code('asset_source_binding_changed'));
+ const rotated=await f.service.save('w','e','feishu','u',{appId:'app',appSecret:'replacement-fixture-secret',expectedRevision:c.revision});const currentSource={...source,bindingVersion:f.service.currentBindingVersion(c.id)};
+ const second=await f.service.businessResourceApplication(currentSource);assert.notEqual(second.authorizationRevision,first.authorizationRevision);
+ f.state.clock+=60001;block=true;const pending=f.service.businessResourceApplication(currentSource);while(!release)await new Promise(resolve=>setImmediate(resolve));
+ await f.service.save('w','e','feishu','u',{appId:'app',appSecret:'third-fixture-secret',expectedRevision:rotated.revision});release();await assert.rejects(pending,error=>['business_application_credentials_changed','asset_source_binding_changed'].includes(error.code));
+});

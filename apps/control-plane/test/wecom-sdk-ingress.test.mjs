@@ -2,9 +2,17 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {fork} from 'node:child_process';
 import {once} from 'node:events';
+import {mkdtempSync,rmSync} from 'node:fs';
+import {tmpdir} from 'node:os';
+import {join} from 'node:path';
+import {Store} from '../dist/store.js';
+import {HumanChannelNotifications} from '../dist/human-channel.js';
+import {SqliteMessageLoopRepository} from '../dist/channel-loop/repository.js';
+import {ChannelMessageLoop} from '@dentity/application';
 import {setTimeout as delay} from 'node:timers/promises';
 import {WebSocketServer} from 'ws';
 import {SdkIngress} from '../dist/adapters/channels/ingress/sdk-ingress.js';
+import {encodeSend,wireHash} from '../dist/adapters/channels/ingress/media-wire.js';
 import {normalizeChannelIngressEvent} from '../dist/adapters/channels/ingress/normalize.js';
 import {WeComConversationAdapter} from '../dist/adapters/channels/wecom.js';
 const session={connectionId:'wecom-test',provider:'wecom',appId:'bot-local',authRevision:1,revision:1,generation:'generation-local'};
@@ -12,10 +20,10 @@ const incoming=(overrides={})=>({cmd:'aibot_msg_callback',headers:{req_id:'callb
 const conversation={provider:'wecom',connectionId:session.connectionId,tenantId:'corp-local',kind:'conversation',externalId:'employee-local',privateRecipientId:'employee-local',conversationKind:'private'};
 const request=(overrides={})=>({conversation,text:'local response',operationId:'operation-local',...overrides});
 async function until(fn){const end=Date.now()+5000;while(!fn()){if(Date.now()>end)throw Error('condition timed out');await delay(10);}}
-async function fixture(t,{onEvent=async()=> 'accepted',auth=true,sendAck=true}={}){
+async function fixture(t,{onEvent=async()=> 'accepted',auth=true,sendAck=true,mediaAck=true}={}){
  const server=new WebSocketServer({host:'127.0.0.1',port:0});await once(server,'listening');
- const sockets=[],frames=[],statuses=[];let child;
- server.on('connection',socket=>{sockets.push(socket);socket.on('message',buffer=>{const frame=JSON.parse(buffer.toString());frames.push(frame);if(frame.cmd==='aibot_subscribe'&&auth||frame.cmd==='ping'||sendAck&&['aibot_respond_msg','aibot_send_msg'].includes(frame.cmd))socket.send(JSON.stringify({headers:frame.headers,errcode:0}));});});
+ const sockets=[],frames=[],statuses=[];let child,uploadType;
+ server.on('connection',socket=>{sockets.push(socket);socket.on('message',buffer=>{const frame=JSON.parse(buffer.toString());frames.push(frame);if(frame.cmd==='aibot_upload_media_init')uploadType=frame.body.type;if(mediaAck&&frame.cmd.startsWith('aibot_upload_media_'))socket.send(JSON.stringify({headers:frame.headers,errcode:0,body:frame.cmd.endsWith('_init')?{upload_id:'synthetic-upload'}:frame.cmd.endsWith('_finish')?{media_id:'synthetic-media',type:uploadType}:{}}));if(frame.cmd==='aibot_subscribe'&&auth||frame.cmd==='ping'||sendAck&&['aibot_respond_msg','aibot_send_msg'].includes(frame.cmd))socket.send(JSON.stringify({headers:frame.headers,errcode:0}));});});
  const port=new SdkIngress(session,{botSecret:'local-only-secret'},{forkRunner:()=>child=fork(new URL('./fixtures/local-wecom-sdk-runner.mjs',import.meta.url),[],{stdio:['ignore','pipe','pipe','ipc'],execArgv:[],env:{TEST_LOCAL_WS:`ws://127.0.0.1:${server.address().port}`}})});
  let output='';
  t.after(async()=>{await port.stop('test');for(const socket of sockets)socket.terminate();await new Promise(resolve=>server.close(resolve));});
@@ -95,3 +103,150 @@ test('real child preserves optional CorpID for parent binding check, and never i
 });
 
 test('real SDK forwards only supported media fields over private IPC; normalized durable event never includes download keys',async t=>{let received;const f=await fixture(t,{onEvent:async event=>{received=event;return'accepted';}});f.sockets[0].send(JSON.stringify(incoming({msgtype:'image',text:undefined,image:{url:'https://media.qq.com/sample?signature=SYNTHETIC',aeskey:'SYNTHETIC_KEY'},otherPrivate:'must-not-cross'})));await until(()=>received);assert.equal(received.body.msgtype,'image');assert.equal(received.body.otherPrivate,undefined);assert.equal(received.body.response_url,undefined);const result=normalizeChannelIngressEvent(session,received,{botId:session.appId,tenantId:'corp-local',tenantNamespace:'corp_id'});assert.equal(result.kind,'message');assert.equal(result.media.length,1);assert.ok(!JSON.stringify(result.event).includes('SYNTHETIC'));await f.port.send(request({replyToMessageId:'message-1'}));assert.equal(f.frames.filter(x=>x.cmd==='aibot_respond_msg').length,1);});
+
+
+test('WeCom human-confirmation outbox reaches the real SDK with the exact private userid',async t=>{
+ const f=await fixture(t),dir=mkdtempSync(join(tmpdir(),'identale-wecom-human-')),store=new Store(join(dir,'test.sqlite'));
+ store.db.exec("PRAGMA foreign_keys=OFF;INSERT INTO human_requests(request_id,workspace_id,entity_id,task_id,source_run_id,session_id,question_json,question_digest,content_version,created_at,updated_at)VALUES('request','w','e','task','run','session','{}','digest',1,1,1)");
+ const repo=new SqliteMessageLoopRepository(store),connection={workspaceId:'w',connectionId:session.connectionId,provider:'wecom',tenantId:'corp-local',identity:{kind:'bot',externalId:session.appId},credentialRef:'local-only'};
+ const adapter=new WeComConversationAdapter(connection,{send:r=>f.port.send(r)}),binding={workspaceId:'w',entityId:'e',connectionId:session.connectionId,appId:session.appId,provider:'wecom',bindingVersion:'v1',enabled:true,connection,conversation:adapter};
+ const connections={resolveBinding:async()=>binding,currentBindingVersion:()=>binding.bindingVersion},notifications=new HumanChannelNotifications(store,connections,repo);
+ repo.setTaskDeliveryPolicy({list:()=>[],refresh:async r=>notifications.assert(r),assert:r=>notifications.assert(r)});
+ const loop=new ChannelMessageLoop(repo,connections,{}, {},Date.now);
+ t.after(async()=>{await loop.stop();store.close();rmSync(dir,{recursive:true,force:true});});
+ const notice={workspaceId:'w',entityId:'e',requestId:'request',target:{kind:'channel',connectionId:session.connectionId,userId:'employee-local',identityNamespace:'user_id',provider:'wecom',appId:session.appId,tenantId:'corp-local'},text:'Synthetic human approval question'};
+ await notifications.prepare(notice);await notifications.prepare(notice);await loop.tick();await loop.waitForWork();
+ // Repository wakeups schedule another tick. tick() can return while that tick
+ // is busy, and waitForWork() observes only already-claimed work, not queued
+ // wakeups. Await the durable outcome instead of assuming one drain is final.
+ const receipt=()=>store.one("SELECT status,error,provider_request_id FROM channel_message_receipts WHERE id='human-question:request' AND kind='outbox'");
+ try{await until(()=>['unknown','sent','failed','canceled','expired'].includes(receipt()?.status));}
+ catch(error){assert.fail(`${error.message}; receipt=${JSON.stringify(receipt())}; transport=${JSON.stringify(f.port.status())}; commands=${JSON.stringify(f.frames.map(frame=>frame.cmd))}`);}
+ assert.equal(receipt().status,'unknown',`Provider acceptance must be persisted without invented delivery proof: ${JSON.stringify(receipt())}`);
+ assert.equal(receipt().error,null,`Unknown here must mean ACKed acceptance, not transport failure: ${JSON.stringify({receipt:receipt(),transport:f.port.status(),statuses:f.statuses})}`);
+ assert.equal(typeof receipt().provider_request_id,'string','SDK acceptance must retain the provider request ID');
+ const sends=f.frames.filter(frame=>frame.cmd==='aibot_send_msg');assert.equal(sends.length,1,JSON.stringify({receipt:store.one("SELECT * FROM channel_message_receipts WHERE id='human-question:request'"),delivery:store.one("SELECT status,error,provider_request_id,attempts FROM channel_deliveries WHERE id='human-question:request'"),transport:f.port.status(),statuses:f.statuses,frames:f.frames.map(frame=>({cmd:frame.cmd,chatid:frame.body?.chatid})),childOutput:f.output()}));assert.equal(sends[0].body.chatid,'employee-local');assert.equal(sends[0].body.markdown.content,notice.text);
+ const saved=JSON.parse(store.one('SELECT target_json FROM human_channel_notices').target_json);assert.equal(saved.conversation.externalId,'human-user:user_id:employee-local','durable logical destination stays unchanged');
+ assert.equal(store.one('SELECT status FROM channel_message_receipts').status,'unknown','provider acceptance is not fabricated delivery proof');
+ assert.equal(f.sockets.length,1);
+});
+
+test('WeCom logical private routes reject forged targets, namespaces, group recipients and synthetic quote replies before dispatch',async t=>{
+ const f=await fixture(t),connection={workspaceId:'w',connectionId:session.connectionId,provider:'wecom',tenantId:'corp-local',identity:{kind:'bot',externalId:session.appId},credentialRef:'local-only'};
+ const adapter=new WeComConversationAdapter(connection,{send:r=>f.port.send(r)}),logical={...conversation,externalId:'human-user:user_id:employee-local',privateRecipientNamespace:'user_id'};
+ for(const ref of [{...logical,privateRecipientId:'other'},{...logical,privateRecipientNamespace:'open_id'},{...logical,privateRecipientNamespace:undefined},{...logical,externalId:'arbitrary-chat'},{...logical,conversationKind:'group'}])await assert.rejects(adapter.sendMessage(request({conversation:ref})),e=>e.code==='invalid_request');
+ await assert.rejects(adapter.sendMessage(request({conversation:logical,replyToMessageId:'message-1'})),e=>e.code==='invalid_request');
+ await assert.rejects(adapter.sendMessage(request({conversation:logical,assertSendAllowed:()=>{throw Error('revoked');}})),/revoked/);
+ assert.ok(f.frames.every(frame=>!['aibot_respond_msg','aibot_send_msg'].includes(frame.cmd)));
+});
+
+test('WeCom conversation adapter preserves native private replies and group send/reply targets through the real SDK',async t=>{
+ const events=[],f=await fixture(t,{onEvent:async e=>{events.push(e);return 'accepted';}}),connection={workspaceId:'w',connectionId:session.connectionId,provider:'wecom',tenantId:'corp-local',identity:{kind:'bot',externalId:session.appId},credentialRef:'local-only'};
+ const adapter=new WeComConversationAdapter(connection,{send:r=>f.port.send(r)});
+ f.sockets[0].send(JSON.stringify(incoming()));await until(()=>events.length===1);
+ await adapter.sendMessage(request({replyToMessageId:'message-1',text:'native private reply'}));
+ const group={...conversation,externalId:'group-local',conversationKind:'group',privateRecipientId:undefined};
+ const groupFrame=incoming({msgid:'group-message',chattype:'group',chatid:'group-local'});groupFrame.headers.req_id='group-callback';
+ f.sockets[0].send(JSON.stringify(groupFrame));await until(()=>events.length===2);
+ await adapter.sendMessage(request({conversation:group,text:'native group send'}));
+ await adapter.sendMessage(request({conversation:group,replyToMessageId:'group-message',text:'native group reply'}));
+ const replies=f.frames.filter(frame=>frame.cmd==='aibot_respond_msg'),sends=f.frames.filter(frame=>frame.cmd==='aibot_send_msg');
+ assert.deepEqual(replies.map(frame=>[frame.headers.req_id,frame.body.stream.content]),[['callback-request','native private reply'],['group-callback','native group reply']]);
+ assert.equal(sends.length,1);assert.equal(sends[0].body.chatid,'group-local');assert.equal(sends[0].body.markdown.content,'native group send');assert.equal(f.sockets.length,1);
+});
+
+const fileAttachment={kind:'file',name:'fixture.txt',mediaType:'text/plain',bytes:new TextEncoder().encode('synthetic file')};
+test('native file upload and send reuse the receiving socket, with a new parent authorization check after upload',async t=>{
+ const f=await fixture(t);let guards=0;
+ const receipt=await f.port.send(request({text:'',attachment:fileAttachment,beforeSend:async()=>{guards++;}}));
+ assert.equal(receipt.status,'accepted');assert.equal(guards,2);assert.equal(f.sockets.length,1);
+ const commands=f.frames.filter(x=>x.cmd!=='ping').map(x=>x.cmd);
+ assert.deepEqual(commands,['aibot_subscribe','aibot_upload_media_init','aibot_upload_media_chunk','aibot_upload_media_finish','aibot_send_msg']);
+ assert.equal(f.frames.find(x=>x.cmd==='aibot_upload_media_init').body.total_size,fileAttachment.bytes.length);
+ assert.equal(f.frames.find(x=>x.cmd==='aibot_send_msg').body.file.media_id,'synthetic-media');
+});
+test('revocation after upload prevents native media dispatch',async t=>{
+ const f=await fixture(t);let guards=0;
+ await assert.rejects(f.port.send(request({text:'',attachment:fileAttachment,beforeSend:async()=>{if(++guards===2)throw Error('revoked');}})),e=>e.code==='forbidden');
+ assert.equal(guards,2);await delay(50);assert.ok(f.frames.some(x=>x.cmd==='aibot_upload_media_finish'));assert.ok(!f.frames.some(x=>x.cmd==='aibot_send_msg'));
+});
+test('native reply keeps exact inbound callback and rejects stale reply before upload',async t=>{
+ let received;const f=await fixture(t,{onEvent:async e=>{received=e;return'accepted';}});
+ await assert.rejects(f.port.send(request({text:'',attachment:fileAttachment,replyToMessageId:'missing'})),e=>e.code==='not_ready');assert.ok(!f.frames.some(x=>x.cmd==='aibot_upload_media_init'));
+ f.sockets[0].send(JSON.stringify(incoming()));await until(()=>received);
+ await f.port.send(request({text:'',attachment:fileAttachment,replyToMessageId:'message-1'}));
+ const reply=f.frames.find(x=>x.cmd==='aibot_respond_msg');assert.equal(reply.headers.req_id,'callback-request');assert.equal(reply.body.file.media_id,'synthetic-media');assert.equal(f.sockets.length,1);
+});
+test('upload-only disconnect is not sent; post-dispatch disconnect is unknown and not retried',async t=>{
+ const f=await fixture(t,{mediaAck:false});const result=f.port.send(request({text:'',attachment:fileAttachment})).catch(e=>e.code);
+ await until(()=>f.frames.some(x=>x.cmd==='aibot_upload_media_init'));f.sockets[0].terminate();assert.equal(await result,'temporarily_unavailable');assert.ok(!f.frames.some(x=>x.cmd==='aibot_send_msg'));
+ const other=await fixture(t,{sendAck:false});const unknown=other.port.send(request({text:'',attachment:fileAttachment})).catch(e=>e.code);
+ await until(()=>other.frames.some(x=>x.cmd==='aibot_send_msg'));other.sockets[0].terminate();assert.equal(await unknown,'delivery_unknown');await delay(50);assert.equal(other.frames.filter(x=>x.cmd==='aibot_send_msg').length,1);
+});
+test('invalid native payloads never cross upload transport',async t=>{
+ const f=await fixture(t);
+ for(const attachment of [{...fileAttachment,bytes:new Uint8Array()},{...fileAttachment,name:'../private'},{...fileAttachment,bytes:new Uint8Array(20_000_001)},{...fileAttachment,kind:'image',mediaType:'image/png'}])await assert.rejects(f.port.send(request({text:'',attachment})),e=>e.code==='invalid_request');
+ assert.ok(!f.frames.some(x=>x.cmd==='aibot_upload_media_init'));
+});
+
+test('native image sends to the exact group target on one connection',async t=>{
+ const f=await fixture(t),attachment={kind:'image',name:'pixel.png',mediaType:'image/png',bytes:Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jP3sAAAAASUVORK5CYII=','base64')};
+ const group={...conversation,conversationKind:'group',externalId:'group-local',privateRecipientId:undefined};
+ await f.port.send(request({conversation:group,text:'',attachment}));
+ const sent=f.frames.find(x=>x.cmd==='aibot_send_msg');assert.equal(sent.body.chatid,'group-local');assert.equal(sent.body.image.media_id,'synthetic-media');assert.equal(f.sockets.length,1);
+});
+test('late host authorization cannot commit after parent RPC deadline',async t=>{
+ const f=await fixture(t);let release,checks=0;const gate=new Promise(resolve=>release=resolve);
+ // Hold only the child result IPC so the parent RPC timer deterministically
+ // wins, regardless of which process notices the shared deadline first.
+ const emit=f.child.emit.bind(f.child),held=[];
+ f.child.emit=(event,...args)=>{if(event==='message'&&args[0]?.type==='send_result'){held.push(args[0]);return true;}return emit(event,...args);};
+ const result=f.port.send(request({text:'',attachment:fileAttachment,beforeSend:async()=>{if(++checks===2)await gate;}})).catch(e=>e.code);
+ await until(()=>checks===2);assert.ok(f.frames.some(x=>x.cmd==='aibot_upload_media_finish'));
+ assert.equal(await result,'temporarily_unavailable');release();await until(()=>held.length===1);
+ assert.equal(held[0].error,'temporarily_unavailable');emit('message',held[0]);
+ await delay(100);assert.ok(!f.frames.some(x=>['aibot_send_msg','aibot_respond_msg'].includes(x.cmd)));
+ assert.equal(f.port.status().state,'connected');
+});
+test('child commit deadline expires before parent RPC and rejects late commit',async t=>{
+ const f=await fixture(t),wire=encodeSend(request({text:'',attachment:fileAttachment}));
+ const requestId='child-deadline-first',deadline=Date.now()+2000,messages=[];
+ f.child.on('message',m=>{if(m.requestId===requestId)messages.push(m);});
+ // A direct runner RPC isolates child-first expiry from the host's 15s timer.
+ f.child.send({type:'send',generation:session.generation,connectionId:session.connectionId,revision:session.revision,authRevision:session.authRevision,requestId,request:wire,hash:wireHash(wire),deadline});
+ await until(()=>messages.some(m=>m.type==='send_prepared'));
+ const prepared=messages.find(m=>m.type==='send_prepared');assert.equal(prepared.deadline,deadline);
+ await until(()=>messages.some(m=>m.type==='send_result'));
+ assert.equal(messages.find(m=>m.type==='send_result').error,'temporarily_unavailable');
+ assert.ok(Date.now()>=deadline);assert.equal(f.port.status().state,'connected');
+ assert.ok(!f.frames.some(x=>['aibot_send_msg','aibot_respond_msg'].includes(x.cmd)));
+ f.child.send({...prepared,type:'send_commit'});await delay(100);
+ assert.ok(!f.frames.some(x=>['aibot_send_msg','aibot_respond_msg'].includes(x.cmd)));
+});
+test('prepared commit rejects altered nonce/hash/generation/deadline',async t=>{
+ const f=await fixture(t);let release,checks=0;const gate=new Promise(resolve=>release=resolve),prepared=[];
+ f.child.on('message',m=>{if(m.type==='send_prepared')prepared.push(m);});
+ const result=f.port.send(request({text:'',attachment:fileAttachment,beforeSend:async()=>{if(++checks===2)await gate;}}));
+ await until(()=>prepared.length===1);
+ const proof=prepared[0];
+ for(const change of [{nonce:'forged'},{hash:'0'.repeat(64)},{generation:'old'},{deadline:Date.now()+60_000}])f.child.send({...proof,type:'send_commit',...change});
+ await delay(100);assert.ok(!f.frames.some(x=>x.cmd==='aibot_send_msg'));release();assert.equal((await result).status,'accepted');f.child.send({...proof,type:'send_commit'});await delay(50);assert.equal(f.frames.filter(x=>x.cmd==='aibot_send_msg').length,1);
+});
+
+test('child rejects media bytes or exact target changed after wire hash was bound',async t=>{
+ const f=await fixture(t),wire=encodeSend(request({text:'',attachment:fileAttachment})),hash=wireHash(wire);
+ for(const changed of [{...wire,conversation:{...wire.conversation,externalId:'other-user',privateRecipientId:'other-user'}},{...wire,attachment:{...wire.attachment,base64:Buffer.from('different').toString('base64')}}])f.child.send({type:'send',generation:session.generation,connectionId:session.connectionId,revision:session.revision,authRevision:session.authRevision,requestId:JSON.stringify(changed),request:changed,hash,deadline:Date.now()+15_000});
+ await delay(100);assert.ok(!f.frames.some(x=>x.cmd==='aibot_upload_media_init'));assert.ok(!f.frames.some(x=>x.cmd==='aibot_send_msg'));
+});
+
+test('local SDK fixture uses production heartbeat tolerance during synchronous host work',async t=>{
+ const f=await fixture(t);
+ // Deliberately model synchronous SQLite work while other test files compete
+ // for CPU. The child continues running, but this local WS server cannot ACK.
+ // The old 100ms fixture heartbeat terminated the socket after two missed pongs.
+ Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,700);
+ const receipt=await f.port.send(request());
+ assert.equal(receipt.status,'accepted');assert.equal(f.port.status().state,'connected');
+ assert.equal(f.frames.filter(frame=>frame.cmd==='aibot_send_msg').length,1);
+ assert.equal(f.sockets.length,1,'A healthy connection must not reconnect merely because the fixture server briefly blocks');
+});

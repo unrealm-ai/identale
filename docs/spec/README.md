@@ -15,6 +15,7 @@
 | [06：渠道、权限与安全](06-channels-storage-and-security.md) | 可信身份、使用授权和执行限制 |
 | [17：存储、保留与恢复](17-conversation-storage-and-retention.md) | 双库、原文、资源与恢复边界 |
 | [26：渠道能力与扩展](26-channel-capabilities.md) | 各渠道实际差异和 Adapter 接入流程 |
+| [27：读取会议资料与云文档](27-business-resource-reads.md) | 应用身份读取、任务材料状态与明确选择的事项交接 |
 
 ## 维护方式
 

@@ -28,7 +28,14 @@ export interface ChannelCapability {
   availability: CapabilityAvailability;
   reason?: string;
 }
+/** Media is direction- and conversation-specific. Absence means unknown, never available. */
+export interface ChannelMediaKinds { image: ChannelCapability; file: ChannelCapability; }
+export interface ChannelMediaCapabilities {
+  inbound: { private: ChannelMediaKinds; group: ChannelMediaKinds };
+  outbound: { private: ChannelMediaKinds; group: ChannelMediaKinds };
+}
 export interface ConversationCapabilities {
+  media?: ChannelMediaCapabilities;
   /** Missing on legacy adapters means unsupported, never infer from group grants. */
   privateMessageEvents?: ChannelCapability;
   /** Authenticated provider delivery directed to this bot, not a fabricated mention. */

@@ -536,3 +536,12 @@ for(const scenario of ['history arguments','oversized input'])test(`task boundar
  assert.equal(s.calls.length,0);const messages=(await s.call('GET',`${s.base}/conversations/${c.id}/messages`,undefined,s.cookie)).json().messages;
  assert.equal(messages.some(m=>m.text.includes('已受理')||m.text.includes('已完成')),false);
 });
+
+for(const toolName of ['task_query','task_query_results'])test(`${toolName} cannot project consumed business-resource output into an unrelated audience`,async t=>{
+ let taskId;const seen=[];const s=await setup(t,{modelClient:{async complete(input){seen.push(input.messages);return response({toolCalls:[{id:'resource-query',name:toolName,arguments:{taskId}}]});}}});
+ const c=await s.conv('real'),created=await s.call('POST',s.base+'/tasks',{operationId:'resource-task',conversationId:c.id,input:'Synthetic resource task'},s.cookie);assert.equal(created.statusCode,202,created.body);taskId=created.json().task.id;
+ const task=s.db.prepare('SELECT * FROM tasks WHERE id=?').get(taskId),asset='resource-only';s.service.ingest(task.run_id,{eventId:'resource-result',runId:task.run_id,sequence:1,type:'final_result',text:'RESOURCE_RESULT_MUST_NOT_ENTER_MODEL',inputRevision:1});
+ s.db.prepare('INSERT INTO message_asset_run_grants VALUES(?,?,?,?,?,?)').run(asset,task.run_id,task.id,task.workspace_id,task.entity_id,1800000000000);
+ s.db.prepare('INSERT INTO business_resource_authorizations VALUES(?,?,?,?,?,?)').run(asset,task.run_id,'content','document',JSON.stringify({source:{provider:'feishu',connectionId:'fixture',tenantId:'fixture',chatId:'private-origin'},run:{workspaceId:task.workspace_id,entityId:task.entity_id,taskId:task.id,runId:task.run_id}}),'{}');
+ const started=await s.turn(c,'Query this task','resource-query-turn');assert.equal(started.statusCode,202,started.body);assert.equal((await s.finish(c,started.json().turn.id)).status,'failed');assert.doesNotMatch(JSON.stringify(seen),/RESOURCE_RESULT_MUST_NOT_ENTER_MODEL/);
+});

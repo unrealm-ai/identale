@@ -14,7 +14,7 @@ const window = new Window({ url: 'http://127.0.0.1:5173/' });
 for (const name of ['window', 'document', 'navigator', 'location', 'history', 'localStorage', 'Node', 'ShadowRoot', 'Document', 'Element', 'HTMLElement', 'SVGElement', 'HTMLDialogElement', 'Event', 'MouseEvent', 'KeyboardEvent', 'PointerEvent', 'FocusEvent', 'InputEvent', 'Image', 'HTMLInputElement', 'HTMLTextAreaElement', 'getComputedStyle', 'MutationObserver', 'ResizeObserver', 'requestAnimationFrame', 'cancelAnimationFrame']) Object.defineProperty(globalThis, name, { value: name === 'window' ? window : window[name], configurable: true });
 const { createApp, h, reactive, nextTick } = await import('vue');
 const bundle = await mkdtemp(resolve('apps/web/.directory-ui-test-'));
-const paths = { draft: 'apps/web/src/features/employees/WizardChannelDraft.vue', wecom: 'apps/web/src/features/employees/WecomDirectoryBinding.vue', wizard: 'apps/web/src/features/employees/EntityWizard.vue', guide: 'apps/web/src/features/directory/DirectorySetupGuide.vue', settings: 'apps/web/src/features/employees/ChannelConnections.vue', picker: 'apps/web/src/features/directory/DirectoryRulePicker.vue', access: 'apps/web/src/features/employees/AccessSettings.vue' };
+const paths = { materials:'apps/web/src/features/business-resources/TaskMaterialAuthorization.vue', business: 'apps/web/src/features/business-resources/BusinessResourceConfiguration.vue', requirements: 'apps/web/src/features/employees/ChannelSetupRequirements.vue', draft: 'apps/web/src/features/employees/WizardChannelDraft.vue', wecom: 'apps/web/src/features/employees/WecomDirectoryBinding.vue', wizard: 'apps/web/src/features/employees/EntityWizard.vue', guide: 'apps/web/src/features/directory/DirectorySetupGuide.vue', settings: 'apps/web/src/features/employees/ChannelConnections.vue', picker: 'apps/web/src/features/directory/DirectoryRulePicker.vue', access: 'apps/web/src/features/employees/AccessSettings.vue' };
 const components = {};
 for (const [name, path] of Object.entries(paths)) {
   const outfile = join(bundle, `${name}.mjs`);
@@ -39,7 +39,7 @@ async function mount(t, name, initial, handler = async () => { throw new Error('
     assert.ok(String(url).startsWith('/api/'), 'Only relative local fixture API routes are permitted');
     const request = { url: String(url), method: options.method ?? 'GET', body: options.body ? JSON.parse(options.body) : undefined };
     requests.push(request);
-    const result = name === 'settings' && request.method==='GET' && request.url.endsWith('/directory-access')
+    const result = name==='settings' && request.url === '/api/business-resources/configuration' ? {configured:false,reason:'business_oauth_not_configured'} : name === 'settings' && request.method==='GET' && request.url.endsWith('/directory-access')
       ? {allow:[],deny:[],allowGroupMembers:false,revision:0}
       : name === 'settings' && request.url.endsWith('/runtime-status')
       ? await (runtimeHandler ? runtimeHandler(request) : { observedAt: 1792756800000, employee: { channels: latestConnections } })
@@ -53,7 +53,9 @@ async function mount(t, name, initial, handler = async () => { throw new Error('
   return { props, requests, app, events };
 }
 const base = '/workspaces/workspace-a/entities/employee-a';
-const connection = (overrides = {}) => ({ validation:{version:1,provider:overrides.provider??'feishu',checkedAt:Date.now(),canContinue:true,checks:[{id:'credentials',required:true,supported:true,status:'pass'},{id:'directory_identity',required:true,supported:true,status:'pass'},{id:'directory_scope',required:true,supported:true,status:'pass'},{id:'user_name',required:true,supported:true,status:'pass'}]},transport: { state: 'connected', changedAt: 1792756800000 }, id: 'connection-1', sourceId: 'source-1', entityId: 'employee-a', provider: 'feishu', appId: 'fixture-app', tenantId: 'fixture-tenant', tenantIdNamespace: 'tenant_key', revision: 1, authRevision: 1, status: 'verified', identityEvidence: 'provider_api', inboundVerified: false, directoryStatus: 'available', enabled: true, ...overrides });
+const yesCapability={supported:true,availability:'available'}, noCapability={supported:false,availability:'unsupported',reason:'当前机器人接入未实现'};
+const fixtureCapabilities=(provider='feishu')=>({privateMessages:yesCapability,groupMentions:yesCapability,ordinaryGroupMessages:provider==='feishu'?yesCapability:noCapability,keywordTriggers:provider==='feishu'?yesCapability:noCapability,recentGroupContext:provider==='feishu'?yesCapability:noCapability,directoryRead:yesCapability,meetingRead:{supported:true,availability:'authorization_required',reason:'独立业务授权尚未配置'},documentRead:{supported:false,availability:'unknown',reason:'读取链路尚未接通'}});
+const connection = (overrides = {}) => ({ capabilities:fixtureCapabilities(overrides.provider), validation:{version:1,provider:overrides.provider??'feishu',checkedAt:Date.now(),canContinue:true,checks:[{id:'credentials',required:true,supported:true,status:'pass'},{id:'directory_identity',required:true,supported:true,status:'pass'},{id:'directory_scope',required:true,supported:true,status:'pass'},{id:'user_name',required:true,supported:true,status:'pass'}]},transport: { state: 'connected', changedAt: 1792756800000 }, id: 'connection-1', sourceId: 'source-1', entityId: 'employee-a', provider: 'feishu', appId: 'fixture-app', tenantId: 'fixture-tenant', tenantIdNamespace: 'tenant_key', revision: 1, authRevision: 1, status: 'verified', identityEvidence: 'provider_api', inboundVerified: false, directoryStatus: 'available', enabled: true, ...overrides });
 const subjects = source => ({ sources: [source ?? connection()], users: [], departments: [] });
 const department = { externalId: 'department-7', subjectId: JSON.stringify({ id: 'department-7', namespace: 'department_id', applicationId: 'fixture-app' }), displayName: '研发部', kind: 'department' };
 const page = (items, overrides = {}) => ({ sourceId: 'source-1', provider: 'feishu', appId: 'fixture-app', items, exhausted: true, ...overrides });
@@ -209,7 +211,7 @@ test('pending robot verification requires explicit start, checking signed candid
     return [current];
   });
   await until(() => text().includes('开始机器人身份验证'));
-  assert.deepEqual(env.requests.map(r=>r.url).sort(),[`/api${base}/channels`,`/api${base}/runtime-status`,`/api${base}/directory-access`].sort());assert.ok(env.requests.every(r=>r.method==='GET')); await click('开始机器人身份验证');
+  assert.deepEqual(env.requests.map(r=>r.url).sort(),[`/api${base}/channels`,`/api${base}/runtime-status`,`/api${base}/directory-access`,'/api/business-resources/configuration'].sort());assert.ok(env.requests.every(r=>r.method==='GET')); await click('开始机器人身份验证');
   await until(() => text().includes('检查测试消息候选')); assert.equal(env.requests.some(item => item.url.endsWith('/verification/confirm')), false);
   await click('检查测试消息候选'); await until(() => text().includes('身份核对无误，确认绑定此候选'));
   assert.equal(env.requests.some(item => item.url.endsWith('/verification/confirm')), false);
@@ -240,7 +242,7 @@ test('Feishu context settings preserve enabled status with CAS and remove static
     current = connection({ revision: 2, context: { historyEnabled: false, groupListenEnabled:request.body.groupListenEnabled, meetingRefs: [] } }); return current;
   });
   await until(() => !!document.querySelector('.channel-context-form'));
-  assert.deepEqual(new Set(env.requests.map(r=>r.url)),new Set([`/api${base}/channels`,`/api${base}/runtime-status`,`/api${base}/directory-access`])); await click('群上下文范围');assert.ok(text().includes('资料引用'));await click('群上下文范围');assert.ok(document.querySelector('.channel-context-form textarea[aria-label="群聊触发关键词"]'));assert.ok(text().includes('普通群消息接收权限尚未验证'));
+  assert.deepEqual(new Set(env.requests.map(r=>r.url)),new Set([`/api${base}/channels`,`/api${base}/runtime-status`,`/api${base}/directory-access`,'/api/business-resources/configuration'])); await click('群上下文范围');assert.ok(text().includes('资料引用'));await click('群上下文范围');assert.ok(document.querySelector('.channel-context-form textarea[aria-label="群聊触发关键词"]'));assert.ok(text().includes('普通群消息接收权限尚未验证'));
   document.querySelector('.channel-context-form .n-checkbox').click();
   await click('保存'); await until(() => env.requests.some(item => item.method === 'PUT'));
   assert.deepEqual(env.requests.find(item => item.method === 'PUT').body, { enabled: true, expectedRevision: 1, groupListenEnabled: true, groupTriggerKeywords:[] });
@@ -429,7 +431,7 @@ test('WeCom employee selection keeps unsupported contexts absent and blocks chal
   assert.equal(button('开始机器人身份验证').disabled, true);
   assert.equal(document.querySelector('[aria-label="读取当前群历史"]'), null);
   assert.equal(document.querySelector('[aria-label="明确的 Minutes token"]'), null);
-  const allowedReads = new Set([`/api${base}/channels`, `/api${base}/runtime-status`, `/api${base}/channels/wecom/directory-credentials`, `/api${base}/directory-access`]);
+  const allowedReads = new Set(['/api/business-resources/configuration', `/api${base}/channels`, `/api${base}/runtime-status`, `/api${base}/channels/wecom/directory-credentials`, `/api${base}/directory-access`]);
   assert.ok(env.requests.every(item => item.method === 'GET' && allowedReads.has(item.url)), 'Only this employee’s channel configuration, runtime observation and WeCom directory choices may be read');
   assert.equal(env.requests.filter(item => item.url === `/api${base}/runtime-status`).length, 1, 'Connection status must be read from the runtime observation endpoint');
 });
@@ -439,7 +441,7 @@ test('WeCom member reads separate statuses without directory-management endpoint
   await until(()=>!!document.querySelector('.connection-list .n-card button'));document.querySelector('.connection-list .n-card button').click();await flush();await until(() => text().includes('管理员同企业声明（非厂商证明）'));
   assert.ok(text().includes('未关联目录应用'));
   assert.equal(document.querySelector('.wecom-directory-binding'), null);
-  const allowedReads = new Set([`/api${base}/channels`, `/api${base}/runtime-status`]);
+  const allowedReads = new Set(['/api/business-resources/configuration', `/api${base}/channels`, `/api${base}/runtime-status`]);
   assert.ok(env.requests.every(item => item.method === 'GET' && allowedReads.has(item.url)), 'A read-only member must not access directory-management or mutation endpoints');
   assert.equal(env.requests.filter(item => item.url === `/api${base}/runtime-status`).length, 1, 'A member may read the same employee’s runtime observation');
 });
@@ -548,4 +550,111 @@ test('editing presents credentials and permissions together without tutorials or
   assert.ok(document.querySelector('.channel-setup a[href="https://open.feishu.cn/app"]'));
   assert.match(document.querySelector('.setup-requirements').textContent,/通讯录|人员姓名/);
   assert.equal(env.requests.some(r=>r.method!=='GET'),false);
+});
+
+
+test('DingTalk requirements separate Stream receive, proactive send and scoped directory permissions',async t=>{
+ const env=await mount(t,'requirements',{provider:'dingtalk'});
+ for(const code of ['qyapi_robot_sendmsg','qyapi_get_department_list','qyapi_get_department_member','qyapi_get_member'])assert.ok(text().includes(code),code);
+ assert.ok(text().includes('Stream 在线不代表已获发送权限'));assert.ok(text().includes('不要求手机号、邮箱或流式卡片权限'));assert.equal(env.requests.length,0);
+ assert.equal(document.querySelector('.channel-guide-dots'),null);
+});
+
+test('WeCom requirements distinguish independent robot, reusable directory and trusted public egress IP',async t=>{
+ const env=await mount(t,'requirements',{provider:'wecom'});
+ for(const value of ['BotID / Secret','CorpID / AgentId / Secret','同一工作区复用','实际公网出口 IP','不支持标签范围','目录成功不等于消息收发已通过'])assert.ok(text().includes(value),value);
+ assert.equal(env.requests.length,0);assert.equal(document.querySelector('.channel-guide-dots'),null);
+});
+
+
+test('channel capability controls follow backend declarations, never the online transport', async t => {
+  const caps=fixtureCapabilities('dingtalk');
+  await mount(t,'settings',{base,canManage:true},async()=>[connection({provider:'dingtalk',capabilities:caps})]);
+  await until(()=>text().includes('渠道能力与配置条件'));
+  assert.equal(document.querySelector('.channel-context-form'),null);
+  assert.ok(text().includes('独立业务授权尚未配置'));
+  assert.ok(text().includes('读取链路尚未接通'));
+  assert.ok(text().includes('私聊接收图片'));
+  assert.ok(text().includes('群聊发送文件'));
+  assert.equal(document.querySelector('[aria-label="业务资料读取"] input'),null);
+});
+
+test('missing capability declaration does not offer controls even for Feishu', async t => {
+  await mount(t,'settings',{base,canManage:true},async()=>[connection({capabilities:undefined})]);
+  await until(()=>text().includes('尚未取得能力声明'));
+  assert.equal(document.querySelector('.channel-context-form'),null);
+});
+
+test('context retention is independent of keyword triggering and unauthorized capability cannot enable it', async t => {
+  const caps=fixtureCapabilities(); caps.recentGroupContext={supported:true,availability:'authorization_required'};caps.keywordTriggers={supported:true,availability:'authorization_required'};
+  await mount(t,'settings',{base,canManage:true},async()=>[connection({capabilities:caps})]);
+  await until(()=>!!document.querySelector('.channel-context-form'));
+  assert.ok(text().includes('保留近期群消息作为上下文'));
+  assert.ok(text().includes('仍接收消息并匹配关键词'));
+  assert.equal(document.querySelector('.channel-context-form textarea').disabled,false);assert.ok(text().includes('未获权限时可保存草稿'));
+  assert.ok(document.querySelector('.channel-context-form .n-checkbox').classList.contains('n-checkbox--disabled'));
+});
+
+test('WeCom revalidation notice distinguishes reconnecting from disabled without claiming verified success', async t => {
+  for (const enabled of [true,false]) await t.test(enabled?'enabled reconnect':'disabled remains disabled', async t => {
+    let current=connection({provider:'wecom',enabled,status:enabled?'verified':'disabled'});
+    await mount(t,'settings',{base,canManage:true},async request=>{
+      if(request.url.endsWith('/directory-credentials'))return [];
+      if(request.method==='GET')return [current];
+      current={...current,status:enabled?'pending_verification':'disabled',revision:2};return current;
+    });
+    await click('重新验证已存凭据');
+    await until(()=>text().includes(enabled?'已开始重新连接，请完成机器人身份验证':'渠道仍保持停用'));
+    assert.ok(text().includes('通讯录关联和使用范围保留'));
+  });
+});
+
+
+test('business authorization setup displays actual callback and fixed scopes without generic account binding', async t => {
+ const env=await mount(t,'business',{provider:'feishu'},async()=>({configured:true,redirectUri:'https://fixture.invalid/api/business-resources/feishu/callback',providers:[{provider:'feishu',supportedResources:['document'],scopes:['docx:document:readonly']},{provider:'dingtalk',supportedResources:[],reason:'verified_user_oauth_mapping_required'}]}));
+ await until(()=>text().includes('docx:document:readonly'));
+ assert.ok(text().includes('https://fixture.invalid/api/business-resources/feishu/callback'));
+ assert.ok(text().includes('不代表账号已授权'));
+ assert.equal(document.querySelector('input'),null);assert.equal(document.querySelector('a'),null);
+ assert.ok(env.requests.every(request=>request.method==='GET'));
+ env.props.provider='dingtalk';await flush();assert.ok(text().includes('可信身份关联尚未接通'));assert.ok(!text().includes('原型声明的只读权限'));
+});
+
+
+const businessConfig={configured:true,providers:[{provider:'feishu',supportedResources:['document']}]};
+const businessMaterials={taskId:'task-fixture',runId:'run-fixture',items:[{assetId:'asset-fixture',kind:'document',provider:'feishu',authorizationState:'authorization_required'},{assetId:'meeting-fixture',kind:'meeting',provider:'feishu',authorizationState:'authorization_required'},{assetId:'ding-fixture',kind:'document',provider:'dingtalk',authorizationState:'authorization_required'}]};
+test('task materials use persisted IDs and supported types, return official link without navigating or executing',async t=>{
+ const env=await mount(t,'materials',{taskId:'task-fixture',runId:'run-fixture'},async request=>request.url.endsWith('/configuration')?businessConfig:request.method==='GET'?businessMaterials:{authorizationUrl:'https://accounts.feishu.cn/open-apis/authen/v1/authorize?state=fixture',expiresAt:Date.now()+60000});
+ assert.equal(env.requests.length,0);await click('查看任务材料');
+ assert.equal([...document.querySelectorAll('button')].filter(b=>b.textContent==='准备飞书账号授权').length,0);
+ await click('查看可选个人授权（非必需）');await click('准备飞书账号授权');
+ assert.deepEqual(env.requests.find(r=>r.method==='POST').body,{assetId:'asset-fixture',runId:'run-fixture'});
+ const link=document.querySelector('a');assert.ok(link);assert.equal(link.hostname,'accounts.feishu.cn');assert.equal(link.rel,'noopener noreferrer');assert.ok(text().includes('不会自动重跑'));
+ assert.equal(env.requests.filter(r=>r.method==='POST').length,1);assert.equal(document.querySelector('input'),null);
+ env.props.runId='other-run';await flush();assert.equal(document.querySelector('a'),null);assert.equal(document.querySelector('.material-items'),null);
+ await click('查看任务材料');assert.ok(text().includes('正在查看历史执行段'));assert.equal(document.querySelector('.material-items'),null);
+});
+test('task authorization blocks duplicate submits and discards late results after task switch',async t=>{
+ let release;const pending=new Promise(resolve=>release=resolve);t.after(()=>release());
+ const env=await mount(t,'materials',{taskId:'task-fixture',runId:'run-fixture'},async request=>request.url.endsWith('/configuration')?businessConfig:request.method==='GET'?businessMaterials:(await pending,{authorizationUrl:'https://accounts.feishu.cn/open-apis/authen/v1/authorize?state=fixture',expiresAt:Date.now()+60000}));
+ await click('查看任务材料');await click('查看可选个人授权（非必需）');await click('准备飞书账号授权');assert.equal(button('准备飞书账号授权').disabled,true);button('准备飞书账号授权').click();assert.equal(env.requests.filter(r=>r.method==='POST').length,1);
+ env.props.taskId='new-task';env.props.runId='new-run';await flush();release();await flush();assert.equal(document.querySelector('a'),null);assert.equal(document.querySelector('.material-items'),null);
+});
+test('task authorization rejects nonofficial URLs and configured service does not imply resource success',async t=>{
+ await mount(t,'materials',{taskId:'task-fixture',runId:'run-fixture'},async request=>request.url.endsWith('/configuration')?businessConfig:request.method==='GET'?businessMaterials:{authorizationUrl:'https://accounts.feishu.cn.evil.invalid/open-apis/authen/v1/authorize',expiresAt:Date.now()+60000});
+ await click('查看任务材料');await click('查看可选个人授权（非必需）');await click('准备飞书账号授权');assert.equal(document.querySelector('a'),null);assert.ok(text().includes('暂时无法确认材料授权状态'));assert.ok(text().includes('账号授权不代表资料读取成功'));
+});
+
+
+test('application preparation distinguishes saved states without inventing scope or ACL evidence or OAuth fallback',async t=>{
+ const config={configured:false,application:{providers:[{provider:'feishu',supportedResources:['document','minutes'],appScopes:['docx:document:readonly'],objectAcl:'per_resource',availability:'available',limitations:['具体资源仍需单独核验']}]}};
+ const items=[{assetId:'doc',kind:'document',provider:'feishu',accessMode:'application',reads:[{kind:'content',state:'no_permission',reason:'business_resource_authorization_required'}]},{assetId:'minutes',kind:'minutes',provider:'feishu',accessMode:'application',reads:[{kind:'summary',state:'ready'},{kind:'transcript',state:'pending'}]},{assetId:'denied',kind:'document',provider:'feishu',accessMode:'application',reads:[{kind:'content',state:'no_permission',reason:'provider_permission_denied'}]},{assetId:'wecom',kind:'meeting',provider:'wecom',accessMode:'application',reads:[{kind:'transcript',state:'not_available',reason:'wecom_application_resource_unverified'}]}];
+ const env=await mount(t,'materials',{taskId:'task-fixture',runId:'run-fixture'},async request=>request.url.endsWith('/configuration')?config:{taskId:'task-fixture',runId:'run-fixture',items});
+ await click('查看任务材料');assert.ok(text().includes('不能据此区分缺少哪一项'));assert.ok(text().includes('具体 API 权限或对象访问原因尚未确认'));assert.ok(!text().includes('应用没有该资料访问权'));assert.ok(text().includes('已预下载'));assert.ok(text().includes('资料生成或准备中'));assert.ok(text().includes('企微应用资料读取协议尚未核验'));
+ assert.ok(!text().includes('准备飞书账号授权'));assert.equal(document.querySelector('a'),null);assert.ok(env.requests.every(request=>request.method==='GET'));assert.ok(text().includes('不代表当前权限复验通过'));
+});
+
+test('application configuration is primary and optional OAuth stays absent unless explicitly configured',async t=>{
+ await mount(t,'business',{provider:'feishu'},async()=>({configured:false,application:{providers:[{provider:'feishu',supportedResources:['document','minutes'],appScopes:['docx:document:readonly'],objectAcl:'per_resource',availability:'available',limitations:['meeting_metadata_scopes_not_fully_verified','synthetic_unknown_internal_limit']} ]}}));
+ await until(()=>text().includes('应用读取适配已接入'));assert.ok(text().includes('个人账号登录不是前置条件'));assert.ok(text().includes('不表示当前应用已获授权'));assert.equal(document.querySelector('.optional-oauth'),null);assert.equal(document.querySelector('input'),null);assert.ok(text().includes('会议、录制和笔记 API 权限仍需按官方后台和实际接口核验'));assert.ok(text().includes('还有尚未核验的限制'));assert.ok(!text().includes('meeting_metadata_scopes_not_fully_verified'));assert.ok(!text().includes('synthetic_unknown_internal_limit'));
 });

@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { taskDisplayTitle } from '@dentity/contracts';
+import TaskMaterialAuthorization from '../business-resources/TaskMaterialAuthorization.vue';
 import { computed, nextTick, onUnmounted, ref, watch } from 'vue';
 import { NAlert, NButton, NEmpty, NSelect, NSkeleton } from 'naive-ui';
 import { api, ApiError, errorMessage } from '../../shared/api';
@@ -118,6 +119,7 @@ onUnmounted(() => { disposed = true; controller.abort(); generation++; if (timer
     <header><h2>{{ taskDisplayTitle(currentTask) }}</h2><div class="detail-meta"><StatusBadge :status="currentTask.status"/><time :datetime="new Date(currentTask.createdAt).toISOString()">{{ new Date(currentTask.createdAt).toLocaleString('zh-CN') }}</time></div></header>
     <details :key="currentTask.id" class="task-description"><summary>任务说明</summary><p class="selectable">{{ currentTask.input }}</p></details>
     <details class="task-identifiers"><summary>任务信息</summary><h3>任务（Task）</h3><p class="selectable">{{ currentTask.id }}</p><p>输入修订 r{{ currentTask.inputRevision }}</p></details>
+    <TaskMaterialAuthorization v-if="page" :task-id="currentTask.id" :run-id="page.runId" @session-expired="emit('sessionExpired')"/>
     <NAlert v-if="error" type="error">{{ error }} <NButton :disabled="loading" @click="load()">重新读取</NButton></NAlert>
     <NSkeleton v-if="loading && !page" text :repeat="4"/>
     <div v-if="page" class="status-lanes" aria-label="任务、执行与投递状态"><section><h3>任务 TASK</h3><StatusBadge :status="currentTask.status"/></section><section><h3>执行 RUN</h3><StatusBadge v-if="selectedRun" domain="run" :status="selectedRun.status"/><span v-else class="field-note">尚未开始执行</span></section><section><h3>投递 DELIVERY</h3><StatusBadge v-for="delivery in page.deliveries" :key="delivery.id" domain="delivery" :status="delivery.status"/><span v-if="!page.deliveries.length" class="field-note">未提供投递记录</span></section></div>

@@ -18,7 +18,7 @@ function vendor(overrides={}){
   state.fetch=async(url,init={})=>{
     const target=new URL(url),path=target.pathname;
     assert.ok(['https://open.feishu.cn','https://api.dingtalk.com','https://oapi.dingtalk.com','https://qyapi.weixin.qq.com'].includes(target.origin));
-    assert.equal(init.redirect,'error');state.calls.push({path,method:init.method});
+    assert.equal(init.redirect,'error');state.calls.push({path,method:init.method,query:Object.fromEntries(target.searchParams)});
     assert.ok(!path.includes('/messages')&&!path.includes('/scopes/apply'),'No message or permission mutation probe');
     if(path==='/open-apis/auth/v3/tenant_access_token/internal')return json({code:0,tenant_access_token:token,expire:7200});
     if(path==='/open-apis/application/v6/scopes'){
@@ -38,8 +38,15 @@ function vendor(overrides={}){
       return json(fsData(state.contactScope??{department_ids:state.mode==='empty'?[]:['od_a'],user_ids:state.mode==='empty'||state.mode==='no-sample'?[]:['ou_a'],has_more:false}));
     }
     if(path==='/open-apis/contact/v3/departments/od_a')return json(fsData({department:{open_department_id:'od_a',name:'Synthetic department',parent_department_id:'0'}}));
-    if(path.endsWith('/children'))return json(fsData({items:[],has_more:false}));
-    if(path==='/open-apis/contact/v3/users/find_by_department')return json(fsData({items:state.members??[],has_more:false}));
+    if(path.endsWith('/children')){
+      const id=path.split('/').at(-2),cursor=target.searchParams.get('page_token')??'';
+      return json(fsData(state.childPages?.[id]?.[cursor]??{items:[],has_more:false}));
+    }
+    if(path==='/open-apis/contact/v3/users/find_by_department'){
+      const id=target.searchParams.get('department_id'),cursor=target.searchParams.get('page_token')??'';
+      if(state.deniedDepartment===id)return json({code:99991672},400);
+      return json(fsData(state.memberPages?.[id]?.[cursor]??{items:state.members??[],has_more:false}));
+    }
     if(path==='/open-apis/contact/v3/users/ou_a')return json(fsData({user:{open_id:'ou_a',department_ids:['od_a'],...(state.mode==='no-name'?{}:{name:personName})}}));
     if(path==='/v1.0/oauth2/accessToken')return json({accessToken:token,expireIn:7200});
     if(path==='/auth/scopes')return json({errcode:0,auth_org_scopes:{authed_dept:[1],authed_user:['user-a']}});
@@ -91,6 +98,80 @@ for(const [mode,id,reason] of [['identity-denied','directory_identity','denied']
     });
   });
 }
+
+const samplePage=id=>({items:[{open_id:'ou_sample',name:personName,department_ids:[id]}],has_more:false});
+const childPage=(id,parent)=>({open_department_id:id,name:'Synthetic department',parent_department_id:parent});
+const sampleVendor=overrides=>vendor({contactScope:{department_ids:['od_a'],user_ids:[],has_more:false},...overrides});
+
+test('directory validation finds a sample in the fourth authorized department without guessing other roots',async()=>{
+  const state=sampleVendor({contactScope:{department_ids:['od_a','od_b','od_c','od_d'],user_ids:[],has_more:false},memberPages:{od_d:{'':samplePage('od_d')}}});
+  assert.equal((await feishu(state)).validation.canContinue,true);
+  assert.deepEqual(state.calls.filter(c=>c.path.endsWith('/find_by_department')).map(c=>c.query.department_id),['od_a','od_b','od_c','od_d']);
+});
+
+test('directory validation follows deep authorized descendants and both child and member pagination',async()=>{
+  const state=sampleVendor({childPages:{
+    od_a:{'':{items:[],has_more:true,page_token:'children-2'},'children-2':{items:[childPage('od_b','od_a')],has_more:false}},
+    od_b:{'':{items:[childPage('od_c','od_b')],has_more:false}},
+    od_c:{'':{items:[childPage('od_d','od_c')],has_more:false}}
+  },memberPages:{od_d:{'':{items:[],has_more:true,page_token:'members-2'},'members-2':samplePage('od_d')}}});
+  assert.equal((await feishu(state)).validation.canContinue,true);
+  assert.ok(state.calls.some(c=>c.query.page_token==='children-2'));
+  assert.ok(state.calls.some(c=>c.query.page_token==='members-2'));
+});
+
+test('directory validation reports limit rather than no_sample with authorized work remaining',async()=>{
+  const roots=['od_a',...Array.from({length:20},(_,i)=>'od_b'+i)];
+  const state=sampleVendor({contactScope:{department_ids:roots,user_ids:[],has_more:false}});
+  await assert.rejects(feishu(state),error=>error instanceof ChannelValidationError&&check(error.validation,'user_name').reason==='limit'&&check(error.validation,'user_name').status==='unverified');
+  assert.equal(state.calls.filter(c=>c.path.endsWith('/children')||c.path.endsWith('/find_by_department')).length,32);
+});
+
+test('directory validation reports no_sample only after exhausting member and child pages',async()=>{
+  const state=sampleVendor({memberPages:{od_a:{'':{items:[],has_more:true,page_token:'empty-2'},'empty-2':{items:[],has_more:false}}}});
+  await assert.rejects(feishu(state),error=>error instanceof ChannelValidationError&&check(error.validation,'user_name').reason==='no_sample');
+  assert.ok(state.calls.some(c=>c.query.page_token==='empty-2'));
+  assert.equal(state.calls.filter(c=>c.path.endsWith('/children')).length,1);
+});
+
+test('directory validation stops on denied reads rather than searching around authorization failures',async()=>{
+  const state=sampleVendor({contactScope:{department_ids:['od_a','od_b'],user_ids:[],has_more:false},deniedDepartment:'od_a',memberPages:{od_b:{'':samplePage('od_b')}}});
+  await assert.rejects(feishu(state),error=>error instanceof ChannelValidationError&&check(error.validation,'user_name').status==='missing');
+  assert.ok(!state.calls.some(c=>c.query.department_id==='od_b'));
+});
+
+test('directory validation rejects repeated member continuations and bounds endless distinct pages',async()=>{
+  const state=sampleVendor({memberPages:{od_a:{'':{items:[],has_more:true,page_token:'loop'},loop:{items:[],has_more:true,page_token:'loop'}}}});
+  await assert.rejects(feishu(state),error=>error instanceof ChannelValidationError&&check(error.validation,'user_name').reason==='parse');
+  const pages={};for(let i=0;i<40;i++)pages[i===0?'':String(i)]={items:[],has_more:true,page_token:String(i+1)};
+  const endless=sampleVendor({memberPages:{od_a:pages}});
+  await assert.rejects(feishu(endless),error=>error instanceof ChannelValidationError&&check(error.validation,'user_name').reason==='limit');
+  assert.equal(endless.calls.filter(c=>c.path.endsWith('/find_by_department')).length,32);
+});
+
+test('directory validation deduplicates overlapping scope roots and discovered descendants',async()=>{
+  const state=sampleVendor({contactScope:{department_ids:['od_a','od_b'],user_ids:[],has_more:false},childPages:{od_a:{'':{items:[childPage('od_b','od_a')],has_more:false}}}});
+  await assert.rejects(feishu(state),error=>error instanceof ChannelValidationError&&check(error.validation,'user_name').reason==='no_sample');
+  assert.deepEqual(state.calls.filter(c=>c.path.endsWith('/find_by_department')).map(c=>c.query.department_id),['od_a','od_b']);
+});
+
+test('directory validation bounds discovered departments rather than silently truncating authorized children',async()=>{
+  const pages={};for(let i=0;i<21;i++)pages[i===0?'':String(i)]={items:Array.from({length:50},(_,j)=>childPage('od_child_'+(i*50+j),'od_a')),has_more:i<20,...(i<20?{page_token:String(i+1)}:{})};
+  const state=sampleVendor({childPages:{od_a:pages}});
+  await assert.rejects(feishu(state),error=>error instanceof ChannelValidationError&&check(error.validation,'user_name').reason==='limit');
+  assert.equal(state.calls.filter(c=>c.path.endsWith('/children')).length,20);
+});
+
+test('directory validation bounds initial department roots unless a direct user sample is already available',async()=>{
+  const roots=['od_a',...Array.from({length:1000},(_,i)=>'od_b'+i)];
+  const state=sampleVendor({contactScope:{department_ids:roots,user_ids:[],has_more:false}});
+  await assert.rejects(feishu(state),error=>error instanceof ChannelValidationError&&check(error.validation,'user_name').reason==='limit'&&check(error.validation,'user_name').status==='unverified');
+  assert.ok(!state.calls.some(c=>c.path.endsWith('/find_by_department')||c.path.endsWith('/children')));
+  const direct=sampleVendor({contactScope:{department_ids:roots,user_ids:['ou_a'],has_more:false}});
+  assert.equal((await feishu(direct)).validation.canContinue,true);
+  assert.ok(direct.calls.some(c=>c.path.endsWith('/users/ou_a')));
+  assert.ok(!direct.calls.some(c=>c.path.endsWith('/find_by_department')||c.path.endsWith('/children')));
+});
 
 test('DingTalk actual contact/name reads pass while full scope inventory and unsupported optional features stay honest',async()=>{
   const state=vendor();const result=await new EmployeeApplicationTransport('dingtalk',appId,{appSecret},{fetch:state.fetch}).verify(new DingTalkDirectoryAdapter({appId,appSecret,fetch:state.fetch}));

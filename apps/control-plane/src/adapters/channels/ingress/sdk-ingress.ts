@@ -1,3 +1,4 @@
+import {encodeSend,wireHash} from './media-wire.js';
 import {randomUUID} from 'node:crypto';
 import {fork, type ChildProcess} from 'node:child_process';
 import {ChannelError, type ChannelSendReceipt, type SendChannelMessage, type ChannelIngressPort, type ChannelIngressSession, type ChannelIngressSink, type ChannelIngressStatus} from '@dentity/application';
@@ -23,8 +24,8 @@ export class SdkIngress implements ChannelIngressPort {
   private stopped = false;
   private startupTimer: ReturnType<typeof setTimeout> | undefined;
   private exited = false;
-  private readonly sends = new Map<string,{resolve:(receipt:ChannelSendReceipt)=>void;reject:(error:ChannelError)=>void;timer:ReturnType<typeof setTimeout>}>();
-  private rejectSends(){for(const pending of this.sends.values()){clearTimeout(pending.timer);pending.reject(new ChannelError('delivery_unknown','channel_send_outcome_unknown'));}this.sends.clear();}
+  private readonly sends = new Map<string,{resolve:(receipt:ChannelSendReceipt)=>void;reject:(error:ChannelError)=>void;timer:ReturnType<typeof setTimeout>;committed:boolean;hash:string;deadline:number;request:SendChannelMessage}>();
+  private rejectSends(){for(const pending of this.sends.values()){clearTimeout(pending.timer);pending.reject(new ChannelError(pending.committed?'delivery_unknown':'temporarily_unavailable',pending.committed?'channel_send_outcome_unknown':'channel_send_not_dispatched'));}this.sends.clear();}
   private readonly requests = new Set<string>();
   constructor(private readonly session: ChannelIngressSession, private readonly credentials: ChannelIngressCredentials, private readonly options: SdkIngressProcessOptions = {}) {}
   status(): ChannelIngressStatus {return {...this.current};}
@@ -56,12 +57,29 @@ export class SdkIngress implements ChannelIngressPort {
     child.on('close', () => {this.exited = true; fail();});
     child.on('message', (value: unknown) => {
       if (this.stopped || this.child !== child || !value || typeof value !== 'object') return;
-      const message = value as {type?: string; generation?: string; requestId?: string; envelope?: unknown; status?: ChannelIngressStatus; receipt?:ChannelSendReceipt; error?:string};
+      const message = value as {type?: string; generation?: string; requestId?: string; envelope?: unknown; status?: ChannelIngressStatus; receipt?:ChannelSendReceipt; error?:string;nonce?:string;hash?:string;deadline?:number};
       if (message.generation !== this.session.generation) return;
+      if(message.type==='send_prepared'&&message.requestId){
+        const requestId=message.requestId,pending=this.sends.get(requestId);
+        if(!pending||pending.committed||message.hash!==pending.hash||message.deadline!==pending.deadline||typeof message.nonce!=='string'||message.nonce.length>100)return;
+        const nonce=message.nonce;
+        void Promise.resolve().then(async()=>{
+          await pending.request.beforeSend?.();
+          if(pending.committed)return;
+          if(this.sends.get(requestId)!==pending||this.stopped||this.child!==child||this.current.state!=='connected'||!child.connected||Date.now()>=pending.deadline)throw new ChannelError('not_ready');
+          pending.request.assertSendAllowed?.();
+          pending.committed=true;
+          child.send({type:'send_commit',generation:this.session.generation,requestId,nonce,hash:pending.hash,deadline:pending.deadline},()=>{});
+        }).catch(()=>{
+          if(this.sends.get(requestId)!==pending)return;
+          this.sends.delete(requestId);clearTimeout(pending.timer);pending.reject(new ChannelError('forbidden','channel_send_authorization_revoked'));
+        });
+        return;
+      }
       if(message.type==='send_result'&&message.requestId){
         const pending=this.sends.get(message.requestId);if(!pending)return;this.sends.delete(message.requestId);clearTimeout(pending.timer);
         if(message.receipt&&message.receipt.status==='accepted'&&message.receipt.idempotent===false)pending.resolve({status:'accepted',idempotent:false,...(typeof message.receipt.providerRequestId==='string'&&message.receipt.providerRequestId.length<=256?{providerRequestId:message.receipt.providerRequestId}:{})});
-        else pending.reject(new ChannelError(message.error==='not_ready'?'not_ready':message.error==='invalid_request'?'invalid_request':message.error==='rate_limited'?'rate_limited':'delivery_unknown'));
+        else pending.reject(new ChannelError(message.error==='not_ready'?'not_ready':message.error==='invalid_request'?'invalid_request':message.error==='rate_limited'?'rate_limited':message.error==='temporarily_unavailable'?'temporarily_unavailable':message.error==='forbidden'?'forbidden':'delivery_unknown'));
         return;
       }
       if (message.type === 'status' && message.status && states.has(message.status.state)) {
@@ -92,19 +110,20 @@ export class SdkIngress implements ChannelIngressPort {
     child.send({type: 'start', session: this.session, credentials: this.credentials}, (error) => {if (error) fail();});
   }
   async send(request:SendChannelMessage):Promise<ChannelSendReceipt> {
-    if(request.attachment)throw new ChannelError('unsupported','sdk_native_attachments_not_implemented');
+    if(request.attachment&&this.session.provider!=='wecom')throw new ChannelError('unsupported');
     await request.beforeSend?.();
     const child=this.child;
     if(this.stopped||this.current.state!=='connected'||!child?.connected)throw new ChannelError('not_ready','channel_session_unavailable');
+    if(request.attachment&&[...this.sends.values()].reduce((bytes,pending)=>bytes+(pending.request.attachment?.bytes.byteLength??0),request.attachment.bytes.byteLength)>40_000_000)throw new ChannelError('rate_limited','channel_media_busy');
     if(this.sends.size>=128)throw new ChannelError('rate_limited','channel_send_busy');
     request.assertSendAllowed?.();
     const requestId=randomUUID();
     // Explicit whitelist: functions and unrelated user properties cannot enter IPC.
-    const wire={conversation:request.conversation,text:request.text,operationId:request.operationId,...(request.replyToMessageId?{replyToMessageId:request.replyToMessageId}:{}),...(request.threadId?{threadId:request.threadId}:{})};
+    const wire=encodeSend(request),hash=wireHash(wire),deadline=Date.now()+15_000;
     return new Promise((resolve,reject)=>{
-      const timer=setTimeout(()=>{this.sends.delete(requestId);reject(new ChannelError('delivery_unknown','channel_send_timeout'));},15_000);
-      this.sends.set(requestId,{resolve,reject,timer});
-      child.send({type:'send',generation:this.session.generation,revision:this.session.revision,authRevision:this.session.authRevision,connectionId:this.session.connectionId,requestId,request:wire},error=>{if(error){const pending=this.sends.get(requestId);if(pending){this.sends.delete(requestId);clearTimeout(timer);reject(new ChannelError('delivery_unknown'));}}});
+      const timer=setTimeout(()=>{const pending=this.sends.get(requestId);this.sends.delete(requestId);reject(new ChannelError(pending?.committed?'delivery_unknown':'temporarily_unavailable','channel_send_timeout'));},15_000);
+      this.sends.set(requestId,{resolve,reject,timer,committed:!request.attachment,hash,deadline,request});
+      child.send({type:'send',generation:this.session.generation,revision:this.session.revision,authRevision:this.session.authRevision,connectionId:this.session.connectionId,requestId,request:wire,hash,deadline},error=>{if(error){const pending=this.sends.get(requestId);if(pending){this.sends.delete(requestId);clearTimeout(timer);reject(new ChannelError(pending.committed?'delivery_unknown':'temporarily_unavailable'));}}});
     });
   }
   stop(_reason: string): Promise<void> {

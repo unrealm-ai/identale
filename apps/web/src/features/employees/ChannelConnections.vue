@@ -4,6 +4,7 @@ import { computed, onUnmounted, ref, watch } from 'vue';
 import { NAlert, NButton, NCard, NCheckbox, NForm, NFormItem, NInput, NSpace, NTag, NPopconfirm } from 'naive-ui';
 import { api, ApiError, errorMessage } from '../../shared/api';
 import ChannelBrand from './ChannelBrand.vue';
+import ChannelCapabilities from './ChannelCapabilities.vue';
 import ChannelAccessSettings from './ChannelAccessSettings.vue';
 import ChannelProviderTabs from './ChannelProviderTabs.vue';
 import WecomDirectoryBinding from './WecomDirectoryBinding.vue';
@@ -79,7 +80,7 @@ async function mutate(action: 'connect' | 'revalidate' | 'settings') {
       const result = await channelApi<DirectoryConnection & {validation?:ChannelValidation}>(`${props.base}/channels/${selected}${action === 'connect' ? '' : `/${action}`}`, signal, body, action === 'revalidate' ? 'POST' : 'PUT');
       report.value = result.validation ?? null;
       if (signal.aborted) return;
-      notice.value = action === 'settings' ? (current?.enabled ? '已提交停用，请刷新核对连接状态。' : '已提交启用，请重新验证凭据并等待连接。') : '配置已保存，请核对下方连接状态。';
+      notice.value = action === 'settings' ? (current?.enabled ? '已提交停用，请刷新核对连接状态。' : '已提交启用，请重新验证凭据并等待连接。') : action === 'revalidate' && selected === 'wecom' ? (current?.enabled ? '已开始重新连接，请完成机器人身份验证；通讯录关联和使用范围保留。' : '已提交凭据重新验证，渠道仍保持停用；通讯录关联和使用范围保留。') : '配置已保存，请核对下方连接状态。';
     } finally { if (!signal.aborted) { await read(signal); if (!signal.aborted) emit('changed'); } }
   });
 }
@@ -92,11 +93,11 @@ async function unbindChannel() {
   });
 }
 async function saveContext() {
-  if (!props.canManage || busy.value || !loaded.value || !connection.value || provider.value !== 'feishu') return;
+  if (!props.canManage || busy.value || !loaded.value || !connection.value || !connection.value.capabilities?.recentGroupContext.supported && !connection.value.capabilities?.keywordTriggers.supported) return;
   const body = { enabled: connection.value.enabled, expectedRevision: connection.value.revision, groupListenEnabled: historyEnabled.value,groupTriggerKeywords:keywordText.value.split('\n').map(word=>word.trim()).filter(Boolean) };
   if(body.groupTriggerKeywords.length>20||body.groupTriggerKeywords.some(word=>word.length>80)){error.value='最多20个关键词，每个不超过80个字符。';return;}
   await run(async signal => {
-    await api(`${props.base}/channels/feishu/settings`, signal, body, 'PUT');
+    await api(`${props.base}/channels/${provider.value}/settings`, signal, body, 'PUT');
     if (!signal.aborted) { await read(signal);notice.value = '已保存。';emit('changed'); }
   });
 }
@@ -145,6 +146,7 @@ onUnmounted(() => { controller.abort(); clearSecrets();emit('dirtyChanged',false
             <p>{{item.provider==='wecom'?'BotID':'应用'}} {{item.appId}} · 版本 {{item.revision}}</p><p>身份证据：{{evidenceLabel(item.identityEvidence)}}</p><p>测试入站：{{item.inboundVerified?'已确认':'尚未确认'}}</p><p v-if="item.botId">{{item.status==='verified'?'已验证机器人':'配置机器人（待验证）'}} {{item.botId}}</p><p>身份依据：{{item.tenantIdNamespace}} · {{item.tenantId}}</p><p v-if="item.provider==='wecom'">目录关联：{{item.directoryBinding?.status==='confirmed'?'管理员已确认同企业（非厂商证明）':item.directoryBinding?'需要重新确认企业关系':'未关联目录应用'}}</p><p v-if="item.tenantIdNamespace==='app_scoped'||item.tenantIdNamespace==='app_id'">仅证明应用身份，不代表企业 corpId 已验证。</p>
           </details>
         </section>
+        <ChannelCapabilities v-if="connection" :capabilities="connection.capabilities" :provider="provider" @session-expired="emit('sessionExpired')"/>
         <template v-if="canManage">
           <WecomDirectoryBinding v-if="provider==='wecom'" :base="base" :connection="connection" :disabled="busy" @busy-changed="directoryBusy=$event" @changed="load();emit('changed')" @session-expired="emit('sessionExpired')"/>
           <section class="form-section channel-setup" aria-label="渠道接入配置">
@@ -170,13 +172,14 @@ onUnmounted(() => { controller.abort(); clearSecrets();emit('dirtyChanged',false
         <template v-if="verification?.status === 'observed'"><NAlert type="warning">核对下列身份是否属于此员工的目标机器人；不匹配时不要确认。</NAlert><p>机器人：{{ verification.botId || '未提供' }}</p><p>{{ provider === 'wecom' ? '管理员声明的企业（不是厂商证明）' : '企业依据' }}：{{ verification.tenantId || '未提供，不推断企业身份' }}</p><p v-if="verification.robotCode">机器人代码：{{ verification.robotCode }}</p><NButton type="primary" :disabled="busy || !verification.candidateId || verification.revision === undefined || verification.expiresAt <= Date.now()" @click="verifyRobot('confirm')">身份核对无误，确认绑定此候选</NButton></template>
       </NCard>
     <ChannelAccessSettings v-if="canManage && selectedConnection && connection" ref="policyEditor" :base="base" :connection="connection" :can-manage="canManage" :disabled="!!disabled||busy||directoryBusy" @busy-changed="v=>policyBusy=v" @dirty-changed="v=>policyDirty=v" @changed="emit('changed')" @session-expired="emit('sessionExpired')" />
-      <NCard v-if="connection && provider === 'feishu'" title="群聊触发与上下文" size="small">
-        <p class="field-note">普通群消息：{{ connection.groupListeningStatus?.permission === 'granted' ? '已授权' : connection.groupListeningStatus?.permission === 'denied' ? '未授权' : '未核验' }}<InfoHint label="关于群消息接收">新接入的飞书默认开启监听；开关不代表飞书权限已授权。群消息接收权限与连接状态分别核验。最近窗口缓存 {{ connection.groupListeningStatus?.cachedMessages ?? 0 }} 条；没有缓存不表示已获权限。</InfoHint></p>
+      <NCard v-if="connection && (connection.capabilities?.recentGroupContext.supported || connection.capabilities?.keywordTriggers.supported)" title="群聊触发与上下文" size="small">
+        <p class="field-note">普通群消息：{{ connection.groupListeningStatus?.permission === 'granted' ? '已授权' : connection.groupListeningStatus?.permission === 'denied' ? '未授权' : '未核验' }}<InfoHint label="关于群消息接收">上下文开关只控制近期群消息保留，不控制 SDK 接收或关键词触发。群消息接收权限与连接状态分别核验。最近窗口缓存 {{ connection.groupListeningStatus?.cachedMessages ?? 0 }} 条；没有缓存不表示已获权限。</InfoHint></p>
+        <p class="field-note">当前保存的触发方式：{{connection.context?.groupTriggerKeywords?.length ? '@ 或关键词（关键词须有普通群消息权限）' : '仅 @'}}；均须通过使用授权。</p>
         <NForm class="channel-context-form" @submit.prevent="saveContext">
-          <NFormItem label="触发关键词"><div><NInput v-model:value="keywordText" type="textarea" :rows="3" :input-props="{'aria-label':'群聊触发关键词'}" aria-label="群聊触发关键词" :disabled="channelLocked" placeholder="每行一个关键词" /><p class="field-note">每行一个，最多20个，每个80字；留空关闭。<InfoHint label="关键词匹配规则">正文包含任一词即可触发，英文忽略大小写，不支持正则。没有使用权时静默；@ 按原规则处理。</InfoHint></p><NAlert v-if="connection.groupListeningStatus?.permission!=='granted'" :type="connection.groupListeningStatus?.permission==='denied'?'warning':'info'">{{ connection.groupListeningStatus?.permission==='denied'?'缺少普通群消息接收权限，关键词暂不可触发。':'普通群消息接收权限尚未验证，关键词暂不可触发。' }}请在飞书确认应用权限后重新验证连接。</NAlert></div></NFormItem>
-          <NCheckbox v-model:checked="historyEnabled" :disabled="channelLocked" aria-label="群聊监听">监听已加入群的实时消息</NCheckbox>
-          <p class="field-note">收集已加入且获授权群的近期消息；仅 @ 或关键词命中且有使用权时回复。<InfoHint label="群上下文范围">每群/话题保留最近100条，不补拉历史。文件、图片和会议以资料引用记录，能否读取取决于资料权限与可用状态。</InfoHint></p>
-          <NSpace><NButton attr-type="submit" type="primary" :disabled="channelLocked" :loading="busy">保存</NButton><NButton :disabled="busy||directoryBusy||!contextDirty" @click="historyEnabled=connection.context?.groupListenEnabled??false;keywordText=(connection.context?.groupTriggerKeywords??[]).join('\n')">取消</NButton></NSpace>
+          <NFormItem v-if="connection.capabilities?.keywordTriggers.supported" label="触发关键词"><div><NInput v-model:value="keywordText" type="textarea" :rows="3" :input-props="{'aria-label':'群聊触发关键词'}" aria-label="群聊触发关键词" :disabled="channelLocked || !['available','authorization_required'].includes(connection.capabilities?.keywordTriggers.availability??'unknown')" placeholder="每行一个关键词" /><p class="field-note">每行一个，最多20个，每个80字；留空关闭。未获权限时可保存草稿，实际触发仍须通过后台权限核验。<InfoHint label="关键词匹配规则">正文包含任一词即可触发，英文忽略大小写，不支持正则。没有使用权时静默；@ 按原规则处理。</InfoHint></p><NAlert v-if="connection.groupListeningStatus?.permission!=='granted'" :type="connection.groupListeningStatus?.permission==='denied'?'warning':'info'">{{ connection.groupListeningStatus?.permission==='denied'?'缺少普通群消息接收权限，关键词暂不可触发。':'普通群消息接收权限尚未验证，关键词暂不可触发。' }}请在飞书确认应用权限后重新验证连接。</NAlert></div></NFormItem>
+          <NCheckbox v-if="connection.capabilities?.recentGroupContext.supported" v-model:checked="historyEnabled" :disabled="channelLocked || (!historyEnabled && connection.capabilities?.recentGroupContext.availability!=='available')" aria-label="保留近期群消息作为上下文">保留近期群消息作为上下文</NCheckbox>
+          <p class="field-note">关闭后不再保留此近期群消息窗口；已获普通群消息权限且渠道可用时，仍接收消息并匹配关键词。仅 @ 或关键词命中且有使用权时回复。<InfoHint label="群上下文范围">每群/话题保留最近100条，不补拉历史。文件、图片和会议以资料引用记录，能否读取取决于资料权限与可用状态。</InfoHint></p>
+          <NSpace><NButton attr-type="submit" type="primary" :disabled="channelLocked || !contextDirty" :loading="busy">保存</NButton><NButton :disabled="busy||directoryBusy||!contextDirty" @click="historyEnabled=connection.context?.groupListenEnabled??false;keywordText=(connection.context?.groupTriggerKeywords??[]).join('\n')">取消</NButton></NSpace>
         </NForm>
       </NCard>
           <p v-if="connection&&!connection.enabled" class="field-note">渠道已停用。启用后请重新验证凭据。</p>

@@ -283,3 +283,13 @@ test('completion notification excludes 527 stream fragments while preserving ful
  assert.equal(s.db.prepare('SELECT count(*) n FROM deliveries WHERE task_id=?').get(task.id).n,1);assert.equal((await s.messages()).filter(m=>m.id.startsWith('task-notification:')).length,1);
  await s.tick();assert.equal(seen.length,1);
 });
+
+test('later business notification excludes resource-revoked cached notice context from its model input',async t=>{
+ const seen=[];const s=await setup(t,async input=>{seen.push(structuredClone({...input,signal:undefined}));return response({text:seen.length===1?'RESOURCE_NOTICE_SECRET':'Second task completed'});});
+ const first=await s.createTask('resource-history-first');s.complete(first,'RESOURCE_SOURCE_SECRET');await s.settled();assert.equal(seen.length,1);
+ // A trusted persisted consumed-resource marker now requires an online grant. No provider is configured in this fixture.
+ const asset='synthetic-resource';s.db.prepare('INSERT INTO message_asset_run_grants VALUES(?,?,?,?,?,?)').run(asset,first.run_id,first.id,first.workspace_id,first.entity_id,s.now());
+ s.db.prepare('INSERT INTO business_resource_authorizations VALUES(?,?,?,?,?,?)').run(asset,first.run_id,'content','document',JSON.stringify({source:{provider:'feishu',connectionId:'fixture',tenantId:'fixture',chatId:'fixture'},run:{workspaceId:first.workspace_id,entityId:first.entity_id,taskId:first.id,runId:first.run_id}}),'{}');
+ const second=await s.createTask('resource-history-second');s.complete(second,'SAFE_SECOND_RESULT');await until(async()=>{await s.tick();return seen.length===2;});
+ assert.doesNotMatch(JSON.stringify(seen[1].messages),/RESOURCE_NOTICE_SECRET|RESOURCE_SOURCE_SECRET/);assert.match(JSON.stringify(seen[1].messages),/SAFE_SECOND_RESULT/);
+});

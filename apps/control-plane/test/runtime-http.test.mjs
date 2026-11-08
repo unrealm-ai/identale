@@ -153,7 +153,7 @@ test('persisted prepared version survives facade restart and later model edits w
 
 test('pending material refresh is durable and cannot block event polling or redispatch a task',{timeout:10000},async t=>{
  const s=await setup(t),runtime=s.service.runtime,id='11111111-1111-4111-8111-111111111111';let release,reads=0;const gate=new Promise(resolve=>release=resolve);const bytes=Buffer.from('Ready after preparation');const {createHash}=await import('node:crypto');
- runtime.setAssetService({listForRun(){return[{assetId:id,kind:'file'}];},async streamForRun(_scope,_id,kind){reads++;if(kind!=='content')return{state:'not_available'};await gate;return new Response(bytes,{headers:{'x-asset-sha256':createHash('sha256').update(bytes).digest('hex'),'content-type':'text/plain'}});}});
+ runtime.setAssetService({async revalidateBusinessResourcesForRun(){},listForRun(){return[{assetId:id,kind:'file'}];},async streamForRun(_scope,_id,kind){reads++;if(kind!=='content')return{state:'not_available'};await gate;return new Response(bytes,{headers:{'x-asset-sha256':createHash('sha256').update(bytes).digest('hex'),'content-type':'text/plain'}});}});
  s.db.prepare('UPDATE task_host_bindings SET material_pending_revision=1 WHERE run_id=?').run(s.task.run.id);
  const submits=s.records.filter(r=>r.method==='submit').length;assert.deepEqual(await runtime.events(s.task.run.id,0),[]);assert.equal(s.db.prepare('SELECT material_pending_revision FROM task_host_bindings WHERE run_id=?').get(s.task.run.id).material_pending_revision,1);
  release();for(let i=0;i<100;i++){if(s.db.prepare('SELECT material_pending_revision FROM task_host_bindings WHERE run_id=?').get(s.task.run.id).material_pending_revision===null)break;await new Promise(r=>setTimeout(r,5));}

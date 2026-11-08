@@ -1,3 +1,4 @@
+import {validateNativeAttachment} from './native-media.js';
 import { ChannelCursorCodec, channelCursorScope } from './cursor.js';
 import { createHash, createDecipheriv, timingSafeEqual } from 'node:crypto';
 import {
@@ -52,6 +53,12 @@ function bindingText(text: string, rawMentions: unknown, botId: string): string 
   }).join('').trim();
 }
 /** Native text/image/file HTTP transport. Event lifecycle is provided separately. */
+export function feishuMediaCapabilities(grants: FeishuAdapterOptions['grants'] = {}): NonNullable<ConversationCapabilities['media']> {
+  const privateMedia = granted(grants.privateMessageEvents);
+  const groupMedia = granted(grants.mentionEvents || grants.ordinaryMessageEvents);
+  const outboundMedia = granted(grants.proactiveSend || grants.replyToMessage);
+  return {inbound:{private:{image:privateMedia,file:privateMedia},group:{image:groupMedia,file:groupMedia}},outbound:{private:{image:outboundMedia,file:outboundMedia},group:{image:outboundMedia,file:outboundMedia}}};
+}
 export class FeishuConversationAdapter implements ConversationPort, ChannelWebhookPort {
   readonly connection: ChannelConnection;
   private readonly http: ProviderHttp;
@@ -64,6 +71,7 @@ export class FeishuConversationAdapter implements ConversationPort, ChannelWebho
   async inspectCapabilities(resource?: ChannelResourceRef): Promise<ConversationCapabilities> {
     if (resource) this.conversation(resource);
     return {
+      media: feishuMediaCapabilities(this.options.grants),
       privateMessageEvents:this.connection.identity.kind === 'bot' ? granted(this.options.grants?.privateMessageEvents) : unavailable(),
       mentionEvents:this.connection.identity.kind === 'bot' ? granted(this.options.grants?.mentionEvents) : unavailable(),
       ordinaryMessageEvents:this.connection.identity.kind === 'bot' ? granted(this.options.grants?.ordinaryMessageEvents) : unavailable(),
@@ -146,7 +154,7 @@ export class FeishuConversationAdapter implements ConversationPort, ChannelWebho
   async sendMessage(request: SendChannelMessage): Promise<ChannelSendReceipt> {
     this.conversation(request.conversation);
     if(!request.attachment)validateText(request.text);
-    else if(request.text||!['image','file'].includes(request.attachment.kind)||!(request.attachment.bytes instanceof Uint8Array)||!request.attachment.name||/[\\/\u0000-\u001f]/.test(request.attachment.name))throw new ChannelError('invalid_request','invalid_native_attachment');
+    else {if(request.text)throw new ChannelError('invalid_request','invalid_native_attachment');validateNativeAttachment(request.attachment,{image:10_000_000,file:30_000_000});}
     if (!request.operationId || request.operationId.length > 50) throw new ChannelError('invalid_request','invalid_send_operation_id');
     if (request.threadId && !request.replyToMessageId) throw new ChannelError('invalid_request','thread_reply_target_required');
     const capabilities = await this.inspectCapabilities(request.conversation);
@@ -166,11 +174,11 @@ export class FeishuConversationAdapter implements ConversationPort, ChannelWebho
       const attachment=request.attachment,form=new FormData(),blob=new Blob([new Uint8Array(attachment.bytes)],{type:attachment.mediaType});
       if(attachment.kind==='image'){
         form.append('image_type','message');form.append('image',blob,attachment.name);
-        const uploaded=await this.http.feishu('/open-apis/im/v1/images','POST',form,request.assertSendAllowed);
+        const uploaded=await this.http.feishuUpload('/open-apis/im/v1/images',form,request.assertSendAllowed);
         if(typeof uploaded.image_key!=='string'||!uploaded.image_key)throw new ChannelError('temporarily_unavailable','image_upload_unconfirmed');messageType='image';content={image_key:uploaded.image_key};
       }else{
         form.append('file_type','stream');form.append('file_name',attachment.name);form.append('file',blob,attachment.name);
-        const uploaded=await this.http.feishu('/open-apis/im/v1/files','POST',form,request.assertSendAllowed);
+        const uploaded=await this.http.feishuUpload('/open-apis/im/v1/files',form,request.assertSendAllowed);
         if(typeof uploaded.file_key!=='string'||!uploaded.file_key)throw new ChannelError('temporarily_unavailable','file_upload_unconfirmed');messageType='file';content={file_key:uploaded.file_key};
       }
       // Upload can await credentials/network; recheck the source and lease before sending.

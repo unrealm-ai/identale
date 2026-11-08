@@ -98,6 +98,8 @@ export class HttpTaskRuntime implements TaskRuntimeClient, TaskExecutionRecordsR
   }
   private async prepareMaterials(binding:Binding,revision:number){
     const c=this.context(binding),spec=JSON.parse(binding.spec_json) as ResolvedAgentSpec,command=JSON.parse(binding.command_json) as TaskCommand;
+    const resourceScope={workspaceId:c.workspaceId,entityId:c.entityId,taskId:binding.task_id,runId:binding.run_id};
+    await this.assetsService?.revalidateBusinessResourcesForRun(resourceScope);
     const configKey=canonical([binding.run_id,spec.specHash]);let cfg=this.configurationCache.get(configKey),preparedId:string|undefined;
     if(binding.configuration_id){try{const status=await this.inspectConfiguration(binding.configuration_id,binding.host_instance_id??undefined);preparedId=binding.configuration_id;if(!binding.host_instance_id)this.store.run('UPDATE task_host_bindings SET host_instance_id=? WHERE run_id=?',status.hostId,binding.run_id);}catch(e){if(e instanceof TaskError)throw e;/* Reconstruct only the fixed version; no execution replay. */}}
     if(!preparedId){
@@ -112,12 +114,13 @@ export class HttpTaskRuntime implements TaskRuntimeClient, TaskExecutionRecordsR
     const refs=[spec.instructions,{resourceId:`context:${binding.run_id}`,version:'1'},...Array.from({length:revision},(_,i)=>({resourceId:`input:${binding.run_id}:${i+1}`,version:String(i+1)}))];
     const contents=[...(retained?.packet.contents??[])];for(const ref of refs){const old=contents.find(x=>canonical(x.ref)===canonical(ref));if(old)await this.upload(this.readMaterialBlob(old.blob));else contents.push({ref,blob:await this.upload(Buffer.from(await this.content(ref,c)))});}
     const assets:RuntimeRunMaterials['assets'][number][]=[];
-    if(this.assetsService){const scope={workspaceId:c.workspaceId,entityId:c.entityId,taskId:binding.task_id,runId:binding.run_id};for(const asset of this.assetsService.listForRun(scope)){
+    if(this.assetsService){const scope={workspaceId:c.workspaceId,entityId:c.entityId,taskId:binding.task_id,runId:binding.run_id};await this.assetsService.revalidateBusinessResourcesForRun(scope);for(const asset of this.assetsService.listForRun(scope)){
       const reads:RuntimeRunMaterials['assets'][number]['reads']={};for(const kind of ['content','summary','transcript'] as const){const response=await this.assetsService.streamForRun(scope,asset.assetId,kind);if(response instanceof Response){if(!response.ok)throw Error('asset_prepare_failed');const data=Buffer.from(await response.arrayBuffer());const expected=response.headers.get('x-asset-sha256');const blob=await this.upload(data);if(expected!==blob.sha256)throw Error('asset_prepare_integrity');reads[kind]={...blob,mediaType:response.headers.get('content-type')??'application/octet-stream'};}else reads[kind]=response;}assets.push({...asset,reads});}}
     const workItems=spec.platformTools.includes('work.item')&&this.workItemsService?.toolsEnabled(command.taskId)&&this.config.workItemUrl?this.workItemsService.access(binding.run_id,this.binding(binding.run_id).host_instance_id!,this.config.workItemUrl):undefined;
     const groupHistory=spec.platformTools.includes('group.history')&&this.groupHistoryService&&this.config.groupHistoryUrl?this.groupHistoryService.access(binding.run_id,this.binding(binding.run_id).host_instance_id!,this.config.groupHistoryUrl,retained?.packet.groupHistory):undefined;
     const triggerHistory=spec.platformTools.includes('trigger.history')&&this.config.groupHistoryUrl?this.triggerContext.access(binding.run_id,this.binding(binding.run_id).host_instance_id!,this.config.groupHistoryUrl.replace(/group-history$/,'trigger-history'),retained?.packet.triggerHistory):undefined;
     const packet:RuntimeRunMaterials={...(triggerHistory?{triggerHistory}:{}),...(command.assignment&&!command.continuation?{workItemLaunchGate:{version:1 as const,workspaceId:command.workspaceId}}:{}),...(groupHistory?{groupHistory}:{}),...(workItems?{workItems}:{}),version:1,configurationId:preparedId,context:c,spec,execution:this.execution(binding),contents,assets,history:retained?retained.packet.history:triggerHistory?{version:2,mode:'on_demand'}:command.triggerEvent?this.history.read(binding.run_id):null,...(command.continuation?{continuation:command.continuation}:{})};
+    await this.assetsService?.revalidateBusinessResourcesForRun(resourceScope);
     const ready=await this.materialCall<{version:number;status:string;configurationId:string}>('run',packet);if(ready.version!==1||ready.status!=='prepared'||ready.configurationId!==preparedId)throw Error('run_materials_not_ready');
     const pending=assets.some(a=>Object.values(a.reads).some(r=>r&&'state'in r&&r.state==='pending'));const keptRevision=Math.max(retained?.inputRevision??0,revision);this.store.run("UPDATE task_host_bindings SET material_pending_revision=?,materials_json=? WHERE run_id=? AND (materials_json IS NULL OR json_extract(materials_json,'$.inputRevision')<=?)",pending?keptRevision:null,JSON.stringify({inputRevision:keptRevision,packet}),binding.run_id,keptRevision);
     this.preparedConfigurations.set(c.workspaceId+':'+c.entityId,{desired:spec.sourceVersions.entityConfig,fetched:spec.sourceVersions.entityConfig,prepared:preparedId,reason:null,observedAt:this.now()});
@@ -202,6 +205,7 @@ export class HttpTaskRuntime implements TaskRuntimeClient, TaskExecutionRecordsR
     let binding=this.store.one<Binding>('SELECT * FROM task_host_bindings WHERE run_id=?',command.runId);
     if(binding&&binding.host_url!==this.config.url)return {status:'unknown'};
     if(!command.continuation){if((binding&&!JSON.parse(binding.spec_json).platformTools.includes('trigger.history'))||!binding&&!this.config.groupHistoryUrl)await this.history.prepare(command.taskId,command.runId,run=>this.rawRecords(run));else this.triggerContext.freeze(command.taskId);}
+    if(command.continuation)await this.assetsService?.prepareBusinessContinuation({workspaceId:command.workspaceId,entityId:command.entityId,taskId:command.taskId,runId:command.runId},command.continuation.parentRunId);
     if(!binding&&command.continuation){
       const parent=this.store.one<Binding>('SELECT * FROM task_host_bindings WHERE run_id=? AND task_id=?',command.continuation.parentRunId,command.taskId);
       if(!parent?.configuration_id||!parent.materials_json||parent.host_url!==this.config.url)throw new TaskError(409,'human_parent_materials_unavailable');
@@ -239,6 +243,7 @@ export class HttpTaskRuntime implements TaskRuntimeClient, TaskExecutionRecordsR
       if(!created.ok)return {status:'rejected'};
       session=created.value;this.store.run('UPDATE task_host_bindings SET session_json=? WHERE run_id=?',JSON.stringify(session),command.runId);
     }
+    await this.assetsService?.revalidateBusinessResourcesForRun({workspaceId:command.workspaceId,entityId:command.entityId,taskId:command.taskId,runId:command.runId});
     const receipt=await this.call<{status:'accepted'|'rejected'|'unknown'}>('submit',this.request(binding,command.operationId,{session,execution:this.execution(binding),input:{kind:'task_run',taskId:command.taskId,runId:command.runId,taskInput:{taskId:command.taskId,revision:command.inputRevision,inputRef:{resourceId:`input:${command.runId}:${command.inputRevision}`,version:String(command.inputRevision)},snapshotId:command.context.snapshotId}},idempotencyKey:command.operationId}));
     return {status:receipt.status};
   }
@@ -288,6 +293,7 @@ export class HttpTaskRuntime implements TaskRuntimeClient, TaskExecutionRecordsR
   async input(command:TaskCommand):Promise<{status:'received'|'applied'|'unsupported'|'unknown'}> {
     const b=this.binding(command.runId);
     await this.prepareMaterials(b,command.inputRevision);
+    await this.assetsService?.revalidateBusinessResourcesForRun({workspaceId:command.workspaceId,entityId:command.entityId,taskId:command.taskId,runId:command.runId});
     const result=await this.call<{status:string}>('appendInput',this.request(b,command.operationId,{execution:this.execution(b),inputId:command.operationId,input:{kind:'task_run',taskInput:{taskId:command.taskId,revision:command.inputRevision,inputRef:{resourceId:`input:${command.runId}:${command.inputRevision}`,version:String(command.inputRevision)},snapshotId:command.context.snapshotId}},idempotencyKey:command.operationId}));
     return {status:['received','applied','unsupported'].includes(result.status)?result.status as 'received'|'applied'|'unsupported':'unknown'};
   }

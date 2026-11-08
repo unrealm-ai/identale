@@ -68,6 +68,31 @@ export class ProviderHttp {
     } finally { reader.releaseLock(); }
     return Buffer.concat(chunks).toString('utf8');
   }
+  /** Dedicated official upload endpoint. Never accepts a URL or model media key. Upload is not message delivery. */
+  async uploadDingTalkMedia(attachment: import('./native-media.js').NativeAttachment, assertSendAllowed?:()=>void):Promise<string> {
+    if(this.connection.provider!=='dingtalk')throw new ChannelError('invalid_request');
+    const token=await this.credential('access_token');
+    assertSendAllowed?.();
+    const url=new URL('https://oapi.dingtalk.com/media/upload');
+    url.searchParams.set('access_token',token);
+    const form=new FormData();form.append('type',attachment.kind);
+    form.append('media',new Blob([new Uint8Array(attachment.bytes)],{type:attachment.mediaType}),attachment.name);
+    const controller=new AbortController(),timer=setTimeout(()=>controller.abort(),this.timeout);timer.unref();
+    try {
+      const response=await this.fetch(url,{method:'POST',body:form,redirect:'error',signal:controller.signal,headers:{accept:'application/json'}});
+      if(response.status===401)throw new ChannelError('unauthenticated');
+      if(response.status===403)throw new ChannelError('forbidden');
+      if(response.status===429)throw new ChannelError('rate_limited');
+      if(!response.ok)throw new ChannelError('temporarily_unavailable','native_upload_failed');
+      const data=object(JSON.parse(await this.readResponse(response)));
+      if(data.errcode!==0||data.type!==attachment.kind||typeof data.media_id!=='string'||!data.media_id||data.media_id.length>2048)throw new ChannelError('temporarily_unavailable','native_upload_unconfirmed');
+      return data.media_id;
+    }catch(error){
+      if(error instanceof ChannelError)throw error;
+      // Never surface token-bearing URLs/raw errors, and never classify an upload as a sent message.
+      throw new ChannelError('temporarily_unavailable','native_upload_failed');
+    }finally{clearTimeout(timer);}
+  }
   async request(path: string, method: 'GET' | 'POST' = 'GET', body?: unknown, responseKind: 'json' | 'text' = 'json', assertSendAllowed?: () => void): Promise<unknown> {
     if (!path.startsWith('/') || path.startsWith('//')) throw new ChannelError('invalid_request');
     const url = new URL(path, this.origin);
@@ -125,6 +150,10 @@ export class ProviderHttp {
       // A request may have reached the provider. Never automatically retry writes.
       throw new ChannelError(method === 'POST' ? 'delivery_unknown' : 'temporarily_unavailable');
     } finally { clearTimeout(timer); }
+  }
+  async feishuUpload(path:'/open-apis/im/v1/images'|'/open-apis/im/v1/files',body:FormData,assertSendAllowed?:()=>void):Promise<Record<string,unknown>> {
+    try{return await this.feishu(path,'POST',body,assertSendAllowed);}
+    catch(error){if(error instanceof ChannelError&&error.code==='delivery_unknown')throw new ChannelError('temporarily_unavailable','native_upload_unconfirmed');throw error;}
   }
   async feishuText(path: string): Promise<string> {
     const text = string(await this.request(path, 'GET', undefined, 'text'));
