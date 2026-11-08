@@ -4,9 +4,9 @@ import type {ChannelValidation} from './validation.js';
 export interface EmployeeChannelRecord {
  id:string; sourceId:string;workspaceId:string;entityId:string;provider:DirectoryProvider;appId:string;
  identity:DirectoryIdentity;botId?:string;robotCode?:string;eventTenantId?:string;revision:number;authRevision:number;stateVersion:number;
- status:'verified'|'pending_verification'|'invalid'|'disabled';enabled:boolean;identityEvidence?:'provider_api'|'authenticated_event_confirmed'|'app_credentials_only'|'admin_asserted';inboundVerified?:boolean;directoryStatus:'available'|'unavailable';lastError:string|null;
+ status:'verified'|'pending_verification'|'invalid'|'disabled';enabled:boolean;identityEvidence?:'provider_api'|'authenticated_event_confirmed'|'authenticated_first_message'|'app_credentials_only'|'admin_asserted';inboundVerified?:boolean;directoryStatus:'available'|'unavailable';lastError:string|null;
  credential:SealedDirectoryCredential;createdBy:string;updatedBy:string;
- directoryBinding?:EmployeeDirectoryBinding;
+ wecomContactIdentityRevision?:number;
  previousInstallation?:{botId:string;tenantId:string};
  validation?:ChannelValidation;
  context?:{historyEnabled:boolean;groupTriggerKeywords?:readonly string[];groupListenEnabled?:boolean;listenGeneration?:number;meetingRefs:{kind:'minutes';externalId:string}[]};
@@ -28,9 +28,3 @@ export interface EmployeeChannelOptions {
  verifyApplication?:(provider:DirectoryProvider,appId:string,credentials:EmployeeChannelCredential)=>Promise<VerifiedEmployeeApplication>;
 }
 export type EmployeeChannelActor=ChannelActor;
-
-export interface EmployeeDirectoryBinding {
- credentialId:string;corpId:string;agentId:string;sourceRevision:number;credentialRevision:number;scopeRevision:string;
- status:'confirmed'|'reconfirmation_required';
- assertion:{evidence:'admin_asserted';actorId:string;confirmedAt:number;botId:string;corpId:string;credentialRevision:number};
-}

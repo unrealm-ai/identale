@@ -13,16 +13,16 @@ const reasons: Record<string, string> = {
   limit: '达到读取预算，未能完成验证', empty_scope: '当前可见范围为空，请配置需要授权的人员或部门', no_sample: '未取得可读样本，无法确认本项能力',
   scope_not_disclosed:'厂商未披露可用的授权入口，尚不能验证目录读取；这不代表没有权限或空组织',
   required_field: '响应未提供真实姓名，ID 标签不能代替姓名验证', resource_required: '尚未验证具体资源权限；需授权目标群或明确 Minutes 材料后才能读取',
-  after_creation: '最终保存后通过已认证入站挑战核对，不会发送测试消息', adapter_unsupported: '当前渠道接入不支持此能力，无需为此申请额外权限',
+  after_creation: '最终保存后按渠道核对真实入站身份', adapter_unsupported: '当前渠道接入不支持此能力，无需为此申请额外权限',
   inventory_unavailable: '当前未查询完整权限清单；是否可继续以必要身份、目录及姓名的实际读取结果为准',
 };
 </script>
 <template>
   <section class="channel-validation-report" aria-label="渠道分层验证结果" aria-live="polite">
-    <NAlert :type="report.canContinue ? 'success' : 'error'" :role="report.canContinue ? 'status' : 'alert'">{{ report.canContinue ? '必要读取已通过。' : '必要检查尚未全部通过，请处理后重试。' }}</NAlert>
+    <NAlert :type="report.canContinue ? 'success' : 'error'" :role="report.canContinue ? 'status' : 'alert'">{{ report.canContinue ? (report.provider==='wecom'?'机器人配置检查通过。凭据认证以创建后长连接结果为准。':'必要读取已通过。') : '必要检查尚未全部通过，请处理后重试。' }}</NAlert>
     <ul v-if="!report.canContinue" class="validation-issues"><li v-for="check in report.checks.filter(c=>c.required && c.status!=='pass')" :key="check.id"><strong>{{labels[check.id]}}</strong>：{{reasons[check.reason ?? 'prerequisite']}}</li></ul>
-    <details class="validation-diagnostics"><summary>查看验证明细</summary><ChannelPermissionBlocks :provider="report.provider" :report="report"/>
-    <div v-for="check in report.checks" :key="check.id" class="validation-check channel-status-block" :data-check="check.id" :data-tone="checkTone(check)">
+    <details class="validation-diagnostics"><summary>查看验证明细</summary><ChannelPermissionBlocks v-if="report.provider!=='wecom'" :provider="report.provider" :report="report"/>
+    <div v-for="check in report.checks.filter(c=>report.provider!=='wecom'||['credentials','bot_identity'].includes(c.id))" :key="check.id" class="validation-check channel-status-block" :data-check="check.id" :data-tone="checkTone(check)">
       <div class="check-title"><strong>{{ labels[check.id] }}</strong><span>{{ checkCategory(check) }}</span><NTag size="small" :type="tagTone(checkTone(check))" :data-tone="checkTone(check)">{{ checkLabel(check) }}</NTag></div>
       <p v-if="check.status !== 'pass'">{{ reasons[check.reason ?? 'prerequisite'] }}</p>
       <p v-if="check.scopeDisclosure?.departments === false">部门入口未披露，仅使用厂商明确返回的授权入口验证，不补猜根部门。</p>

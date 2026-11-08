@@ -70,9 +70,9 @@ export const setupGuides: readonly SetupGuide[] = [
         '开启机器人配置，填写名称、简介等字段，并按控制台要求保存或发布。确认配置的是应用内机器人，不是仅提供群 Webhook 的自定义机器人。',
       ], figures: [{ src: '/channel-guides/dingtalk-enable-bot.jpg', alt: '钉钉官方教程截图：应用功能中的机器人与消息推送页面，开启机器人配置开关。', caption: '钉钉官方教程示例截图。此截图展示启用入口，不表示 identity 已连接。', source: { title: '钉钉开发者百科 · 创建机器人应用', url: dingtalkTutorial } }] },
       { id: 'credentials', title: '确认凭据和消息接收方式', location: '应用详情 → 应用信息 / 机器人配置', paragraphs: [
-        '在应用信息中获取 Client ID（AppKey）和 Client Secret（AppSecret），到员工渠道连接表单保存。密钥只写入不回显；不要手工填写机器人或企业身份，后续由已认证测试消息与管理员确认。',
+        '在应用信息中获取 Client ID（AppKey）和 Client Secret（AppSecret），到员工渠道连接表单保存。密钥只写入不回显。首条通过校验的消息会确认机器人与企业身份。',
         '在“机器人与消息推送”中开启机器人配置，消息接收模式选择 Stream，按控制台要求发布。下方本地图片保留官方教程出处，界面以当前控制台为准。',
-        '保存员工连接后等待服务器 Stream 在线；若机器人身份待验证，显式开始验证，向目标机器人发送完整随机文本，检查候选并由管理员核对确认。无需保持页面打开，也不填写入站 URL。',
+        '保存员工连接后等待服务器 Stream 在线；向目标机器人发送普通私聊或群 @ 消息，首条通过校验的消息会自动确认机器人身份。无需保持页面打开，也不填写入站 URL。',
       ], notes: ['普通机器人只收到群内 @消息。Stream 是传输方式，不是全群监听权限。临时 SessionWebhook 会过期，长期任务回报不能只依赖它。'] },
       { id: 'publish', title: '检查权限、发布和可用范围', location: '应用 → 权限管理 / 版本发布；钉钉客户端 → 目标群', paragraphs: [
         '仅申请当前用途需要的机器人发送和相关读取权限；管理员审批与发布流程以企业控制台要求为准。设置可用范围后，将应用机器人添加到明确选择的群。',
@@ -95,11 +95,11 @@ export const setupGuides: readonly SetupGuide[] = [
   },
   {
     id: 'wecom', title: '企业微信', consoleUrl: 'https://work.weixin.qq.com/',
-    summary: '在数字员工创建/设置中完成两步配置：每员工独立智能机器人；传统自建应用目录通常只需配置一次，后续员工在自身页面复用。',
-    currentLimitations: ['智能机器人使用官方 SDK 主动 WebSocket，同一连接收发，无 HTTP 回调 URL。', '管理员必须分别确认机器人身份与同企业目录关联；admin_asserted 不代表厂商已证明同企业。', '当前不支持群历史、话题历史或会议材料；本地验证不代表企业租户真实收发已通过。'],
+    summary: '仅填写独立智能机器人的 BotID 和 Secret，保存后等待连接与首条真实消息。',
+    currentLimitations: ['智能机器人使用官方 SDK 主动 WebSocket，同一连接收发，无 HTTP 回调 URL。', '首条通过校验的真实消息自动确认机器人，无需人工验证。', '当前不支持群历史、话题历史或会议材料；本地验证不代表企业租户真实收发已通过。'],
     capabilities: [
       { title: '智能机器人消息', detail: '每员工独立 BotID / Secret；传输在线、身份验证与使用授权分别检查。' },
-      { title: '动态目录与使用范围', detail: '传统自建应用 CorpID / AgentId / AppSecret；同 Workspace 复用凭据，不继承另一员工的规则。' },
+      { title: '成员搜索与使用范围', detail: '新建默认空白名单、群内可用；可搜索成员设置白名单或黑名单。' },
       { title: '群历史与会议材料', detail: '当前不支持，不提供相应开关。' },
     ],
     steps: directorySetupGuides.wecom.steps,

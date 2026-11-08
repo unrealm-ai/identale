@@ -1,3 +1,4 @@
+import type {TaskScope} from '../tasks/principal.js';
 import type {NormalizedMessageContent} from './message-content.js';
 /** Channel contracts describe business capabilities, never arbitrary vendor commands. */
 export type ChannelProvider = 'feishu' | 'dingtalk' | 'wecom';
@@ -127,6 +128,9 @@ export interface ChannelPage<T> {
   warnings?: readonly string[];
 }
 export interface SendChannelMessage {
+  /** Host-only proof from a persisted task delivery's original channel scope.
+   * Never accept this function from model/public JSON or serialize it over IPC. */
+  originatingTaskScope?: () => TaskScope;
   /** Trusted runtime bytes, never model-provided paths, URLs, or vendor resource keys.
    * One native media message per operation keeps partial sends independently reconcilable. */
   attachment?: {kind:'image'|'file';name:string;mediaType:string;bytes:Uint8Array};

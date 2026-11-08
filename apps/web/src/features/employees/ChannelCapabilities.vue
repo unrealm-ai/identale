@@ -19,7 +19,7 @@ const rows = computed(() => {
   ];
   for (const direction of ['inbound','outbound'] as const) for (const scope of ['private','group'] as const) for (const kind of ['image','file'] as const)
     rows.push({label:`${scope==='private'?'私聊':'群聊'}${direction==='inbound'?'接收':'发送'}${kind==='image'?'图片':'文件'}`,capability:c.media?.[direction][scope][kind]});
-  return rows.filter(row => row.label !== '群聊定向机器人消息' || row.capability?.supported);
+  return rows.filter(row => (props.provider!=='wecom'||!['群聊 @ 消息','普通群消息','关键词触发','近期群消息上下文','通讯录读取'].includes(row.label)) && (row.label !== '群聊定向机器人消息' || row.capability?.supported));
 });
 </script>
 <template>

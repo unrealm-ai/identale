@@ -44,10 +44,10 @@ export class ChannelTaskAuthorization implements TaskAuthorizationPort {
   if(!s.source)return this.web.authorizeEntity(s);this.authorizeLocal(s);const receipt=this.receipts.get(this.key(s));
   if(!receipt||receipt.expiresAt<=this.now()||this.connections.currentBindingVersion(s.source.connectionId)!==receipt.version||this.web.getDirectoryAccess(s.workspaceId,s.entityId).revision!==receipt.policyRevision)throw new TaskError(403,'channel_authorization_required');
  }
- async resolveForTask(s:TaskScope){
+ async resolveForTask(s:TaskScope,admission?:{employeeUseAdmitted:true}){
   this.assertActive(s);this.authorizeLocal(s);if(s.assignment)return this.assignment(s).snapshot(s);if(s.business)return this.web.resolveForTrigger({...s,triggerId:s.business.triggerId,bindingVersion:s.business.bindingVersion});if(!s.source)return this.web.resolveForAdmittedTask(s);
   const b=await this.binding(s),actor=this.actor(s),version=this.packageVersion(s);
-  const packages=await this.web.executionPackages({workspaceId:s.workspaceId,entityId:s.entityId,requesterKind:'channel_user',requesterId:actor.externalId!,requesterIdentity:{idNamespace:actor.idNamespace!,applicationId:actor.applicationId!},conversationKind:s.source.conversationKind},b.connection,s.source.conversationKind);
+  const packages=await this.web.executionPackages({workspaceId:s.workspaceId,entityId:s.entityId,requesterKind:'channel_user',requesterId:actor.externalId!,requesterIdentity:{idNamespace:actor.idNamespace!,applicationId:actor.applicationId!},conversationKind:s.source.conversationKind,...(s.source.conversationKind==='group'?{groupContext:{conversationId:s.source.conversationId,bindingVersion:b.bindingVersion}}:{})},b.connection,s.source.conversationKind,admission);
   if(version!==this.packageVersion(s)||this.connections.currentBindingVersion(b.connectionId)!==b.bindingVersion)throw new TaskError(409,'capability_configuration_changed');
   const resources=this.web.resourceSelection(s.workspaceId,packages);
   return{...(this.sharing?.snapshot(s)?{groupSharing:this.sharing.snapshot(s)}:{}),kind:'channel',workspaceId:s.workspaceId,entityId:s.entityId,principalKey:scopeActorKey(s),bindingVersion:b.bindingVersion,policy:version,packages:packages.map(p=>({id:p.id,version:p.version})),resources,...executionCapabilityResources(resources)};

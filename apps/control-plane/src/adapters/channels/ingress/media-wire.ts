@@ -3,7 +3,7 @@ import {ChannelError,type SendChannelMessage} from '@dentity/application';
 import {validateNativeAttachment} from '../native-media.js';
 /** Identale conservative byte budgets, not the SDK's 50MiB chunking ceiling. */
 export const WECOM_MEDIA_LIMITS={image:2_000_000,file:20_000_000};
-export type SendWire=Omit<SendChannelMessage,'attachment'|'beforeSend'|'assertSendAllowed'> & {attachment?:{kind:'image'|'file';name:string;mediaType:string;base64:string}};
+export type SendWire=Omit<SendChannelMessage,'attachment'|'beforeSend'|'assertSendAllowed'|'originatingTaskScope'> & {attachment?:{kind:'image'|'file';name:string;mediaType:string;base64:string}};
 export const wireHash=(wire:SendWire)=>createHash('sha256').update(JSON.stringify(wire)).digest('hex');
 export function encodeSend(request:SendChannelMessage):SendWire{
  const wire:SendWire={conversation:{...request.conversation},text:request.text,operationId:request.operationId,...(request.replyToMessageId?{replyToMessageId:request.replyToMessageId}:{}),...(request.threadId?{threadId:request.threadId}:{})};

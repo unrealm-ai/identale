@@ -2,8 +2,8 @@ import {useWorkItemBeta} from '../work-items/useWorkItemBeta';
 import {computed, onUnmounted, ref, watch } from 'vue';
 import { api, ApiError, errorMessage } from '../../shared/api';
 import type { ApprovedResource, CapabilityPackage, ConfigMember } from '../../phase2';
-import type { DirectoryAccess, DirectoryAccessRule, DirectorySubjects, ConversationKind } from '../directory/types';
-type DirectoryPackage = CapabilityPackage & { directoryAccess?: { allow: DirectoryAccessRule[]; deny: DirectoryAccessRule[] } };
+import type { DirectoryAccess, DirectoryAccessRule, DirectorySubjects, ConversationKind, PackageDirectoryAccess, PackageChannelPolicy } from '../directory/types';
+type DirectoryPackage = CapabilityPackage & { directoryAccess?: PackageDirectoryAccess };
 export type AccessSettingsProps = { base: string;section?:string|undefined };
 export type AccessSettingsEmits = { (event: 'changed' | 'sessionExpired'): void; (event:'dirtyChanged',value:boolean):void;(event: 'busyChanged', value: boolean): void };
 interface Access { allowMemberIds: string[]; denyMemberIds: string[]; allowWorkspaceMembers?:boolean; revision: number }
@@ -17,6 +17,7 @@ export function useAccessSettings(props: AccessSettingsProps, emit: AccessSettin
   const directoryAccess = ref<DirectoryAccess>({ allow: [], deny: [], revision: 0 });
   const subjects = ref<DirectorySubjects>({ sources: [], users: [], departments: [] });
   const packageDirectoryAllow = ref<DirectoryAccessRule[]>([]), packageDirectoryDeny = ref<DirectoryAccessRule[]>([]);
+  const packageChannelPolicies=ref<PackageChannelPolicy[]|undefined>();
   const packageUserPolicyMode=ref<CapabilityPackage['userPolicyMode']>();
   const packageVersion=ref<number|undefined>();
   const packageConversationKinds=ref<ConversationKind[]|undefined>();
@@ -51,7 +52,7 @@ export function useAccessSettings(props: AccessSettingsProps, emit: AccessSettin
     if (packageId.value) edit(p.find(item => item.id === packageId.value));
   });reading.value=false; }
   function edit(p?: DirectoryPackage) {
-    packageUserPolicyMode.value=p?.userPolicyMode;
+    packageUserPolicyMode.value=p?.userPolicyMode;packageChannelPolicies.value=p?.directoryAccess?.channelPolicies?JSON.parse(JSON.stringify(p.directoryAccess.channelPolicies)):undefined;
     packageHandoffMode.value=p?.handoffUsageMode??(p?.handoffUsageScope?'custom':undefined);packageHandoffScope.value=p?.handoffUsageScope?JSON.parse(JSON.stringify(p.handoffUsageScope)):undefined;packageTriggerScope.value=p?.triggerUsageScope?JSON.parse(JSON.stringify(p.triggerUsageScope)):undefined;packageConversationKinds.value=p?.conversationKinds===undefined?undefined:[...p.conversationKinds];packageVersion.value=p?.version;packageId.value = p?.id ?? ''; name.value = p?.name ?? ''; packageDescription.value=p?.description??''; enabled.value = p?.enabled ?? true; mode.value = p?.mode ?? 'inherit';
     allowMemberIds.value = [...(p?.allowMemberIds ?? [])]; denyMemberIds.value = [...(p?.denyMemberIds ?? [])]; resourceIds.value = [...(p?.resourceIds ?? [])];
     packageDirectoryAllow.value = copyRules(p?.directoryAccess?.allow ?? []); packageDirectoryDeny.value = copyRules(p?.directoryAccess?.deny ?? []);
@@ -95,19 +96,20 @@ export function useAccessSettings(props: AccessSettingsProps, emit: AccessSettin
     if (!loaded.value || busy.value || !validRules([...packageDirectoryAllow.value, ...packageDirectoryDeny.value])) return;
     notice.value = ''; const submittedGeneration = generation;
     await run(async (signal, current) => {
-      const body = { ...(packageUserPolicyMode.value?{userPolicyMode:packageUserPolicyMode.value}:{}),...(beta.enabled.value&&packageHandoffMode.value?{handoffUsageMode:packageHandoffMode.value}:{}),...(beta.enabled.value&&packageHandoffScope.value?{handoffUsageScope:packageHandoffScope.value}:{}),...(packageTriggerScope.value?{triggerUsageScope:packageTriggerScope.value}:{}),...(packageConversationKinds.value===undefined?{}:{conversationKinds:[...packageConversationKinds.value]}),...(packageId.value?{expectedVersion:packageVersion.value}:{}),name: name.value, description:packageDescription.value, enabled: enabled.value, mode: mode.value, allowMemberIds: allowMemberIds.value, denyMemberIds: denyMemberIds.value, resourceIds: resourceIds.value, directoryAccess: { allow: packageDirectoryAllow.value, deny: packageDirectoryDeny.value } };
+      const body = { ...(packageUserPolicyMode.value?{userPolicyMode:packageUserPolicyMode.value}:{}),...(beta.enabled.value&&packageHandoffMode.value?{handoffUsageMode:packageHandoffMode.value}:{}),...(beta.enabled.value&&packageHandoffScope.value?{handoffUsageScope:packageHandoffScope.value}:{}),...(packageTriggerScope.value?{triggerUsageScope:packageTriggerScope.value}:{}),...(packageConversationKinds.value===undefined?{}:{conversationKinds:[...packageConversationKinds.value]}),...(packageId.value?{expectedVersion:packageVersion.value}:{}),name: name.value, description:packageDescription.value, enabled: enabled.value, mode: mode.value, allowMemberIds: allowMemberIds.value, denyMemberIds: denyMemberIds.value, resourceIds: resourceIds.value, directoryAccess: { allow: packageDirectoryAllow.value, deny: packageDirectoryDeny.value,...(packageChannelPolicies.value?{channelPolicies:packageChannelPolicies.value}:{}) } };
       const result = await api<DirectoryPackage>(`${props.base}/capability-packages${packageId.value ? `/${encodeURIComponent(packageId.value)}` : ''}`, signal, body, packageId.value ? 'PUT' : 'POST');
       if (!current()) return;
+      if(result.directoryAccess?.channelPolicies===undefined&&body.directoryAccess.channelPolicies)result.directoryAccess={...(result.directoryAccess??body.directoryAccess),channelPolicies:JSON.parse(JSON.stringify(body.directoryAccess.channelPolicies))};
       packages.value = [...packages.value.filter(p => p.id !== result.id), result]; edit(result);
       notice.value = '已保存。'; emit('changed');
     });
     if (submittedGeneration === generation && error.value) notice.value = '保存未确认时，请先重新读取配置核对，不要重复新建同名能力包。';
   }
-  async function togglePackage(p:DirectoryPackage){if(!loaded.value||busy.value)return;await run(async(signal,current)=>{const result=await api<DirectoryPackage>(`${props.base}/capability-packages/${encodeURIComponent(p.id)}/status`,signal,{enabled:!p.enabled,expectedVersion:p.version},'PUT');if(!current())return;packages.value=packages.value.map(value=>value.id===p.id?result:value);notice.value=result.enabled?'已启用。':'已停用；正在执行的任务不受影响。';emit('changed');});}
+  async function togglePackage(p:DirectoryPackage){if(!loaded.value||busy.value)return;await run(async(signal,current)=>{const result=await api<DirectoryPackage>(`${props.base}/capability-packages/${encodeURIComponent(p.id)}/status`,signal,{enabled:!p.enabled,expectedVersion:p.version},'PUT');if(!current())return;if(result.directoryAccess?.channelPolicies===undefined&&p.directoryAccess?.channelPolicies)result.directoryAccess={...(result.directoryAccess??p.directoryAccess),channelPolicies:JSON.parse(JSON.stringify(p.directoryAccess.channelPolicies))};packages.value=packages.value.map(value=>value.id===p.id?result:value);notice.value=result.enabled?'已启用。':'已停用；正在执行的任务不受影响。';emit('changed');});}
   watch(() => props.base, () => {
     generation++; controller.abort(); controller = new AbortController(); busy.value = false; loaded.value = false; members.value = []; resources.value = []; packages.value = [];
     access.value = { allowMemberIds: [], denyMemberIds: [], revision: 0 }; directoryAccess.value = { allow: [], deny: [], revision: 0 }; subjects.value = { sources: [], users: [], departments: [] }; edit(); void load();
   }, { immediate: true });
   onUnmounted(() => { generation++; controller.abort(); emit('busyChanged', false);emit('dirtyChanged',false); });
-  return {packageUserPolicyMode,beta,handoffOptions,packageHandoffMode,packageHandoffScope,legacyWeb,legacyDirectory,webDirty,directoryDirty,resetWeb,resetDirectory, triggerOptions,packageTriggerScope,packageConversationKinds,uploadSkill,directoryAccess, subjects, packageDirectoryAllow, packageDirectoryDeny, saveDirectoryAccess, members, resources, packages, access, packageId, name, packageDescription, enabled, mode, allowMemberIds, denyMemberIds, resourceIds, busy, loaded, error, notice, load, edit, saveAccess, savePackage, togglePackage };
+  return {packageChannelPolicies,packageUserPolicyMode,beta,handoffOptions,packageHandoffMode,packageHandoffScope,legacyWeb,legacyDirectory,webDirty,directoryDirty,resetWeb,resetDirectory, triggerOptions,packageTriggerScope,packageConversationKinds,uploadSkill,directoryAccess, subjects, packageDirectoryAllow, packageDirectoryDeny, saveDirectoryAccess, members, resources, packages, access, packageId, name, packageDescription, enabled, mode, allowMemberIds, denyMemberIds, resourceIds, busy, loaded, error, notice, load, edit, saveAccess, savePackage, togglePackage };
 }

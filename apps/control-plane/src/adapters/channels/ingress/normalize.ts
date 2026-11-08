@@ -12,7 +12,7 @@ export interface ChannelIngressCandidate {
   appId: string;
   botId: string;
   tenantId: string;
-  tenantNamespace: 'tenant_key' | 'corp_id';
+  tenantNamespace: 'tenant_key' | 'corp_id' | 'app_id';
   robotCode?: string;
 }
 export type NormalizedChannelIngress =
@@ -159,13 +159,15 @@ function wecom(session: ChannelIngressSession, raw: Record<string,unknown>, hint
   const row=object(raw.body),botId=id(row.aibotid);
   match(botId,session.appId,'ingress_bot_mismatch');
   if(hints.botId)match(botId,hints.botId,'ingress_bot_mismatch');
-  if(!hints.tenantId)return {kind:'ignored',reason:'directory_binding_required'};
-  if(hints.tenantNamespace!=='corp_id')return mismatch('ingress_tenant_namespace_mismatch');
-  // Internal bot callbacks do not prove CorpID; only host admin_asserted binding does.
-  const tenantId=hints.tenantId;
+  if(hints.tenantNamespace!=='app_id')return mismatch('ingress_tenant_namespace_mismatch');
+  match(hints.tenantId,session.appId,'ingress_tenant_mismatch');
+  // Bot credentials establish only this robot scope, never enterprise membership.
+  const tenantId=session.appId;
   if(row.chattype!=='single'&&row.chattype!=='group')return invalid('unsupported_conversation_kind');
   const sender=object(row.from),senderId=id(sender.userid);
-  if(sender.corpid!==undefined)match(sender.corpid,tenantId,'ingress_sender_tenant_mismatch');
+  if(sender.corpid!==undefined){
+    id(sender.corpid);
+  }
   if(senderId===botId)return {kind:'ignored',reason:'self_message'};
   const messageId=id(row.msgid),content=row.msgtype==='text'?text(object(row.text).content):['image','picture'].includes(String(row.msgtype))?'[图片]':row.msgtype==='file'?'[文件]':'[非文本消息]',conversationKind=row.chattype==='single'?'private':'group';
   const chatId=conversationKind==='group'?id(row.chatid):senderId;
@@ -175,7 +177,7 @@ function wecom(session: ChannelIngressSession, raw: Record<string,unknown>, hint
     author:{externalId:senderId,idNamespace:'user_id',applicationId:session.appId,kind:'human',identityEvidence:'channel_verified'},
     occurredAt:receivedAt,text:content,mentions:[],
   }};
-  const candidate={appId:session.appId,botId,tenantId,tenantNamespace:'corp_id' as const},parsed=parseBotContent('wecom',row);
+  const candidate={appId:session.appId,botId,tenantId,tenantNamespace:hints.tenantNamespace},parsed=parseBotContent('wecom',row);
   if(parsed)return{kind:'message',event:{...event,message:{...event.message,content:parsed.content,text:renderMessageContent(parsed.content)}},verificationText:row.msgtype==='text'?content.trim():'',candidate,media:parsed.media};
   if(row.msgtype!=='text')return conversationKind==='group'?{kind:'group_record',event,candidate}:{kind:'ignored',reason:'unsupported_message_type'};
   return {kind:'message',event,verificationText:content.trim(),candidate};
@@ -217,9 +219,10 @@ export function ingressReplyTarget(session:ChannelIngressSession,envelope:unknow
    if(kind==='private')recipient=id(row.senderStaffId);
    chatId=id(row.conversationId);messageId=id(row.msgId);eventId=id(headers.messageId);tenantId=hints.tenantId;
   }else{
-   const row=object(raw.body);if(raw.cmd!=='aibot_msg_callback'||row.aibotid!==session.appId||row.aibotid!==hints.botId||hints.tenantNamespace!=='corp_id'||row.msgtype!=='text')return;
+   const row=object(raw.body);if(raw.cmd!=='aibot_msg_callback'||row.aibotid!==session.appId||row.aibotid!==hints.botId||(hints.tenantNamespace!=='app_id'||hints.tenantId!==session.appId)||row.msgtype!=='text')return;
    if(row.chattype!=='single'&&row.chattype!=='group')return;
-   const sender=row.from as {userid?:unknown}|undefined;if(sender?.userid===hints.botId)return;
+   const sender=row.from as {userid?:unknown;corpid?:unknown}|undefined;
+   if(sender?.userid===hints.botId)return;
    kind=row.chattype==='single'?'private':'group';if(kind==='private')recipient=id(sender?.userid);
    chatId=kind==='private'?recipient!:id(row.chatid);messageId=id(row.msgid);eventId=messageId;tenantId=hints.tenantId;
   }

@@ -6,8 +6,8 @@ import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { createServer } from '../dist/server.js';
 import { EmployeeApplicationTransport } from '../dist/employee-channels/provider.js';
-import { FeishuDirectoryAdapter, DingTalkDirectoryAdapter, WeComDirectoryAdapter } from '../dist/adapters/directory/index.js';
-import { validateDirectory, ChannelValidationError } from '../dist/employee-channels/validation.js';
+import { FeishuDirectoryAdapter, DingTalkDirectoryAdapter } from '../dist/adapters/directory/index.js';
+import { wecomBotValidation, validateDirectory, ChannelValidationError } from '../dist/employee-channels/validation.js';
 
 const appId='synthetic-app',appSecret='synthetic-private-secret',token='synthetic-private-token',personName='Synthetic private person';
 const fsData=data=>({code:0,data});
@@ -178,9 +178,10 @@ test('DingTalk actual contact/name reads pass while full scope inventory and uns
   assert.equal(result.validation.canContinue,true);assert.equal(result.identity.tenantIdNamespace,'app_id');assert.equal(check(result.validation,'scope_inventory').status,'unverified');assert.equal(check(result.validation,'group_history').status,'unsupported');safeReport(result.validation);
 });
 
-test('WeCom ID label fallback is not evidence of required real name access',async()=>{
-  const state=vendor({mode:'no-name'}),directory=new WeComDirectoryAdapter({appId:'7',agentId:'7',corpId:'synthetic-corp',appSecret,fetch:state.fetch});
-  await assert.rejects(validateDirectory(directory,'wecom'),error=>error instanceof ChannelValidationError&&check(error.validation,'user_name').reason==='required_field'&&!error.validation.canContinue);
+test('WeCom bot preparation permits creation without claiming credentials or directory have passed',()=>{
+  const validation=wecomBotValidation(()=>1800000000000);
+  assert.equal(validation.canContinue,true);assert.equal(validation.checkedAt,1800000000000);
+  assert.deepEqual(validation.checks.map(c=>[c.id,c.status,c.required]),[['credentials','unverified',false],['bot_identity','unverified',false]]);
 });
 
 async function serverFixture(t){
@@ -193,16 +194,19 @@ async function serverFixture(t){
   return{state,db,call,owner,advance:()=>{now+=11*60_000;}};
 }
 
-test('independent WeCom directory draft needs no bot, persists nothing and enforces workspace/actor/expiry',async t=>{
-  const f=await serverFixture(t),owner=await f.owner('channel-verification-owner'),other=await f.owner('channel-verification-other');
+test('WeCom draft rejects traditional directory fields and exposes real bot validation contract',async t=>{
+  const f=await serverFixture(t),owner=await f.owner('channel-verification-owner');
   const base=`/api/workspaces/${owner.workspace.id}/employee-channel-drafts`;
-  const prepare=()=>f.call('POST',base,{provider:'wecom',operation:'directory',directory:{label:'Synthetic directory',corpId:'synthetic-corp',agentId:'7',appSecret}},owner.cookie);
-  const response=await prepare();assert.equal(response.statusCode,200,response.body);assert.equal(response.json().validation.canContinue,true);safeReport(response.json().validation);
-  assert.equal(f.db.prepare('SELECT count(*) n FROM employee_channel_connections').get().n,0);assert.equal(f.db.prepare('SELECT count(*) n FROM employee_channel_directory_credentials').get().n,0);
-  const body={provider:'wecom',appId:'synthetic-bot',appSecret:'synthetic-bot-secret',directory:{draftId:response.json().draftId,confirmSameCorp:true}};
-  const cross=await f.call('POST',`/api/workspaces/${other.workspace.id}/employee-channel-drafts`,body,other.cookie);assert.equal(cross.statusCode,409);assert.equal(cross.json().error,'channel_creation_draft_required');
-  f.advance();const expired=await f.call('POST',base,body,owner.cookie);assert.equal(expired.statusCode,409);assert.equal(expired.json().error,'channel_creation_draft_required');
-  assert.ok(!f.state.calls.some(c=>c.path.includes('bot/v3/info')));
+  const retired=await f.call('POST',base,{provider:'wecom',operation:'directory',directory:{corpId:'corp',agentId:'7',appSecret}},owner.cookie);
+  assert.equal(retired.statusCode,400);
+  const result=await f.call('POST',base,{provider:'wecom',appId:'synthetic-bot',appSecret:'synthetic-bot-secret'},owner.cookie);
+  assert.equal(result.statusCode,200,result.body);
+  assert.deepEqual(result.json().validation,result.json().source.validation);
+  assert.equal(result.json().validation.canContinue,true);
+  assert.equal(result.json().source.directoryMode,'member_search');
+  assert.equal(result.json().source.directoryBinding,undefined);
+  assert.equal(f.state.calls.length,0);
+  assert.equal(f.db.prepare('SELECT count(*) n FROM employee_channel_connections').get().n,0);
 });
 
 test('wizard API exposes safe layered failure with no draft writes, and succeeds with optional warnings',async t=>{
@@ -214,15 +218,12 @@ test('wizard API exposes safe layered failure with no draft writes, and succeeds
   assert.equal(f.db.prepare('SELECT count(*) n FROM employee_channel_connections').get().n,0);
 });
 
-test('editing independently revalidates a stored WeCom directory before any bot and rejects stale revisions',async t=>{
+test('retired WeCom directory management routes are not available',async t=>{
   const f=await serverFixture(t),owner=await f.owner('channel-directory-editor'),base=`/api/workspaces/${owner.workspace.id}`;
-  const entity=await f.call('POST',base+'/entities',{name:'Synthetic directory editor',ownWebUse:true},owner.cookie);assert.equal(entity.statusCode,200,entity.body);
+  const entity=await f.call('POST',base+'/entities',{name:'Synthetic bot editor',ownWebUse:true},owner.cookie);assert.equal(entity.statusCode,200,entity.body);
   const path=base+`/entities/${entity.json().entity.id}/channels/wecom/directory-credentials`;
-  const saved=await f.call('POST',path,{label:'Synthetic directory',corpId:'synthetic-corp',agentId:'7',appSecret},owner.cookie);assert.equal(saved.statusCode,200,saved.body);
-  const current=saved.json();const verified=await f.call('POST',path+`/${current.id}/revalidate`,{expectedRevision:current.revision},owner.cookie);
-  assert.equal(verified.statusCode,200,verified.body);assert.equal(verified.json().validation.canContinue,true);
-  const stale=await f.call('POST',path+`/${current.id}/revalidate`,{expectedRevision:current.revision},owner.cookie);assert.equal(stale.statusCode,409);
-  assert.equal(f.db.prepare('SELECT count(*) n FROM employee_channel_connections').get().n,0);safeReport(verified.json().validation);
+  const saved=await f.call('POST',path,{label:'Synthetic directory',corpId:'synthetic-corp',agentId:'7',appSecret},owner.cookie);assert.equal(saved.statusCode,404,saved.body);
+  assert.equal(f.state.calls.length,0);
 });
 
 test('inventory response includes returned scopes with separate user/tenant identity without granting user privileges to the bot',async()=>{

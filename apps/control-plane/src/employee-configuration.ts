@@ -21,8 +21,8 @@ export function registerEmployeeConfigurationRoutes(app: FastifyInstance, servic
       entity: {enabled:entity.enabled,lifecycleRevision:entity.lifecycleRevision,id: entity.id, workspaceId: entity.workspaceId, name: entity.name, description: entity.description, interactionRuntime: entity.interactionRuntime, executionRuntime: entity.executionRuntime, executionThinkingLevel: entity.executionThinkingLevel},
       model: profile ? {name: profile.name, modelId: profile.modelId, provider: profile.provider, source: profile.source, enabled: profile.enabled} : null,
       webAccess: {allow: names(access.allowMemberIds), deny: names(access.denyMemberIds),...(access.allowWorkspaceMembers?{allowWorkspaceMembers:true}:{})},
-      directoryAccess: {allow: rules(directoryAccess.allow), deny: rules(directoryAccess.deny)},
-      packages: services.capabilities.list(workspaceId, entityId).map(activeUserPolicy).map(p => ({id: p.id, name: p.name, enabled: p.enabled, mode: p.mode, ...(p.conversationKinds?{conversationKinds:p.conversationKinds}:{}), allow: names(p.allowMemberIds), deny: names(p.denyMemberIds), resourceCount: p.resourceIds.length, directoryAccess: {allow: rules(p.directoryAccess?.allow ?? []), deny: rules(p.directoryAccess?.deny ?? [])}})),
+      directoryAccess: {allow: rules(directoryAccess.allow), deny: rules(directoryAccess.deny), allowGroupMembers:directoryAccess.allowGroupMembers, channelPolicies:directoryAccess.channelPolicies},
+      packages: services.capabilities.list(workspaceId, entityId).map(activeUserPolicy).map(p => ({id: p.id, name: p.name, enabled: p.enabled, mode: p.mode, ...(p.conversationKinds?{conversationKinds:p.conversationKinds}:{}), allow: names(p.allowMemberIds), deny: names(p.denyMemberIds), resourceCount: p.resourceIds.length, directoryAccess: {allow: rules(p.directoryAccess?.allow ?? []), deny: rules(p.directoryAccess?.deny ?? []),channelPolicies:p.directoryAccess?.channelPolicies}})),
     };
   });
 }

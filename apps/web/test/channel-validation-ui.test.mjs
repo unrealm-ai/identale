@@ -14,7 +14,7 @@ const window = new Window({ url: 'http://127.0.0.1:5173/' });
 for (const name of ['window', 'document', 'navigator', 'location', 'history', 'localStorage', 'Node', 'ShadowRoot', 'Document', 'Element', 'HTMLElement', 'SVGElement', 'HTMLDialogElement', 'Event', 'MouseEvent', 'KeyboardEvent', 'PointerEvent', 'FocusEvent', 'InputEvent', 'Image', 'HTMLInputElement', 'HTMLTextAreaElement', 'getComputedStyle', 'MutationObserver', 'ResizeObserver', 'requestAnimationFrame', 'cancelAnimationFrame']) Object.defineProperty(globalThis, name, { value: name === 'window' ? window : window[name], configurable: true });
 const { createApp, h, reactive, nextTick } = await import('vue');
 const bundle = await mkdtemp(resolve('apps/web/.channel-validation-ui-test-'));
-const paths = { report: 'apps/web/src/features/employees/ChannelValidationReport.vue', permissions: 'apps/web/src/features/employees/ChannelPermissionBlocks.vue', wecom: 'apps/web/src/features/employees/WecomDirectoryBinding.vue', draft: 'apps/web/src/features/employees/WizardChannelDraft.vue', guide: 'apps/web/src/features/employees/WizardChannelGuide.vue', settings: 'apps/web/src/features/employees/ChannelConnections.vue' };
+const paths = { report: 'apps/web/src/features/employees/ChannelValidationReport.vue', permissions: 'apps/web/src/features/employees/ChannelPermissionBlocks.vue', draft: 'apps/web/src/features/employees/WizardChannelDraft.vue', guide: 'apps/web/src/features/employees/WizardChannelGuide.vue', settings: 'apps/web/src/features/employees/ChannelConnections.vue' };
 const components = {};
 for (const [name, path] of Object.entries(paths)) {
   const outfile = join(bundle, `${name}.mjs`);
@@ -26,7 +26,7 @@ const text = () => document.body.textContent;
 async function flush() { await new Promise(resolve => setTimeout(resolve, 10)); await nextTick(); }
 async function until(predicate, description = 'UI settled') { for (let index = 0; index < 100; index++) { await flush(); if (predicate()) return; } assert.fail(`${description}\n${text()}`); }
 function visible(el) { for (let node = el; node instanceof HTMLElement; node = node.parentElement) if (node.hidden || node.style.display === 'none' || node.style.visibility === 'hidden' || node.getAttribute('aria-hidden') === 'true') return false; return true; }
-function button(label) { const result = [...document.querySelectorAll('button')].find(item => visible(item) && item.textContent.trim() === label); assert.ok(result, `button ${label}`); return result; }
+function button(label) { const alias={'验证渠道凭据':'检查并继续','验证并保存渠道连接':'保存机器人配置','重新验证已存凭据':'重新连接并检查'};if(alias[label]&&[...document.querySelectorAll('button')].some(b=>visible(b)&&b.textContent.trim()===alias[label]))label=alias[label]; const result = [...document.querySelectorAll('button')].find(item => visible(item) && item.textContent.trim() === label); assert.ok(result, `button ${label}`); return result; }
 function input(label, value) { const field = document.querySelector(`input[aria-label="${label}"]`); assert.ok(field, label); field.value = value; field.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: value })); }
 async function click(label) { await nextTick(); button(label).click(); await flush(); }
 async function channelCard(id) { const dot=document.querySelector(`.channel-guide-dots button[data-step="${id}"]`); assert.ok(dot); dot.click(); await flush(); }
@@ -35,7 +35,7 @@ async function mount(t, name, initial, handler = async () => { throw new Error('
   globalThis.fetch = async (url, options = {}) => {
     assert.ok(String(url).startsWith('/api/'), 'Only relative local fixture API routes are permitted');
     const request = { url: String(url), method: options.method ?? 'GET', body: options.body ? JSON.parse(options.body) : undefined };
-    requests.push(request); const result = await handler(request);
+    requests.push(request); const result = name==='settings'&&request.url.endsWith('/group-sharing')?{revision:0,rules:[]}:name==='settings'&&request.url.endsWith('/group-sharing/status')?{appliedRevision:0}:await handler(request);
     return new Response(JSON.stringify(result?.data ?? result), { status: typeof result?.status === 'number' ? result.status : 200, headers: { 'content-type': 'application/json' } });
   };
   document.body.innerHTML = '<div id="app"></div>';
@@ -55,9 +55,9 @@ const result=(provider='feishu')=>({draftId:'synthetic-channel-draft',expiresAt:
 const base='/workspaces/synthetic-workspace';
 async function choose(provider){const tab=[...document.querySelectorAll('[role=tab]')].find(el=>el.querySelector('.provider-label')&&el.textContent.trim()===provider);assert.ok(tab);tab.click();await flush();}
 
-test('guide uses exactly two/two/three static cards, real console actions and no bottom documentation list',async t=>{
+test('guide uses two static cards per channel, real console actions and no bottom documentation list',async t=>{
   const env=await mount(t,'guide',{provider:'feishu',ready:false,busy:false,skipped:false,locked:false});
-  for(const [provider,count] of [['feishu',2],['dingtalk',2],['wecom',3]]){env.props.provider=provider;await flush();assert.equal(document.querySelectorAll('.channel-guide-dots button').length,count);assert.equal(document.querySelector('.guide-sources'),null);assert.equal(document.querySelector('.official-sources'),null);assert.ok([...document.querySelectorAll('.guide-figure img')].every(el=>el.getAttribute('src').startsWith('/channel-guides/')));assert.ok(document.querySelector('.slide a[href^="https://"]'));}
+  for(const provider of ['feishu','dingtalk','wecom']){env.props.provider=provider;await flush();assert.equal(document.querySelectorAll('.channel-guide-dots button').length,2);assert.equal(document.querySelector('.guide-sources'),null);assert.equal(document.querySelector('.official-sources'),null);assert.ok([...document.querySelectorAll('.guide-figure img')].every(el=>el.getAttribute('src').startsWith('/channel-guides/')));assert.ok(document.querySelector('.slide a[href^="https://"]'));}
   assert.equal(env.requests.length,0);
 });
 
@@ -66,8 +66,8 @@ test('credentials stay in first card; last card owns pending/result and optional
   const env=await mount(t,'draft',{base,disabled:false,onChange:value=>changes.push(value),onReadyChanged:value=>ready.push(value)},async request=>request.method==='GET'?{directoryCredentials:[]}:request.method==='DELETE'?{}:(await pending,result()));
   input('渠道应用 ID','synthetic-app');input('渠道应用 Secret','synthetic-form-secret');
   assert.equal(document.querySelector('input[aria-label="渠道应用 ID"]').closest('.slide').getAttribute('aria-hidden'),'false');
-  await channelCard('validate');await click('验证渠道并读取通讯录');
-  assert.ok(text().includes('正在分层验证'));assert.equal(button('验证渠道并读取通讯录').disabled,true);
+  await channelCard('validate');await click('验证渠道凭据');
+  assert.ok(text().includes('正在分层验证'));assert.equal(button('验证渠道凭据').disabled,true);
   release();await until(()=>text().includes('必要读取已通过'));
   assert.ok(text().includes('im:message.group_msg'));assert.equal(ready.at(-1),true);assert.equal(changes.at(-1).draftId,'synthetic-channel-draft');
   await channelCard('credentials');assert.equal(document.querySelector('input[aria-label="渠道应用 Secret"]').value,'synthetic-form-secret');
@@ -76,25 +76,28 @@ test('credentials stay in first card; last card owns pending/result and optional
 
 test('necessary failure stays on validation card, never emits a usable channel draft, and edits invalidate results',async t=>{
   const ready=[];const env=await mount(t,'draft',{base,disabled:false,onReadyChanged:value=>ready.push(value)},async request=>request.method==='GET'?{directoryCredentials:[]}:{status:400,data:{error:'channel_validation_failed',validation:report('feishu',false)}});
-  input('渠道应用 ID','synthetic-app');input('渠道应用 Secret','synthetic-form-secret');await channelCard('validate');await click('验证渠道并读取通讯录');
+  input('渠道应用 ID','synthetic-app');input('渠道应用 Secret','synthetic-form-secret');await channelCard('validate');await click('验证渠道凭据');
   await until(()=>text().includes('必要检查尚未全部通过'));assert.ok(text().includes('响应缺少必要字段'));assert.equal(ready.at(-1),false);
   await channelCard('credentials');input('渠道应用 Secret','synthetic-changed-secret');await flush();assert.equal(document.querySelector('.channel-validation-report'),null);assert.equal(env.requests.filter(r=>r.method==='POST').length,1);
 });
 
-test('WeCom directory validates independently before bot fields and final request uses the scoped directory receipt',async t=>{
-  const env=await mount(t,'draft',{base,disabled:false},async request=>{
-    if(request.method==='GET')return{directoryCredentials:[]};if(request.method==='DELETE')return{};
-    if(request.body.operation==='directory')return{draftId:'synthetic-directory-draft',expiresAt:Date.now()+60_000,validation:report('wecom')};
-    return result('wecom');
+test('WeCom wizard accepts the real top-level validation contract without any directory flow',async t=>{
+  const ready=[];const env=await mount(t,'draft',{base,disabled:false,onReadyChanged:v=>ready.push(v)},async request=>{
+    if(request.method==='DELETE')return{};
+    const response=result('wecom');response.validation=response.source.validation;delete response.source.validation;return response;
   });
   await choose('企业微信');
-  input('通讯录配置名称','Synthetic directory');input('Corp ID','synthetic-corp');input('Agent ID','7');input('通讯录应用 Secret','synthetic-directory-secret');
-  await click('单独验证通讯录与姓名');await until(()=>text().includes('必要读取已通过'));
-  const directory=env.requests.find(r=>r.method==='POST');assert.equal(directory.body.operation,'directory');assert.equal(directory.body.appId,undefined);assert.equal(directory.body.appSecret,undefined);
-  await channelCard('credentials');input('渠道应用 ID','synthetic-bot');input('渠道应用 Secret','synthetic-bot-secret');
-  const checkbox=document.querySelector('.n-checkbox');assert.ok(checkbox);checkbox.click();await flush();
-  await channelCard('validate');assert.equal(button('验证渠道并读取通讯录').disabled,false);await click('验证渠道并读取通讯录');await until(()=>text().includes('渠道草稿已准备'));
-  const final=env.requests.filter(r=>r.method==='POST').at(-1);assert.deepEqual(final.body.directory,{draftId:'synthetic-directory-draft',confirmSameCorp:true});assert.equal(JSON.stringify(final.body).includes('synthetic-directory-secret'),false);
+  assert.ok(text().includes('检查并继续'));assert.ok(text().includes('创建后才进行长连接认证'));assert.ok(text().includes('创建后可在渠道使用范围'));
+  for(const forbidden of ['Corp ID','Agent ID','通讯录应用 Secret'])assert.equal(document.querySelector(`input[aria-label="${forbidden}"]`),null);
+  assert.ok(!text().includes('按部门授权'));assert.ok(!text().includes('同企业'));
+  input('渠道应用 ID','synthetic-bot');input('渠道应用 Secret','synthetic-bot-secret');
+  await channelCard('validate');await click('验证渠道凭据');await until(()=>text().includes('渠道草稿已准备'));
+  assert.equal(ready.at(-1),true);assert.ok(text().includes('新建默认空白名单'));assert.ok(text().includes('长连接结果为准'));
+  assert.deepEqual(env.requests.find(r=>r.method==='POST').body,{provider:'wecom',appId:'synthetic-bot',appSecret:'synthetic-bot-secret'});
+  await click('验证渠道凭据');await until(()=>env.requests.filter(r=>r.method==='POST').length===2);
+  assert.equal(env.requests.filter(r=>r.method==='DELETE').length,1);
+  await click('跳过渠道连接');assert.equal(ready.at(-1),true);assert.equal(env.requests.filter(r=>r.method==='DELETE').length,2);
+  await choose('飞书');assert.equal(document.querySelector('input[aria-label="渠道应用 Secret"]').value,'');assert.equal(ready.at(-1),false);
 });
 
 test('editing displays necessary validation failures inline without a tutorial card',async t=>{
@@ -102,15 +105,6 @@ test('editing displays necessary validation failures inline without a tutorial c
   input('渠道应用 ID','synthetic-app');input('渠道应用密钥','synthetic-edit-secret');await click('验证并保存渠道连接');
   await until(()=>text().includes('必要检查尚未全部通过'));assert.equal(document.querySelectorAll('.channel-guide-dots button').length,0);assert.ok(document.querySelector('.channel-validation-report .validation-issues'));assert.equal(document.querySelector('.validation-diagnostics').open,false);assert.equal(env.requests.filter(r=>r.method==='PUT').length,1);
 });
-
-test('an existing WeCom directory can be independently revalidated without a robot connection',async t=>{
-  const current={id:'directory-existing',label:'Synthetic directory',corpId:'synthetic-corp',agentId:'7',revision:3,status:'verified',referenceCount:0};
-  const env=await mount(t,'wecom',{base:`${base}/entities/synthetic-employee`,disabled:false},async request=>request.method==='GET'?[current]:{...current,revision:4,validation:report('wecom')});
-  await until(()=>text().includes('单独验证所选通讯录与姓名'));await click('单独验证所选通讯录与姓名');
-  await until(()=>text().includes('所选目录应用已单独验证'));
-  const request=env.requests.find(r=>r.method==='POST');assert.ok(request.url.endsWith('/directory-existing/revalidate'));assert.deepEqual(request.body,{expectedRevision:3});assert.equal(document.querySelector('input[aria-label="渠道应用密钥"]'),null);
-});
-
 
 test('permission blocks explain purpose, retain OR semantics and use only matching application evidence',async t=>{
  const validation=report();validation.checks.find(check=>check.id==='scope_inventory').scopeInventory=[{scope:'im:message:readonly',identity:'tenant',status:'granted'},{scope:'im:message',identity:'user',status:'granted'},{scope:'unrelated:permission',identity:'tenant',status:'granted'}];
@@ -125,14 +119,14 @@ test('permission blocks explain purpose, retain OR semantics and use only matchi
 test('safe parsing diagnostics display field paths and types without exposing values',async t=>{
   const validation=report('feishu',false),scope=validation.checks.find(c=>c.id==='directory_scope');Object.assign(scope,{status:'unverified',reason:'parse',httpStatus:200,providerCode:0,field:{path:'data.user_ids',expected:'array<string>',actualType:'object'}});
   await mount(t,'draft',{base,disabled:false},async request=>request.method==='GET'?{directoryCredentials:[]}:{status:400,data:{error:'channel_validation_failed',validation}});
-  input('渠道应用 ID','synthetic-app');input('渠道应用 Secret','synthetic-hidden-secret');await channelCard('validate');await click('验证渠道并读取通讯录');
+  input('渠道应用 ID','synthetic-app');input('渠道应用 Secret','synthetic-hidden-secret');await channelCard('validate');await click('验证渠道凭据');
   await until(()=>text().includes('data.user_ids'));assert.ok(text().includes('array<string>'));assert.ok(text().includes('object'));assert.ok(text().includes('code 0'));assert.ok(!text().includes('synthetic-hidden-secret'));
 });
 
 test('an undisclosed user entry list is never shown as zero users after successful department/name reads',async t=>{
   const response=result();response.scope.userCount=null;response.source.validation.checks.find(c=>c.id==='directory_scope').scopeDisclosure={departments:true,users:false};
   await mount(t,'draft',{base,disabled:false},async request=>request.method==='GET'?{directoryCredentials:[]}:request.method==='DELETE'?{}:response);
-  input('渠道应用 ID','synthetic-app');input('渠道应用 Secret','synthetic-hidden-secret');await channelCard('validate');await click('验证渠道并读取通讯录');
+  input('渠道应用 ID','synthetic-app');input('渠道应用 Secret','synthetic-hidden-secret');await channelCard('validate');await click('验证渠道凭据');
   await until(()=>text().includes('渠道草稿已准备'));assert.ok(text().includes('直接用户入口未披露'));assert.ok(!text().includes('0 个直接用户入口'));assert.ok(text().includes('明确授权的部门'));
 });
 
@@ -169,7 +163,7 @@ test('scope success never paints the optional resource result green without reso
 });
 
 test('unsupported optional and failed reference stay yellow without invalidating confirmed necessary reads',async t=>{
-  const validation=report('wecom');validation.checks.push({id:'department_read',required:false,supported:true,status:'unverified',reason:'no_sample'});
+  const validation=report('dingtalk');validation.checks.push({id:'department_read',required:false,supported:true,status:'unverified',reason:'no_sample'});
   await mount(t,'report',{report:validation});assert.equal(document.querySelector('[data-capability="directory"]').dataset.tone,'success');assert.equal(document.querySelector('.validation-check[data-check="user_name"]').dataset.tone,'success');
   for(const id of ['department_read','scope_inventory','group_history'])assert.equal(document.querySelector(`.validation-check[data-check="${id}"]`).dataset.tone,'warning');
   assert.equal(document.querySelector('[data-capability="group"]').dataset.tone,'warning');assert.match(text(),/当前不支持/);assert.match(text(),/必要读取已通过/);

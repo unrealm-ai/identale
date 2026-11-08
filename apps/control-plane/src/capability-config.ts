@@ -3,7 +3,7 @@ import {handoffPackageAllowed} from '@dentity/application';
 import {AdmissionDecisionCache} from './channel-loop/admission-cache.js';
 import type {McpResources} from './mcp-resources.js';
 import type {SkillResources} from './skill-resources.js';
-import type {DirectoryAccessConfig,DirectoryAccessRule,ChannelAccessScope,ChannelConnection} from '@dentity/application';
+import type {DirectoryPackageChannelPolicy,DirectoryChannelPolicy,DirectoryAccessConfig,DirectoryAccessRule,ChannelAccessScope,ChannelConnection} from '@dentity/application';
 import type {EmployeeChannelService,DirectoryEvaluation} from './employee-channels/service.js';
 import { randomUUID } from 'node:crypto';
 import { evaluateEntityAccess, evaluatePackageAccess, projectRoleResources } from '@dentity/domain';
@@ -24,7 +24,7 @@ export type ApprovedResource = ResourceVisibility & {readonly name?:string;reado
 export interface CapabilityScope { workspaceId: string; entityId: string; userId: string }
 export interface WebAccessConfig { allowWorkspaceMembers?: boolean; allowMemberIds: string[]; denyMemberIds: string[]; revision: number }
 export interface TriggerUsageScope {mode:'all'|'allowlist';selectionMode?:'all'|'allowlist'|'denylist';allowTriggerIds:string[];denyTriggerIds:string[]}
-export interface CapabilityPackageInput { name: string; description?: string; enabled: boolean; userPolicyMode?:'inherit'|'allowlist'|'denylist'; handoffUsageScope?:HandoffUsageScope;handoffUsageMode?:HandoffUsageMode; triggerUsageScope?:TriggerUsageScope; mode: 'inherit'|'restrict'; allowMemberIds: string[]; denyMemberIds: string[]; resourceIds: string[]; conversationKinds?:('private'|'group'|'meeting')[]; directoryAccess?:{allow:DirectoryAccessRule[];deny:DirectoryAccessRule[]} }
+export interface CapabilityPackageInput { name: string; description?: string; enabled: boolean; userPolicyMode?:'inherit'|'allowlist'|'denylist'; handoffUsageScope?:HandoffUsageScope;handoffUsageMode?:HandoffUsageMode; triggerUsageScope?:TriggerUsageScope; mode: 'inherit'|'restrict'; allowMemberIds: string[]; denyMemberIds: string[]; resourceIds: string[]; conversationKinds?:('private'|'group'|'meeting')[]; directoryAccess?:{allow:DirectoryAccessRule[];deny:DirectoryAccessRule[];channelPolicies?:DirectoryPackageChannelPolicy[]} }
 export interface CapabilityPackage extends CapabilityPackageInput { id: string; workspaceId: string; entityId: string; version: number }
 export interface CapabilitySnapshot {
   readonly groupSharing?:import("@dentity/contracts").GroupSharingSnapshot;
@@ -47,13 +47,47 @@ const packageFields = ['name','description','enabled','mode','userPolicyMode','a
 export function activeUserPolicy<T extends CapabilityPackageInput>(p:T):T{
   const selected=p.userPolicyMode;
   if(!selected)return p;
-  return{...p,mode:selected==='allowlist'?'restrict' as const:'inherit' as const,allowMemberIds:selected==='allowlist'?p.allowMemberIds:[],denyMemberIds:selected==='denylist'?p.denyMemberIds:[],directoryAccess:{allow:selected==='allowlist'?p.directoryAccess?.allow??[]:[],deny:selected==='denylist'?p.directoryAccess?.deny??[]:[]}};
+  return{...p,mode:selected==='allowlist'?'restrict' as const:'inherit' as const,allowMemberIds:selected==='allowlist'?p.allowMemberIds:[],denyMemberIds:selected==='denylist'?p.denyMemberIds:[],directoryAccess:{...(p.directoryAccess?.channelPolicies?{channelPolicies:p.directoryAccess.channelPolicies}:{}),allow:selected==='allowlist'?p.directoryAccess?.allow??[]:[],deny:selected==='denylist'?p.directoryAccess?.deny??[]:[]}};
 }
 function selectionMode(value:unknown):'all'|'allowlist'|'denylist'|undefined{
   if(value===undefined)return undefined;
   if(!['all','allowlist','denylist'].includes(String(value)))return fail(400,'invalid_list_selection_mode');
   return value as 'all'|'allowlist'|'denylist';
 }
+
+/** Shared lifecycle writes are local and nest safely inside the channel binding transaction. */
+function ensureDirectoryPolicySchema(store:Store){
+  store.db.exec('CREATE TABLE IF NOT EXISTS entity_directory_policies(entity_id TEXT PRIMARY KEY REFERENCES entities(id),workspace_id TEXT NOT NULL REFERENCES workspaces(id),revision INTEGER NOT NULL,allow_json TEXT NOT NULL,deny_json TEXT NOT NULL)');
+  const columns=store.all<{name:string}>('PRAGMA table_info(entity_directory_policies)');
+  if(!columns.some(c=>c.name==='channel_policies_json'))store.db.exec("ALTER TABLE entity_directory_policies ADD COLUMN channel_policies_json TEXT NOT NULL DEFAULT '[]'");
+  if(!columns.some(c=>c.name==='allow_group_members'))store.db.exec('ALTER TABLE entity_directory_policies ADD COLUMN allow_group_members INTEGER NOT NULL DEFAULT 0 CHECK(allow_group_members IN (0,1))');
+}
+function sourceAccessWrite(store:Store,workspaceId:string,entityId:string,oldSourceId:string|undefined,newSourceId:string|undefined){
+  return store.transaction(()=>{
+    ensureDirectoryPolicySchema(store);
+    const row=store.one<{revision:number;allow_json:string;deny_json:string;allow_group_members:number;channel_policies_json:string}>('SELECT * FROM entity_directory_policies WHERE workspace_id=? AND entity_id=?',workspaceId,entityId);
+    const saved:DirectoryChannelPolicy[]=JSON.parse(row?.channel_policies_json??'[]');
+    if(!oldSourceId&&newSourceId&&saved.some(p=>p.sourceId===newSourceId))return;
+    const keep=(r:DirectoryAccessRule)=>r.sourceId!==oldSourceId;
+    const policies=saved.filter(p=>p.sourceId!==oldSourceId&&p.sourceId!==newSourceId);
+    if(newSourceId)policies.push({sourceId:newSourceId,mode:'allowlist',allow:[],deny:[],allowGroupMembers:true,revision:1});
+    store.run('INSERT INTO entity_directory_policies(entity_id,workspace_id,revision,allow_json,deny_json,allow_group_members,channel_policies_json) VALUES(?,?,?,?,?,?,?) ON CONFLICT(entity_id) DO UPDATE SET revision=excluded.revision,allow_json=excluded.allow_json,deny_json=excluded.deny_json,channel_policies_json=excluded.channel_policies_json',entityId,workspaceId,(row?.revision??0)+1,JSON.stringify((JSON.parse(row?.allow_json??'[]') as DirectoryAccessRule[]).filter(keep)),JSON.stringify((JSON.parse(row?.deny_json??'[]') as DirectoryAccessRule[]).filter(keep)),row?.allow_group_members??0,JSON.stringify(policies));
+    if(!store.one("SELECT name FROM sqlite_master WHERE type='table' AND name='capability_packages'"))return;
+    for(const row of store.all<{id:string;config_json:string}>('SELECT id,config_json FROM capability_packages WHERE workspace_id=? AND entity_id=?',workspaceId,entityId)){
+      const config=JSON.parse(row.config_json) as CapabilityPackageInput,previous=config.directoryAccess;
+      if(!newSourceId&&!previous?.allow.some(r=>r.sourceId===oldSourceId)&&!previous?.deny.some(r=>r.sourceId===oldSourceId)&&!previous?.channelPolicies?.some(p=>p.sourceId===oldSourceId))continue;
+      const channelPolicies=(previous?.channelPolicies??[]).filter(p=>p.sourceId!==oldSourceId&&p.sourceId!==newSourceId);
+      if(newSourceId)channelPolicies.push({sourceId:newSourceId,mode:'inherit',allow:[],deny:[]});
+      const directoryAccess={allow:(previous?.allow??[]).filter(keep),deny:(previous?.deny??[]).filter(keep),channelPolicies};
+      if(JSON.stringify(directoryAccess)===JSON.stringify(previous)||!newSourceId&&!previous)continue;
+      store.run('UPDATE capability_packages SET version=version+1,config_json=? WHERE id=?',JSON.stringify({...config,directoryAccess}),row.id);
+    }
+  });
+}
+/** Call only for a newly created source; existing implicit policies must not be reinitialized. */
+export function initializeChannelSourceAccess(store:Store,workspaceId:string,entityId:string,sourceId:string){return sourceAccessWrite(store,workspaceId,entityId,undefined,sourceId);}
+/** Remove old source rules without touching Web, other sources or package resource selections. */
+export function resetChannelSourceAccess(store:Store,workspaceId:string,entityId:string,oldSourceId:string,newSourceId?:string){return sourceAccessWrite(store,workspaceId,entityId,oldSourceId,newSourceId);}
 
 /** Merge only deployment-approved resources; package provenance stays in the snapshot. */
 export function executionCapabilityResources(resources:readonly {packageId:string;resource:ApprovedResource}[]){
@@ -82,6 +116,7 @@ export class CapabilityConfigService {
       CREATE TABLE IF NOT EXISTS capability_packages (id TEXT PRIMARY KEY,workspace_id TEXT NOT NULL REFERENCES workspaces(id),entity_id TEXT NOT NULL REFERENCES entities(id),version INTEGER NOT NULL,config_json TEXT NOT NULL)`);
     store.db.exec('CREATE TABLE IF NOT EXISTS employee_handoff_policies(entity_id TEXT PRIMARY KEY,workspace_id TEXT NOT NULL,version INTEGER NOT NULL,allow_all INTEGER NOT NULL CHECK(allow_all IN(0,1)),scope_json TEXT NOT NULL)');
     if(!store.all<{name:string}>('PRAGMA table_info(entity_web_policies)').some(c=>c.name==='allow_workspace_members'))store.db.exec('ALTER TABLE entity_web_policies ADD COLUMN allow_workspace_members INTEGER NOT NULL DEFAULT 0 CHECK(allow_workspace_members IN (0,1))');
+    if(!store.all<{name:string}>('PRAGMA table_info(entity_directory_policies)').some(c=>c.name==='channel_policies_json'))store.db.exec("ALTER TABLE entity_directory_policies ADD COLUMN channel_policies_json TEXT NOT NULL DEFAULT '[]'");
     if(!store.all<{name:string}>('PRAGMA table_info(entity_directory_policies)').some(c=>c.name==='allow_group_members'))store.db.exec('ALTER TABLE entity_directory_policies ADD COLUMN allow_group_members INTEGER NOT NULL DEFAULT 0 CHECK(allow_group_members IN (0,1))');
   }
   /** Validated deployment resource catalog; swapped only with a coherent configuration snapshot. */
@@ -141,22 +176,38 @@ export class CapabilityConfigService {
       this.invalidateAdmission(workspaceId,entityId);return {allowMemberIds,denyMemberIds,revision,...(allowWorkspaceMembers?{allowWorkspaceMembers:true}:{})};
     });
   }
+  /** All read and mutation responses expose the same effective source policy projection. */
+  private packageDto(workspaceId:string,entityId:string,packageId:string,version:number,config:CapabilityPackageInput):CapabilityPackage {
+    const active=activeUserPolicy(config),saved=config.directoryAccess?.channelPolicies??[];
+    const channelPolicies=(this.directory?.list?.(workspaceId,entityId)??[]).map(c=>saved.find(p=>p.sourceId===c.sourceId)??{
+      sourceId:c.sourceId,mode:active.mode==='restrict'?'allowlist' as const:active.directoryAccess?.deny.length?'denylist' as const:'inherit' as const,
+      allow:active.directoryAccess?.allow.filter(r=>r.sourceId===c.sourceId)??[],deny:active.directoryAccess?.deny.filter(r=>r.sourceId===c.sourceId)??[],
+      ...(active.mode==='inherit'&&active.directoryAccess?.allow.some(r=>r.sourceId===c.sourceId)?{legacyAllowCheck:true as const}:{}),
+    });
+    return {...config,...(channelPolicies.length?{directoryAccess:{allow:config.directoryAccess?.allow??[],deny:config.directoryAccess?.deny??[],channelPolicies}}:{}),
+      ...(config.handoffUsageScope&&!config.handoffUsageMode?{handoffUsageMode:'custom' as const}:{}),id:packageId,workspaceId,entityId,version};
+  }
   list(workspaceId: string, entityId: string): CapabilityPackage[] {
     this.entity(workspaceId,entityId);
-    return this.store.all<{id:string;version:number;config_json:string}>('SELECT id,version,config_json FROM capability_packages WHERE workspace_id=? AND entity_id=? ORDER BY id',workspaceId,entityId).map(r=>{const config=JSON.parse(r.config_json)as CapabilityPackageInput;return{...config,...(config.handoffUsageScope&&!config.handoffUsageMode?{handoffUsageMode:'custom' as const}:{}),id:r.id,workspaceId,entityId,version:r.version};});
+    return this.store.all<{id:string;version:number;config_json:string}>('SELECT id,version,config_json FROM capability_packages WHERE workspace_id=? AND entity_id=? ORDER BY id',workspaceId,entityId)
+      .map(row=>this.packageDto(workspaceId,entityId,row.id,row.version,JSON.parse(row.config_json) as CapabilityPackageInput));
   }
   save(workspaceId: string, entityId: string, input: unknown, packageId?: string): CapabilityPackage {
     object(input,packageFields);
     if(input.description!==undefined&&(typeof input.description!=='string'||input.description.length>4000))fail(400,'invalid_capability_configuration');
     if(input.userPolicyMode!==undefined&&!['inherit','allowlist','denylist'].includes(String(input.userPolicyMode)))fail(400,'invalid_user_policy_mode');
-    if (typeof input.name !== 'string' || !input.name.trim() || input.name.length>120 || typeof input.enabled!=='boolean' || !['inherit','restrict'].includes(input.mode as string)) fail(400,'invalid_capability_configuration');
+    if (typeof input.name !== 'string' || !input.name.trim() || input.name.length>120 || typeof input.enabled!=='boolean' || input.mode!==undefined&&!['inherit','restrict'].includes(input.mode as string)) fail(400,'invalid_capability_configuration');
     if(input.handoffUsageMode!==undefined&&!['inherit','custom'].includes(String(input.handoffUsageMode)))fail(400,'invalid_handoff_usage_mode');
     if(input.conversationKinds!==undefined&&(!Array.isArray(input.conversationKinds)||input.conversationKinds.length>100||input.conversationKinds.some(k=>!['private','group','meeting'].includes(k))))fail(400,'invalid_capability_configuration');
-    const config: CapabilityPackageInput={...(input.handoffUsageMode!==undefined?{handoffUsageMode:input.handoffUsageMode as HandoffUsageMode}:{}),name:(input.name as string).trim(),enabled:input.enabled as boolean,mode:input.mode as 'inherit'|'restrict',allowMemberIds:strings(input.allowMemberIds),denyMemberIds:strings(input.denyMemberIds),resourceIds:strings(input.resourceIds),...(input.conversationKinds!==undefined?{conversationKinds:[...new Set(input.conversationKinds as ('private'|'group'|'meeting')[])]}:{}),...(input.triggerUsageScope!==undefined?{triggerUsageScope:this.triggerRules(workspaceId,entityId,input.triggerUsageScope)}:{}),...(input.handoffUsageScope!==undefined?{handoffUsageScope:this.handoffRules(workspaceId,input.handoffUsageScope)}:{}),...(input.directoryAccess!==undefined?{directoryAccess:this.directoryRules(workspaceId,entityId,input.directoryAccess)}:{})};
+    const config: CapabilityPackageInput={...(input.handoffUsageMode!==undefined?{handoffUsageMode:input.handoffUsageMode as HandoffUsageMode}:{}),name:(input.name as string).trim(),enabled:input.enabled as boolean,mode:(input.mode??'inherit') as 'inherit'|'restrict',allowMemberIds:strings(input.allowMemberIds),denyMemberIds:strings(input.denyMemberIds),resourceIds:strings(input.resourceIds),...(input.conversationKinds!==undefined?{conversationKinds:[...new Set(input.conversationKinds as ('private'|'group'|'meeting')[])]}:{}),...(input.triggerUsageScope!==undefined?{triggerUsageScope:this.triggerRules(workspaceId,entityId,input.triggerUsageScope)}:{}),...(input.handoffUsageScope!==undefined?{handoffUsageScope:this.handoffRules(workspaceId,input.handoffUsageScope)}:{})};
     if (config.resourceIds.some(r=>!this.approved(r,workspaceId))) fail(400,'unknown_approved_resource');
     return this.store.transaction(()=>{
       this.entity(workspaceId,entityId); this.validateMembers(workspaceId,[...config.allowMemberIds,...config.denyMemberIds]);
-      const previous=packageId?this.list(workspaceId,entityId).find(p=>p.id===packageId):undefined;
+      const stored=packageId?this.store.one<{version:number;config_json:string}>('SELECT version,config_json FROM capability_packages WHERE workspace_id=? AND entity_id=? AND id=?',workspaceId,entityId,packageId):undefined;
+      const previous=stored?{...JSON.parse(stored.config_json),version:stored.version} as CapabilityPackage:undefined;
+      if(input.mode===undefined&&previous)config.mode=previous.mode;
+      if(input.directoryAccess!==undefined)config.directoryAccess=this.directoryRules(workspaceId,entityId,input.directoryAccess,previous?.directoryAccess);
+      else if(!previous&&input.mode!=='restrict'&&(!input.userPolicyMode||input.userPolicyMode==='inherit'))config.directoryAccess={allow:[],deny:[],channelPolicies:(this.directory?.list?.(workspaceId,entityId)??[]).map(c=>({sourceId:c.sourceId,mode:'inherit',allow:[],deny:[]}))};
       if(input.description!==undefined)config.description=(input.description as string).trim();
       else if(previous?.description!==undefined)config.description=previous.description;
       if(input.userPolicyMode!==undefined)config.userPolicyMode=input.userPolicyMode as NonNullable<CapabilityPackageInput['userPolicyMode']>;
@@ -173,7 +224,7 @@ export class CapabilityConfigService {
       if(input.expectedVersion!==undefined&&(!Number.isSafeInteger(input.expectedVersion)||input.expectedVersion!==previous?.version))fail(409,'capability_version_conflict');
       const value={...config,id:packageId??randomUUID(),workspaceId,entityId,version:(previous?.version??0)+1};
       this.store.run(`INSERT INTO capability_packages(id,workspace_id,entity_id,version,config_json) VALUES(?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET version=excluded.version,config_json=excluded.config_json`,value.id,workspaceId,entityId,value.version,JSON.stringify(config));
-      return value;
+      return this.packageDto(workspaceId,entityId,value.id,value.version,config);
     });
   }
   private handoffRules(workspaceId:string,value:unknown):HandoffUsageScope {
@@ -208,43 +259,86 @@ export class CapabilityConfigService {
   }
   setEnabled(scope:CapabilityScope,packageId:string,input:unknown){
     object(input,['enabled','expectedVersion']);if(typeof input.enabled!=='boolean'||!Number.isSafeInteger(input.expectedVersion))fail(400,'invalid_capability_configuration');
-    return this.store.transaction(()=>{this.entity(scope.workspaceId,scope.entityId);const row=this.store.one<{version:number;config_json:string}>('SELECT version,config_json FROM capability_packages WHERE workspace_id=? AND entity_id=? AND id=?',scope.workspaceId,scope.entityId,packageId);if(!row)fail(404,'capability_package_not_found');if(row!.version!==input.expectedVersion)fail(409,'capability_version_conflict');const config={...JSON.parse(row!.config_json),enabled:input.enabled};if(!this.store.run('UPDATE capability_packages SET version=version+1,config_json=? WHERE id=? AND version=?',JSON.stringify(config),packageId,row!.version).changes)fail(409,'capability_version_conflict');return {...config,id:packageId,workspaceId:scope.workspaceId,entityId:scope.entityId,version:row!.version+1} as CapabilityPackage;});
+    return this.store.transaction(()=>{this.entity(scope.workspaceId,scope.entityId);const row=this.store.one<{version:number;config_json:string}>('SELECT version,config_json FROM capability_packages WHERE workspace_id=? AND entity_id=? AND id=?',scope.workspaceId,scope.entityId,packageId);if(!row)fail(404,'capability_package_not_found');if(row!.version!==input.expectedVersion)fail(409,'capability_version_conflict');const config={...JSON.parse(row!.config_json),enabled:input.enabled};if(!this.store.run('UPDATE capability_packages SET version=version+1,config_json=? WHERE id=? AND version=?',JSON.stringify(config),packageId,row!.version).changes)fail(409,'capability_version_conflict');return this.packageDto(scope.workspaceId,scope.entityId,packageId,row!.version+1,config);});
   }
   getDirectoryAccess(workspaceId:string,entityId:string):DirectoryAccessConfig {
     this.entity(workspaceId,entityId);
-    const row=this.store.one<{revision:number;allow_json:string;deny_json:string;allow_group_members:number}>('SELECT revision,allow_json,deny_json,allow_group_members FROM entity_directory_policies WHERE workspace_id=? AND entity_id=?',workspaceId,entityId);
-    return row?{revision:row.revision,allowGroupMembers:row.allow_group_members===1,allow:JSON.parse(row.allow_json),deny:JSON.parse(row.deny_json)}:{revision:0,allow:[],deny:[],allowGroupMembers:false};
+    const row=this.store.one<{revision:number;allow_json:string;deny_json:string;allow_group_members:number;channel_policies_json:string}>('SELECT * FROM entity_directory_policies WHERE workspace_id=? AND entity_id=?',workspaceId,entityId);
+    const saved:DirectoryChannelPolicy[]=row?JSON.parse(row.channel_policies_json):[];
+    const allow:DirectoryAccessRule[]=JSON.parse(row?.allow_json??'[]'),deny:DirectoryAccessRule[]=JSON.parse(row?.deny_json??'[]'),allowGroupMembers=row?.allow_group_members===1;
+    // Project legacy behavior without rewriting data or changing an existing implicit all policy.
+    const channelPolicies=(this.directory?.list?.(workspaceId,entityId)??[]).map(c=>{
+      const policy=saved.find(p=>p.sourceId===c.sourceId);
+      return policy?{...policy,allowGroupMembers:policy.allowGroupMembers??(c.provider==='wecom'?false:allowGroupMembers)}:{sourceId:c.sourceId,mode:c.provider==='wecom'?'all' as const:'allowlist' as const,allow:allow.filter(r=>r.sourceId===c.sourceId),deny:deny.filter(r=>r.sourceId===c.sourceId),allowGroupMembers:c.provider==='wecom'?false:allowGroupMembers,revision:row?.revision??0};
+    });
+    return {revision:row?.revision??0,allow,deny,allowGroupMembers,channelPolicies};
   }
-  private directoryRules(workspaceId:string,entityId:string,input:unknown):{allow:DirectoryAccessRule[];deny:DirectoryAccessRule[]} {
-    if(!this.directory)fail(503,'directory_unavailable');object(input,['allow','deny']);
-    return{allow:this.directory!.validateRules(workspaceId,entityId,input.allow),deny:this.directory!.validateRules(workspaceId,entityId,input.deny)};
+  private writeDirectoryAccess(workspaceId:string,entityId:string,value:DirectoryAccessConfig){
+    this.store.run('INSERT INTO entity_directory_policies(entity_id,workspace_id,revision,allow_json,deny_json,allow_group_members,channel_policies_json) VALUES(?,?,?,?,?,?,?) ON CONFLICT(entity_id) DO UPDATE SET revision=excluded.revision,allow_json=excluded.allow_json,deny_json=excluded.deny_json,allow_group_members=excluded.allow_group_members,channel_policies_json=excluded.channel_policies_json',entityId,workspaceId,value.revision,JSON.stringify(value.allow),JSON.stringify(value.deny),Number(value.allowGroupMembers===true),JSON.stringify(value.channelPolicies??[]));
+    this.invalidateAdmission(workspaceId,entityId);return this.getDirectoryAccess(workspaceId,entityId);
+  }
+  private channelPolicy(workspaceId:string,entityId:string,input:unknown,previous:DirectoryAccessConfig):DirectoryChannelPolicy{
+    object(input,['sourceId','mode','allow','deny','allowGroupMembers','expectedRevision']);
+    const old=previous.channelPolicies?.find(p=>p.sourceId===input.sourceId);
+    if(!old)fail(400,'directory_source_not_found');
+    if(input.mode!==undefined&&!['all','allowlist','denylist'].includes(String(input.mode))||input.allowGroupMembers!==undefined&&typeof input.allowGroupMembers!=='boolean')fail(400,'invalid_capability_configuration');
+    if(input.expectedRevision!==undefined&&(!Number.isSafeInteger(input.expectedRevision)||Number(input.expectedRevision)<0))fail(400,'invalid_capability_configuration');
+    if(input.expectedRevision!==undefined&&input.expectedRevision!==old!.revision)fail(409,'directory_policy_changed');
+    const validate=(key:'allow'|'deny')=>{const rules=input[key]??old![key];if(!Array.isArray(rules)||rules.some(r=>!r||r.sourceId!==input.sourceId))fail(400,'invalid_directory_access_rule');return this.directory!.validateRules(workspaceId,entityId,rules,old![key]);};
+    return {sourceId:old!.sourceId,mode:(input.mode??old!.mode) as DirectoryChannelPolicy['mode'],allow:validate('allow'),deny:validate('deny'),allowGroupMembers:(input.allowGroupMembers??old!.allowGroupMembers)===true,revision:old!.revision+1};
+  }
+  private directoryRules(workspaceId:string,entityId:string,input:unknown,retained?:CapabilityPackageInput['directoryAccess']):NonNullable<CapabilityPackageInput['directoryAccess']> {
+    if(!this.directory)fail(503,'directory_unavailable');object(input,['allow','deny','channelPolicies']);
+    const value:NonNullable<CapabilityPackageInput['directoryAccess']>={allow:this.directory!.validateRules(workspaceId,entityId,input.allow??[],retained?.allow),deny:this.directory!.validateRules(workspaceId,entityId,input.deny??[],retained?.deny)};
+    if(input.channelPolicies===undefined){if(retained?.channelPolicies)value.channelPolicies=clone(retained.channelPolicies);return value;}
+    if(!Array.isArray(input.channelPolicies)||input.channelPolicies.length>20)fail(400,'invalid_capability_configuration');
+    const sources=this.directory!.list(workspaceId,entityId),seen=new Set<string>();
+    value.channelPolicies=(input.channelPolicies as unknown[]).map(input=>{
+      object(input,['sourceId','mode','allow','deny','legacyAllowCheck']);
+      if(input.legacyAllowCheck!==undefined&&input.legacyAllowCheck!==true)fail(400,'invalid_capability_configuration');
+      if(typeof input.sourceId!=='string'||!sources.some(c=>c.sourceId===input.sourceId))return fail(400,'directory_source_not_found');
+      if(seen.has(input.sourceId)||!['inherit','allowlist','denylist'].includes(String(input.mode)))fail(400,'invalid_capability_configuration');seen.add(input.sourceId);
+      const old=retained?.channelPolicies?.find(p=>p.sourceId===input.sourceId);
+      const validate=(key:'allow'|'deny')=>{const rules=input[key]??[];if(!Array.isArray(rules)||rules.some(r=>!r||r.sourceId!==input.sourceId))fail(400,'invalid_directory_access_rule');return this.directory!.validateRules(workspaceId,entityId,rules,old?.[key]??retained?.[key]);};
+      return {sourceId:input.sourceId,mode:input.mode as DirectoryPackageChannelPolicy['mode'],allow:validate('allow'),deny:validate('deny'),...(input.legacyAllowCheck===true?{legacyAllowCheck:true as const}:{})};
+    });return value;
   }
   saveDirectoryAccess(workspaceId:string,entityId:string,input:unknown):DirectoryAccessConfig {
-    this.entity(workspaceId,entityId);object(input,['allow','deny','allowGroupMembers','expectedRevision']);if(input.allowGroupMembers!==undefined&&typeof input.allowGroupMembers!=='boolean'||input.expectedRevision!==undefined&&!Number.isSafeInteger(input.expectedRevision))fail(400,'invalid_capability_configuration');const value=this.directoryRules(workspaceId,entityId,{allow:input.allow,deny:input.deny});
-    return this.store.transaction(()=>{const previous=this.getDirectoryAccess(workspaceId,entityId);if(input.expectedRevision!==undefined&&previous.revision!==input.expectedRevision)fail(409,'directory_policy_changed');const revision=previous.revision+1,allowGroupMembers=input.allowGroupMembers===undefined?previous.allowGroupMembers===true:input.allowGroupMembers===true;this.store.run('INSERT INTO entity_directory_policies(entity_id,workspace_id,revision,allow_json,deny_json,allow_group_members) VALUES(?,?,?,?,?,?) ON CONFLICT(entity_id) DO UPDATE SET revision=excluded.revision,allow_json=excluded.allow_json,deny_json=excluded.deny_json,allow_group_members=excluded.allow_group_members',entityId,workspaceId,revision,JSON.stringify(value.allow),JSON.stringify(value.deny),Number(allowGroupMembers));this.invalidateAdmission(workspaceId,entityId);return{...value,allowGroupMembers,revision};});
+    this.entity(workspaceId,entityId);object(input,['allow','deny','allowGroupMembers','expectedRevision','channelPolicies']);
+    if(!this.directory)fail(503,'directory_unavailable');
+    if(input.allowGroupMembers!==undefined&&typeof input.allowGroupMembers!=='boolean'||input.expectedRevision!==undefined&&!Number.isSafeInteger(input.expectedRevision))fail(400,'invalid_capability_configuration');
+    return this.store.transaction(()=>{const previous=this.getDirectoryAccess(workspaceId,entityId);if(input.expectedRevision!==undefined&&previous.revision!==input.expectedRevision)fail(409,'directory_policy_changed');
+      const value={allow:input.allow===undefined?previous.allow:this.directory!.validateRules(workspaceId,entityId,input.allow,previous.allow),deny:input.deny===undefined?previous.deny:this.directory!.validateRules(workspaceId,entityId,input.deny,previous.deny)};
+      let channelPolicies=[...previous.channelPolicies??[]];
+      // Legacy whole-employee writes remain supported, but are translated into source-local policies.
+      if(input.allow!==undefined||input.deny!==undefined||input.allowGroupMembers!==undefined)channelPolicies=channelPolicies.map(p=>({...p,...(input.allow!==undefined?{allow:value.allow.filter(r=>r.sourceId===p.sourceId)}:{}),...(input.deny!==undefined?{deny:value.deny.filter(r=>r.sourceId===p.sourceId)}:{}),...(input.allowGroupMembers!==undefined?{allowGroupMembers:input.allowGroupMembers===true}:{}),revision:p.revision+1}));
+      if(input.channelPolicies!==undefined){if(!Array.isArray(input.channelPolicies)||input.channelPolicies.length>20)fail(400,'invalid_capability_configuration');const changed=(input.channelPolicies as unknown[]).map(p=>this.channelPolicy(workspaceId,entityId,p,previous));if(new Set(changed.map(p=>p.sourceId)).size!==changed.length)fail(400,'invalid_capability_configuration');channelPolicies=channelPolicies.map(p=>changed.find(c=>c.sourceId===p.sourceId)??p);}
+      return this.writeDirectoryAccess(workspaceId,entityId,{...value,channelPolicies,revision:previous.revision+1,allowGroupMembers:(input.allowGroupMembers??previous.allowGroupMembers)===true});});
   }
   patchDirectoryAccess(workspaceId:string,entityId:string,input:unknown):DirectoryAccessConfig {
-    this.entity(workspaceId,entityId);
-    object(input,['sourceId','allow','expectedRevision','allowGroupMembers']);
-    if(typeof input.sourceId!=='string'||!Number.isSafeInteger(input.expectedRevision)||Number(input.expectedRevision)<0||input.allowGroupMembers!==undefined&&typeof input.allowGroupMembers!=='boolean')fail(400,'invalid_capability_configuration');
-    const directory=this.directory;
-    if(!directory)fail(503,'directory_unavailable');
-    return this.store.transaction(()=>{
-      const source=directory!.list(workspaceId,entityId).find(item=>item.sourceId===input.sourceId);
-      if(!source)fail(400,'directory_source_not_found');
-
-      if(!Array.isArray(input.allow)||input.allow.some(rule=>!rule||typeof rule!=='object'||rule.sourceId!==input.sourceId))fail(400,'invalid_directory_access_rule');
-      const replacement=directory!.validateRules(workspaceId,entityId,input.allow);
-      const previous=this.getDirectoryAccess(workspaceId,entityId);
-      if(previous.revision!==input.expectedRevision)fail(409,'directory_policy_changed');
-      const allow=[...previous.allow.filter(rule=>rule.sourceId!==input.sourceId),...replacement];
-      if(allow.length>100)fail(400,'invalid_directory_access_rule');
-      const revision=previous.revision+1,allowGroupMembers=input.allowGroupMembers===undefined?previous.allowGroupMembers===true:input.allowGroupMembers===true;
-      this.store.run('INSERT INTO entity_directory_policies(entity_id,workspace_id,revision,allow_json,deny_json,allow_group_members) VALUES(?,?,?,?,?,?) ON CONFLICT(entity_id) DO UPDATE SET revision=excluded.revision,allow_json=excluded.allow_json,deny_json=excluded.deny_json,allow_group_members=excluded.allow_group_members',entityId,workspaceId,revision,JSON.stringify(allow),JSON.stringify(previous.deny),Number(allowGroupMembers));
-      this.invalidateAdmission(workspaceId,entityId);
-      return{allow,deny:previous.deny,allowGroupMembers,revision};
+    this.entity(workspaceId,entityId);object(input,['sourceId','mode','allow','deny','expectedRevision','allowGroupMembers']);
+    if(!this.directory)fail(503,'directory_unavailable');
+    if(typeof input.sourceId!=='string'||!Number.isSafeInteger(input.expectedRevision)||Number(input.expectedRevision)<0)fail(400,'invalid_capability_configuration');
+    return this.store.transaction(()=>{const previous=this.getDirectoryAccess(workspaceId,entityId),changed=this.channelPolicy(workspaceId,entityId,input,previous);
+      const allow=[...previous.allow.filter(r=>r.sourceId!==changed.sourceId),...changed.allow],deny=[...previous.deny.filter(r=>r.sourceId!==changed.sourceId),...changed.deny];
+      return this.writeDirectoryAccess(workspaceId,entityId,{...previous,allow,deny,revision:previous.revision+1,channelPolicies:previous.channelPolicies!.map(p=>p.sourceId===changed.sourceId?changed:p)});
     });
   }
+  private channelSource(scope:ChannelAccessScope,connection:ChannelConnection){return this.directory?.list(scope.workspaceId,scope.entityId).find(c=>c.id===connection.connectionId);}
+  private async channelPolicyDecision(scope:ChannelAccessScope,connection:ChannelConnection,kind:'private'|'group'|'meeting',policy:DirectoryAccessConfig,evaluation?:DirectoryEvaluation){
+    const source=this.channelSource(scope,connection),p=policy.channelPolicies?.find(p=>p.sourceId===source?.sourceId);
+    if(!p)return {allowed:false,cacheable:false};
+    const groupMemberAccess=p.allowGroupMembers===true&&kind==='group'&&!!scope.groupContext;
+    const rules={allow:p.mode==='allowlist'?p.allow:[],deny:p.deny};
+    // Matching deny rules win; the directory adapter fails closed on unknown identity mappings.
+    return this.directoryDecisionResult(scope,connection,kind,rules,p.mode!=='allowlist',evaluation,groupMemberAccess);
+  }
+  private async packageChannelDecision(scope:ChannelAccessScope,connection:ChannelConnection,kind:'private'|'group'|'meeting',p:CapabilityPackage,evaluation?:DirectoryEvaluation){
+    const source=this.channelSource(scope,connection),saved=p.directoryAccess??{allow:[],deny:[]},policy=saved.channelPolicies?.find(p=>p.sourceId===source?.sourceId);
+    const rules=policy?{allow:policy.mode==='allowlist'||policy.legacyAllowCheck===true?policy.allow:[],deny:policy.deny}:{allow:saved.allow.filter(r=>r.sourceId===source?.sourceId),deny:saved.deny.filter(r=>r.sourceId===source?.sourceId)};
+    return this.directoryDecision(scope,connection,kind,rules,policy?policy.mode!=='allowlist':p.mode==='inherit',evaluation);
+  }
+
   private async directoryDecisionResult(scope:ChannelAccessScope,connection:ChannelConnection,kind:'private'|'group'|'meeting',rules:{allow:readonly DirectoryAccessRule[];deny:readonly DirectoryAccessRule[]},inherit=false,evaluation:DirectoryEvaluation|undefined=this.directory?.beginEvaluation(),groupMemberAccess=false):Promise<{allowed:boolean;cacheable:boolean}> {
     if(!this.directory||!evaluation||scope.workspaceId!==connection.workspaceId)return{allowed:false,cacheable:false};
     const deny=await Promise.all(rules.deny.map(rule=>this.directory!.matches(scope.workspaceId,rule,scope,connection,kind,evaluation)));if(deny.some(v=>v!==false))return{allowed:false,cacheable:!deny.includes('unknown')};
@@ -263,7 +357,7 @@ export class CapabilityConfigService {
         if(connection.provider==='wecom'){if(!await directory.validateCachedAdmission(scope,connection))return false;this.assertActive(scope);if(directory.admissionGuard(scope,connection)!==binding)return false;if(!this.admissionCache.current(group,generation)||this.admissionCache.get(group,key,binding)!==cached)continue;}
         return cached.allowed;
       }
-      const policy=this.getDirectoryAccess(scope.workspaceId,scope.entityId),decision=await this.directoryDecisionResult(scope,connection,kind,policy,false,attempt===0?evaluation:undefined,policy.allowGroupMembers===true&&kind==='group'&&!!scope.groupContext);
+      const policy=this.getDirectoryAccess(scope.workspaceId,scope.entityId),decision=await this.channelPolicyDecision(scope,connection,kind,policy,attempt===0?evaluation:undefined);
       this.assertActive(scope);if(directory.admissionGuard(scope,connection)!==binding)return false;
       if(!this.admissionCache.current(group,generation))continue;
       if(this.getDirectoryAccess(scope.workspaceId,scope.entityId).revision!==policy.revision){this.invalidateAdmission(scope.workspaceId,scope.entityId);continue;}
@@ -277,15 +371,17 @@ export class CapabilityConfigService {
     if(!await this.authorizeChannel(scope,connection,kind,evaluation))fail(403,'entity_use_forbidden');
     const packages=this.list(scope.workspaceId,scope.entityId);
     const result:CapabilityPackage[]=[];
-    for(const p of packages.map(activeUserPolicy))if(p.enabled&&(!p.conversationKinds||p.conversationKinds.includes(kind))&&await this.directoryDecision(scope,connection,kind,p.directoryAccess??{allow:[],deny:[]},p.mode==='inherit',evaluation))result.push(p);
+    for(const p of packages.map(activeUserPolicy))if(p.enabled&&(!p.conversationKinds||p.conversationKinds.includes(kind))&&await this.packageChannelDecision(scope,connection,kind,p,evaluation))result.push(p);
     if(this.getDirectoryAccess(scope.workspaceId,scope.entityId).revision!==policyRevision||JSON.stringify(this.list(scope.workspaceId,scope.entityId))!==JSON.stringify(packages))fail(409,'capability_configuration_changed');
     return result;
   }
-  /** The host already admitted the input; evaluate only current execution-package restrictions. */
-  async executionPackages(scope:ChannelAccessScope,connection:ChannelConnection,kind:'private'|'group'|'meeting'){
+  /** Only an internal host admission receipt skips employee policy; packages and bindings stay current. */
+  async executionPackages(scope:ChannelAccessScope,connection:ChannelConnection,kind:'private'|'group'|'meeting',admission?:{employeeUseAdmitted:true}){
+    const policyRevision=this.getDirectoryAccess(scope.workspaceId,scope.entityId).revision;
+    if(admission?.employeeUseAdmitted!==true&&!await this.authorizeChannel(scope,connection,kind))fail(403,'entity_use_forbidden');
     const evaluation=this.directory?.beginEvaluation(),packages=this.list(scope.workspaceId,scope.entityId),result:CapabilityPackage[]=[];
-    for(const p of packages.map(activeUserPolicy))if(p.enabled&&(!p.conversationKinds||p.conversationKinds.includes(kind))&&await this.directoryDecision(scope,connection,kind,p.directoryAccess??{allow:[],deny:[]},p.mode==='inherit',evaluation))result.push(p);
-    if(JSON.stringify(this.list(scope.workspaceId,scope.entityId))!==JSON.stringify(packages))fail(409,'capability_configuration_changed');
+    for(const p of packages.map(activeUserPolicy))if(p.enabled&&(!p.conversationKinds||p.conversationKinds.includes(kind))&&await this.packageChannelDecision(scope,connection,kind,p,evaluation))result.push(p);
+    if(admission?.employeeUseAdmitted!==true&&this.getDirectoryAccess(scope.workspaceId,scope.entityId).revision!==policyRevision||JSON.stringify(this.list(scope.workspaceId,scope.entityId))!==JSON.stringify(packages))fail(409,'capability_configuration_changed');
     return result;
   }
   private facts(scope: CapabilityScope): {entity:EntityAccessPolicy;request:AccessRequest;revision:number} {

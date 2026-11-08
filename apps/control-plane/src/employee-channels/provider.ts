@@ -1,7 +1,7 @@
 import {DirectoryError,type DirectoryProvider,type DirectoryPort} from '@dentity/application';
 import {DirectoryHttp,object,string,tokenLifetime,feishuEnvelope} from '../adapters/directory/http.js';
 import type {EmployeeChannelCredential,EmployeeChannelOptions,VerifiedEmployeeApplication} from './types.js';
-import {channelChecks,validateDirectory,validationStep} from './validation.js';
+import {ChannelValidationError,channelChecks,validateDirectory,validationReport,validationStep} from './validation.js';
 import {inspectFeishuScopes} from './feishu-scopes.js';
 /** Application-only credentials. The token is retained only in this server closure. */
 export class EmployeeApplicationTransport {
@@ -27,7 +27,16 @@ export class EmployeeApplicationTransport {
     return string(object(response.bot).open_id);
    });
   }
-  const {identity,scope,validation}=await validateDirectory(directory,this.provider,checks);
+  let result;
+  try {
+   result=await validateDirectory(directory,this.provider,checks);
+  } catch(error) {
+   if(this.provider!=='dingtalk'||!(error instanceof ChannelValidationError))throw error;
+   const report=error.validation;
+   const validation=validationReport(this.provider,report.checks.map(check=>check.id==='credentials'?check:{...check,required:false}));
+   return {identity:{appId:this.appId,tenantId:this.appId,tenantIdNamespace:'app_id'},directoryStatus:'unavailable',validation};
+  }
+  const {identity,scope,validation}=result;
   return{identity,...(botId?{botId}:{}),...((identity.tenantIdNamespace==='tenant_key'||identity.tenantIdNamespace==='corp_id')?{eventTenantId:identity.tenantId}:{}),directoryStatus:'available',validation,authorizedScope:scope};
  }
 }

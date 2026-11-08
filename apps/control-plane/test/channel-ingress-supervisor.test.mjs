@@ -57,15 +57,12 @@ test('disable and same-installation rotation immediately fence old sink and prev
  assert.equal(f.service.dto(f.repository.byId(c.id)).transport.state,'stopped');
 });
 
-test('pending DingTalk authenticated Stream can capture challenge but never queue business and replay remains verification-only',async t=>{
- const f=await fixture(t,{pending:true}),c=await f.save('dingtalk');let live=await f.transport.current(c.id);
- assert.equal(await live.sink.onEvent(ding('before-challenge','ordinary')),'ignored');assert.equal(f.count(),0);
- const v=f.service.startVerification('w','e','dingtalk','u',{expectedRevision:c.revision});live=await f.transport.current(c.id);
- assert.equal(await live.sink.onEvent(ding('wrong','other')),'ignored');
- assert.equal(await live.sink.onEvent(ding('challenge',v.challengeText)),'accepted');assert.equal(f.count(),0);
- const candidate=f.service.verification('w','e','dingtalk');assert.equal(candidate.status,'observed');
- f.service.confirmVerification('w','e','dingtalk','u',{expectedRevision:candidate.revision,candidateId:candidate.candidateId});live=await f.transport.current(c.id);
- const replay=ding('challenge',v.challengeText);replay.headers.messageId='new-envelope';assert.equal(await live.sink.onEvent(replay),'duplicate');assert.equal(f.count(),0);
+test('pending DingTalk ignores old challenge text and accepts an ordinary first authenticated message',async t=>{
+ const f=await fixture(t,{pending:true}),c=await f.save('dingtalk'),live=await f.transport.current(c.id);
+ assert.equal(await live.sink.onEvent(ding('old','identity-verify-00000000-0000-0000-0000-000000000000')),'ignored');
+ assert.equal(f.count(),0);
+ assert.equal(await live.sink.onEvent(ding('ordinary','ordinary')),'accepted');assert.equal(f.count(),1);
+ assert.equal(await live.sink.onEvent(ding('ordinary','ordinary')),'duplicate');assert.equal(f.count(),1);
  assert.equal(f.repository.byId(c.id).robotCode,'distinct-code');
 });
 

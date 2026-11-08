@@ -14,7 +14,7 @@ const window = new Window({ url: 'http://127.0.0.1:5173/' });
 for (const name of ['window', 'document', 'navigator', 'location', 'history', 'localStorage', 'Node', 'ShadowRoot', 'Document', 'Element', 'HTMLElement', 'SVGElement', 'HTMLDialogElement', 'Event', 'MouseEvent', 'KeyboardEvent', 'PointerEvent', 'FocusEvent', 'InputEvent', 'Image', 'HTMLInputElement', 'HTMLTextAreaElement', 'getComputedStyle', 'MutationObserver', 'ResizeObserver', 'requestAnimationFrame', 'cancelAnimationFrame']) Object.defineProperty(globalThis, name, { value: name === 'window' ? window : window[name], configurable: true });
 const { createApp, h, reactive, nextTick } = await import('vue');
 const bundle = await mkdtemp(resolve('apps/web/.directory-ui-test-'));
-const paths = { materials:'apps/web/src/features/business-resources/TaskMaterialAuthorization.vue', business: 'apps/web/src/features/business-resources/BusinessResourceConfiguration.vue', requirements: 'apps/web/src/features/employees/ChannelSetupRequirements.vue', draft: 'apps/web/src/features/employees/WizardChannelDraft.vue', wecom: 'apps/web/src/features/employees/WecomDirectoryBinding.vue', wizard: 'apps/web/src/features/employees/EntityWizard.vue', guide: 'apps/web/src/features/directory/DirectorySetupGuide.vue', settings: 'apps/web/src/features/employees/ChannelConnections.vue', picker: 'apps/web/src/features/directory/DirectoryRulePicker.vue', access: 'apps/web/src/features/employees/AccessSettings.vue' };
+const paths = { materials:'apps/web/src/features/business-resources/TaskMaterialAuthorization.vue', business: 'apps/web/src/features/business-resources/BusinessResourceConfiguration.vue', requirements: 'apps/web/src/features/employees/ChannelSetupRequirements.vue', draft: 'apps/web/src/features/employees/WizardChannelDraft.vue', wizard: 'apps/web/src/features/employees/EntityWizard.vue', guide: 'apps/web/src/features/directory/DirectorySetupGuide.vue', settings: 'apps/web/src/features/employees/ChannelConnections.vue', picker: 'apps/web/src/features/directory/DirectoryRulePicker.vue', access: 'apps/web/src/features/employees/AccessSettings.vue' };
 const components = {};
 for (const [name, path] of Object.entries(paths)) {
   const outfile = join(bundle, `${name}.mjs`);
@@ -27,9 +27,9 @@ const text = () => document.body.textContent;
 async function flush() { await new Promise(resolve => setTimeout(resolve, 10)); await nextTick(); }
 async function until(predicate, description = 'UI settled') { for (let index = 0; index < 100; index++) { await flush(); if (predicate()) return; } assert.fail(`${description}\n${text()}`); }
 function visible(el) { for (let node = el; node instanceof HTMLElement; node = node.parentElement) if (node.hidden || node.style.display === 'none' || node.style.visibility === 'hidden' || node.getAttribute('aria-hidden') === 'true') return false; return true; }
-function button(label) { const result = [...document.querySelectorAll('button')].find(item => visible(item) && (item.textContent.trim() === label || item.getAttribute('aria-label') === label)); assert.ok(result, `button ${label}`); return result; }
+function button(label) { const alias={'验证渠道凭据':'检查并继续','验证并保存渠道连接':'保存机器人配置','重新验证已存凭据':'重新连接并检查'};if(alias[label]&&[...document.querySelectorAll('button')].some(b=>visible(b)&&b.textContent.trim()===alias[label]))label=alias[label]; const result = [...document.querySelectorAll('button')].find(item => visible(item) && (item.textContent.trim() === label || item.getAttribute('aria-label') === label)); assert.ok(result, `button ${label}`); return result; }
 function input(label, value) { const field = document.querySelector(`input[aria-label="${label}"]`); assert.ok(field, label); field.value = value; field.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: value })); }
-async function click(label) { await nextTick(); if(['验证并保存渠道连接','重新验证已存凭据','停用此渠道','启用此渠道','解除渠道绑定','验证渠道并读取通讯录'].includes(label)&&document.querySelector('.channel-guide-dots button[data-step=validate]'))await channelCard('validate'); button(label).click(); await flush(); }
+async function click(label) { await nextTick(); if(['验证并保存渠道连接','重新验证已存凭据','停用此渠道','启用此渠道','解除渠道绑定','验证渠道凭据'].includes(label)&&document.querySelector('.channel-guide-dots button[data-step=validate]'))await channelCard('validate'); button(label).click(); await flush(); }
 async function channelCard(id) { id=id==='create'?'credentials':id==='optional'?'validate':id; const dot=document.querySelector(`.channel-guide-dots button[data-step="${id}"]`); assert.ok(dot); dot.click(); await flush(); }
 async function mount(t, name, initial, handler = async () => { throw new Error('Unexpected request'); }, runtimeHandler) {
   const props = reactive(initial), requests = [], events={ready:[],change:[],busy:[]};
@@ -39,7 +39,7 @@ async function mount(t, name, initial, handler = async () => { throw new Error('
     assert.ok(String(url).startsWith('/api/'), 'Only relative local fixture API routes are permitted');
     const request = { url: String(url), method: options.method ?? 'GET', body: options.body ? JSON.parse(options.body) : undefined };
     requests.push(request);
-    const result = name==='settings' && request.url === '/api/business-resources/configuration' ? {configured:false,reason:'business_oauth_not_configured'} : name === 'settings' && request.method==='GET' && request.url.endsWith('/directory-access')
+    const result = name==='settings'&&request.url.endsWith('/group-sharing')?{revision:0,rules:[]}:name==='settings'&&request.url.endsWith('/group-sharing/status')?{appliedRevision:0}:name==='settings' && request.url === '/api/business-resources/configuration' ? {configured:false,reason:'business_oauth_not_configured'} : name === 'settings' && request.method==='GET' && request.url.endsWith('/directory-access')
       ? {allow:[],deny:[],allowGroupMembers:false,revision:0}
       : name === 'settings' && request.url.endsWith('/runtime-status')
       ? await (runtimeHandler ? runtimeHandler(request) : { observedAt: 1792756800000, employee: { channels: latestConnections } })
@@ -170,7 +170,7 @@ test('provider switch clears unsubmitted credentials even when neither provider 
   await mount(t, 'settings', { base, canManage: true }, async () => []);
   await until(() => !!document.querySelector('.channel-connection-form'));
   input('渠道应用 ID', 'unsaved-app'); input('渠道应用密钥', 'unsaved-fixture-secret');
-  await providerTab('钉钉');
+  await providerTab('钉钉');await click('放弃策略修改并切换');
   await until(() => !!document.querySelector('.setup-requirements')&&text().includes('Client ID（AppKey）'));
   assert.equal(document.querySelector('input[aria-label="渠道应用密钥"]').value, '');
   assert.equal(document.querySelector('input[aria-label="回调校验 Token"]'), null);
@@ -197,7 +197,7 @@ test('single-page channel form keeps official requirements and clears unsubmitte
  const tabs=[...document.querySelectorAll('[role=tablist][aria-label="员工渠道"] [role=tab]')];assert.deepEqual(tabs.map(t=>t.textContent.trim()),['飞书','钉钉','企业微信']);
  for(const tab of tabs){const image=tab.querySelector('img');assert.ok(image);assert.ok((await readFile('apps/web/public'+image.getAttribute('src'))).length>100);}
  assert.equal(document.querySelector('.wizard-channel-guide'),null);assert.ok(document.querySelector('.channel-setup a[href="https://open.feishu.cn/app"]'));assert.match(document.querySelector('.setup-requirements').textContent,/im:message:send_as_bot/);input('渠道应用 ID','synthetic-app');input('渠道应用密钥','synthetic-secret');
- const feishu=document.querySelector('[role=tab][data-name="feishu"]');feishu.focus();feishu.dispatchEvent(new KeyboardEvent('keydown',{key:'ArrowRight',bubbles:true}));await until(()=>document.querySelector('[role=tab][data-name="dingtalk"]').getAttribute('aria-selected')==='true');
+ const feishu=document.querySelector('[role=tab][data-name="feishu"]');feishu.focus();feishu.dispatchEvent(new KeyboardEvent('keydown',{key:'ArrowRight',bubbles:true}));await flush();await click('放弃策略修改并切换');await until(()=>document.querySelector('[role=tab][data-name="dingtalk"]').getAttribute('aria-selected')==='true');
  assert.equal(document.querySelector('input[aria-label="渠道应用 ID"]').value,'');assert.equal(document.querySelector('input[aria-label="渠道应用密钥"]').value,'');assert.match(document.querySelector('.setup-requirements').textContent,/Stream/);
  assert.equal(env.requests.some(r=>r.method!=='GET'),false,'browsing and editing credentials must not save or create employees');assert.equal(JSON.stringify({...localStorage,...window.sessionStorage}).includes('synthetic-secret'),false);
 });
@@ -211,7 +211,7 @@ test('pending robot verification requires explicit start, checking signed candid
     return [current];
   });
   await until(() => text().includes('开始机器人身份验证'));
-  assert.deepEqual(env.requests.map(r=>r.url).sort(),[`/api${base}/channels`,`/api${base}/runtime-status`,`/api${base}/directory-access`,'/api/business-resources/configuration'].sort());assert.ok(env.requests.every(r=>r.method==='GET')); await click('开始机器人身份验证');
+  assert.deepEqual(env.requests.map(r=>r.url).sort(),[`/api${base}/channels`,`/api${base}/runtime-status`,`/api${base}/directory-access`,`/api${base}/group-sharing`,`/api${base}/group-sharing/status`,'/api/business-resources/configuration'].sort());assert.ok(env.requests.every(r=>r.method==='GET')); await click('开始机器人身份验证');
   await until(() => text().includes('检查测试消息候选')); assert.equal(env.requests.some(item => item.url.endsWith('/verification/confirm')), false);
   await click('检查测试消息候选'); await until(() => text().includes('身份核对无误，确认绑定此候选'));
   assert.equal(env.requests.some(item => item.url.endsWith('/verification/confirm')), false);
@@ -242,7 +242,7 @@ test('Feishu context settings preserve enabled status with CAS and remove static
     current = connection({ revision: 2, context: { historyEnabled: false, groupListenEnabled:request.body.groupListenEnabled, meetingRefs: [] } }); return current;
   });
   await until(() => !!document.querySelector('.channel-context-form'));
-  assert.deepEqual(new Set(env.requests.map(r=>r.url)),new Set([`/api${base}/channels`,`/api${base}/runtime-status`,`/api${base}/directory-access`,'/api/business-resources/configuration'])); await click('群上下文范围');assert.ok(text().includes('资料引用'));await click('群上下文范围');assert.ok(document.querySelector('.channel-context-form textarea[aria-label="群聊触发关键词"]'));assert.ok(text().includes('普通群消息接收权限尚未验证'));
+  assert.deepEqual(new Set(env.requests.map(r=>r.url)),new Set([`/api${base}/channels`,`/api${base}/runtime-status`,`/api${base}/directory-access`,`/api${base}/group-sharing`,`/api${base}/group-sharing/status`,'/api/business-resources/configuration'])); await click('群上下文范围');assert.ok(text().includes('资料引用'));await click('群上下文范围');assert.ok(document.querySelector('.channel-context-form textarea[aria-label="群聊触发关键词"]'));assert.ok(text().includes('普通群消息接收权限尚未验证'));
   document.querySelector('.channel-context-form .n-checkbox').click();
   await click('保存'); await until(() => env.requests.some(item => item.method === 'PUT'));
   assert.deepEqual(env.requests.find(item => item.method === 'PUT').body, { enabled: true, expectedRevision: 1, groupListenEnabled: true, groupTriggerKeywords:[] });
@@ -324,12 +324,12 @@ test('Feishu needs only app ID and secret; save failure clears write-only secret
 test('DingTalk submits only supported credentials and switching back clears secrets', async t => {
   const env = await mount(t, 'settings', { base, canManage: true }, async request => request.method === 'GET' ? [] : {});
   input('渠道应用密钥', 'unsent-fixture-secret');
-  await providerTab('钉钉');
+  await providerTab('钉钉');await click('放弃策略修改并切换');
   assert.equal(document.querySelector('input[aria-label="渠道应用密钥"]').value, '');
   input('渠道应用 ID', 'ding-fixture'); input('渠道应用密钥', 'ding-fixture-secret'); await click('验证并保存渠道连接');
   const saved = env.requests.find(item => item.method === 'PUT'); assert.ok(saved.url.endsWith('/dingtalk')); assert.deepEqual(saved.body, { appId: 'ding-fixture', appSecret: 'ding-fixture-secret', expectedRevision: 0, replaceSource: false });
   input('渠道应用密钥', 'unsent-ding-secret');
-  await providerTab('飞书');
+  await providerTab('飞书');await click('放弃策略修改并切换');
   assert.equal(document.querySelector('input[aria-label="渠道应用密钥"]').value, '');
   assert.equal(document.querySelector('input[aria-label="回调加密密钥"]'), null); assert.equal(document.querySelector('input[aria-label="回调校验 Token"]'), null);
 });
@@ -363,102 +363,37 @@ test('standby transport does not misreport global disconnection or channel disab
   assert.ok(text().includes('机器人已验证')); assert.ok(button('停用此渠道'));
 });
 
-const directoryCredential = (overrides = {}) => ({ id: 'directory-fixture', label: '企业目录', corpId: 'fixture-corp', agentId: '10001', revision: 3, credentialRevision: 2, scopeRevision: 'scope-fixture', status: 'verified', lastError: null, lastVerifiedAt: 1792756800000, referenceCount: 1, ...overrides });
-async function check(label) { const checkbox = document.querySelector(`[role="checkbox"][aria-label="${label}"]`); assert.ok(checkbox, label); checkbox.click(); await flush(); }
-function fillDirectory() { input('目录应用名称', '企业目录'); input('目录 CorpID', 'fixture-corp'); input('目录 AgentId', '10001'); input('目录 AppSecret', 'synthetic-directory-secret'); }
-
-test('WeCom first employee creates separate directory credential and requires explicit same-corp assertion', async t => {
-  let credentials = []; const env = await mount(t, 'wecom', { base, disabled: false, connection: connection({ provider: 'wecom', appId: 'fixture-bot', revision: 8 }) }, async request => {
-    if (request.method === 'GET') return credentials;
-    if (request.method === 'POST') { credentials = [directoryCredential()]; return credentials[0]; }
-    return {};
-  });
-  await until(() => text().includes('尚无可复用目录应用'));
-  fillDirectory(); await click('验证并保存目录应用');
-  await until(() => !!document.querySelector('[aria-label="确认机器人与目录同企业"]'));
-  const created = env.requests.find(item => item.method === 'POST');
-  assert.deepEqual(created.body, { label: '企业目录', corpId: 'fixture-corp', agentId: '10001', appSecret: 'synthetic-directory-secret' });
-  assert.equal(document.body.innerHTML.includes('synthetic-directory-secret'), false);
-  assert.equal(button('确认企业关系并关联本员工').disabled, true);
-  await check('确认机器人与目录同企业'); await click('确认企业关系并关联本员工');
-  assert.deepEqual(env.requests.find(item => item.method === 'PUT').body, { credentialId: 'directory-fixture', expectedRevision: 8, confirmSameCorp: true });
-  await click('同企业确认依据');assert.ok(text().includes('平台无法通过厂商接口证明'));await click('同企业确认依据'); assert.ok(text().includes('本员工使用范围'));
-});
-
-test('WeCom reuse cannot bind before saving independent robot and resets assertion when revision changes', async t => {
-  const env = await mount(t, 'wecom', { base, disabled: false }, async () => [directoryCredential({ referenceCount: 2 })]);
-  await until(() => text().includes('目录可先独立验证并保存'));
-  assert.equal(button('确认企业关系并关联本员工').disabled, true);
-  assert.equal(env.requests.some(item => item.method !== 'GET'), false);
-  env.props.connection = connection({ provider: 'wecom', revision: 2 }); await flush();
-  await check('确认机器人与目录同企业'); assert.equal(button('确认企业关系并关联本员工').disabled, false);
-  env.props.connection = connection({ provider: 'wecom', revision: 3 }); await flush();
-  assert.equal(button('确认企业关系并关联本员工').disabled, true);
-});
-
-test('WeCom shared changes require impact preview and explicit approval, reject stale confirmation, clear secrets', async t => {
-  const env = await mount(t, 'wecom', { base, disabled: false, connection: connection({ provider: 'wecom' }) }, async request => {
-    if (request.url.endsWith('/impact')) return { credentialId: 'directory-fixture', revision: 3, impactRevision: 'impact-v3', employees: [{ entityId: 'employee-a', connectionId: 'connection-a', name: '员工甲' }, { entityId: 'employee-b', connectionId: 'connection-b', name: '员工乙' }] };
-    if (request.method === 'PUT') return { status: 409, data: { error: 'directory_impact_changed' } };
-    return [directoryCredential({ referenceCount: 2 })];
-  });
-  await until(() => text().includes('引用员工 2 位'));
-  await click('修改共享目录应用 / 轮换密钥'); input('目录 AppSecret', 'synthetic-rotated-secret'); await flush();
-  assert.equal(button('确认更新共享目录应用').disabled, true);
-  await click('预览受影响员工'); assert.ok(text().includes('员工甲')); assert.ok(text().includes('员工乙'));
-  assert.equal(button('确认更新共享目录应用').disabled, true);
-  await check('确认共享修改影响'); await click('确认更新共享目录应用');
-  await until(() => text().includes('未按旧确认继续修改'));
-  const write = env.requests.find(item => item.method === 'PUT'); assert.equal(write.body.expectedRevision, 3); assert.equal(write.body.impactRevision, 'impact-v3');
-  assert.equal(document.querySelector('input[aria-label="目录 AppSecret"]').value, '');
-  assert.equal(button('确认更新共享目录应用').disabled, true);
-});
-
-test('WeCom unlink targets current employee only with current revision', async t => {
-  const binding = { credentialId: 'directory-fixture', corpId: 'fixture-corp', agentId: '10001', status: 'confirmed', assertion: { evidence: 'admin_asserted', confirmedAt: 1792756800000 } };
-  const env = await mount(t, 'wecom', { base, disabled: false, connection: connection({ provider: 'wecom', revision: 9, directoryBinding: binding }) }, async request => request.method === 'GET' ? [directoryCredential()] : {});
-  await until(() => text().includes('当前关联：'));
-  await click('仅解除本员工目录关联');
-  const deletion = env.requests.find(item => item.method === 'DELETE'); assert.equal(deletion.url, `/api${base}/channels/wecom/directory-binding`); assert.deepEqual(deletion.body, { expectedRevision: 9 });
-  assert.ok(text().includes('共享应用及其他员工不受影响'));
-});
-
-test('WeCom employee selection keeps unsupported contexts absent and blocks challenge until directory binding', async t => {
+test('WeCom employee selection keeps unsupported contexts absent and waits for a normal message', async t => {
   const env = await mount(t, 'settings', { base, canManage: true }, async request => request.url.endsWith('directory-credentials') ? [] : [connection({ provider: 'wecom', appId: 'fixture-bot', status: 'pending_verification', directoryStatus: 'unavailable', identityEvidence: 'app_credentials_only' })]);
   await providerTab('企业微信');
-  await until(() => !!document.querySelector('.wecom-directory-binding'));
+  assert.ok(!text().includes('按部门授权'));
+  assert.equal(document.querySelector('.wecom-directory-binding'),null);
+  assert.equal(env.requests.some(item=>item.url.endsWith('/directory-credentials')),false);
   assert.ok(text().includes('智能机器人 BotID')); assert.ok(text().includes('启用智能机器人 API 长连接'));
-  assert.equal(button('开始机器人身份验证').disabled, true);
+  assert.ok(text().includes('等待首条消息')); assert.equal(text().includes('开始机器人身份验证'),false);
   assert.equal(document.querySelector('[aria-label="读取当前群历史"]'), null);
   assert.equal(document.querySelector('[aria-label="明确的 Minutes token"]'), null);
   const allowedReads = new Set(['/api/business-resources/configuration', `/api${base}/channels`, `/api${base}/runtime-status`, `/api${base}/channels/wecom/directory-credentials`, `/api${base}/directory-access`]);
   assert.ok(env.requests.every(item => item.method === 'GET' && allowedReads.has(item.url)), 'Only this employee’s channel configuration, runtime observation and WeCom directory choices may be read');
   assert.equal(env.requests.filter(item => item.url === `/api${base}/runtime-status`).length, 1, 'Connection status must be read from the runtime observation endpoint');
+  assert.ok(!text().includes('CorpID'));assert.ok(!text().includes('可信 IP'));
 });
 
 test('WeCom member reads separate statuses without directory-management endpoints', async t => {
   const env = await mount(t, 'settings', { base, canManage: false }, async () => [connection({ provider: 'wecom', identityEvidence: 'admin_asserted', directoryStatus: 'unavailable' })]);
   await until(()=>!!document.querySelector('.connection-list .n-card button'));document.querySelector('.connection-list .n-card button').click();await flush();await until(() => text().includes('管理员同企业声明（非厂商证明）'));
-  assert.ok(text().includes('未关联目录应用'));
+  assert.ok(!text().includes('目录关联：'));
   assert.equal(document.querySelector('.wecom-directory-binding'), null);
   const allowedReads = new Set(['/api/business-resources/configuration', `/api${base}/channels`, `/api${base}/runtime-status`]);
   assert.ok(env.requests.every(item => item.method === 'GET' && allowedReads.has(item.url)), 'A read-only member must not access directory-management or mutation endpoints');
   assert.equal(env.requests.filter(item => item.url === `/api${base}/runtime-status`).length, 1, 'A member may read the same employee’s runtime observation');
 });
 
-test('WeCom directory load resumes after parent refresh and rejects nonnumeric AgentId', async t => {
-  const env = await mount(t, 'wecom', { base, disabled: true }, async () => []);
-  assert.equal(env.requests.length, 0);
-  env.props.disabled = false; await until(() => text().includes('尚无可复用目录应用'));
-  fillDirectory(); input('目录 AgentId', 'not-an-agent-id'); await flush();
-  assert.equal(button('验证并保存目录应用').disabled, true);
-  assert.ok(env.requests.every(item => item.method === 'GET'));
-});
 
 test('WeCom saves BotID and robot Secret independently of directory secrets', async t => {
   const env = await mount(t, 'settings', { base, canManage: true }, async request => request.method === 'GET' ? [] : {});
   await providerTab('企业微信');
-  await until(() => !!document.querySelector('.wecom-directory-binding'));
+  assert.equal(document.querySelector('.wecom-directory-binding'),null);
   input('渠道应用 ID', 'fixture-independent-bot'); input('渠道应用密钥', 'synthetic-bot-secret'); await click('验证并保存渠道连接');
   const write = env.requests.find(item => item.method === 'PUT');
   assert.equal(write.url, `/api${base}/channels/wecom`);
@@ -467,33 +402,22 @@ test('WeCom saves BotID and robot Secret independently of directory secrets', as
   assert.ok(!('corpId' in write.body) && !('agentId' in write.body));
 });
 
-test('WeCom dynamic picker reads only requested directory and disables unsupported meeting rule', async t => {
-  const source = connection({ provider: 'wecom' }); let rules = [];
-  const env = await mount(t, 'picker', { base, label: '允许', subjects: subjects(source), rules, 'onUpdate:rules': value => { rules = value; env.props.rules = value; } }, async request => {
-    assert.equal(request.url, `/api${base}/channels/wecom/directory?kind=departments`);
-    return page([department], { provider: 'wecom', appId: source.appId });
-  });
-  assert.equal(env.requests.length, 0);
-  await click('查询当前目录'); await click('选择部门');
-  const meeting = [...document.querySelectorAll('[role="checkbox"]')].find(item => item.textContent.includes('企微暂不支持'));
-  assert.ok(meeting); assert.ok(meeting.classList.contains('n-checkbox--disabled')); meeting.click(); await flush();
-  assert.deepEqual(rules[0].conversationKinds, ['private']);
-});
 
-test('wizard embedded instructions preserve official figures, accessible provider tabs and WeCom dual credential fields', async t => {
+test('wizard embedded instructions preserve official figures, accessible provider tabs and WeCom robot-only credentials', async t => {
   const env = await mount(t, 'draft', { base: '/workspaces/workspace-a', disabled: false }, async r => r.url.endsWith('/model-profiles') ? { profiles: [], defaultProfileId: null } : { members: [], resources: [], directoryCredentials: [] });
 
   for (const provider of ['feishu','dingtalk','wecom']) {
     const tab = document.querySelector(`[role=tab][data-name="${provider}"]`); tab.click(); await flush();
     const current = document.querySelector('.wizard-channel-guide'); assert.ok(current);
-    assert.match(current.textContent, /目录|通讯录/); assert.match(current.textContent, /2026-10-24/); assert.match(document.body.textContent, /最后确认创建|最终保存|最终创建/); assert.ok(current.querySelector('.channel-guide-dots button[aria-selected="true"]')); assert.equal(current.querySelectorAll('.slide.is-current').length, 1);
+    assert.match(current.textContent, provider==='wecom'?/搜索成员/:/目录|通讯录/); assert.match(current.textContent, /2026-10-24/); assert.match(document.body.textContent, /最后确认创建|最终保存|最终创建/); assert.ok(current.querySelector('.channel-guide-dots button[aria-selected="true"]')); assert.equal(current.querySelectorAll('.slide.is-current').length, 1);
     const consoleLink = current.querySelector('a[aria-label*="官方控制台"]'); assert.ok(consoleLink); assert.equal(new URL(consoleLink.href).protocol, 'https:'); assert.match(consoleLink.rel, /noopener/);
     for (const image of current.querySelectorAll('img')) { assert.match(image.getAttribute('src'), /^\/channel-guides\//); assert.ok(image.alt.length > 15); assert.equal(image.loading, 'lazy'); assert.ok((await readFile('apps/web/public' + image.getAttribute('src'))).length > 100); }
     if (provider === 'feishu') { assert.equal(current.querySelectorAll('.channel-guide-dots button').length, 2); assert.match(current.textContent, /成员姓名/); assert.match(current.textContent, /minutes:minutes.transcript:export/); assert.ok(current.querySelector('details:not([open])')); assert.match(current.textContent, /当前平台不生成/); }
     if (provider === 'dingtalk') { assert.equal(current.querySelectorAll('.channel-guide-dots button').length, 2); assert.match(current.textContent, /发布、审批/); assert.match(current.textContent, /Stream/); }
     if (provider === 'dingtalk') assert.ok([...current.querySelectorAll('img')].some(i => i.getAttribute('src').endsWith('dingtalk-agent-create.svg')));
     if (provider === 'wecom') {
-      await channelCard('credentials'); assert.ok(document.querySelector('input[aria-label="Corp ID"]')); assert.ok(document.querySelector('input[aria-label="Agent ID"]')); assert.ok(document.querySelector('input[aria-label="通讯录应用 Secret"]')); assert.match(current.textContent, /管理员声明/);
+      await channelCard('credentials'); assert.equal(document.querySelector('input[aria-label="Corp ID"]'),null);
+      assert.ok(!text().includes('按部门授权')); assert.equal(document.querySelector('input[aria-label="Agent ID"]'),null);
       await channelCard('optional'); assert.match(current.querySelector('.slide.is-current').textContent, /不支持群历史/);
     }
   }
@@ -511,7 +435,7 @@ test('wizard expired temporary channel loses readiness and blocks advance withou
     throw new Error('Unexpected fixture request');
   });
    await channelCard('credentials'); input('渠道应用 ID', 'fixture-app'); input('渠道应用 Secret', 'synthetic-fixture-secret');
-  await click('验证渠道并读取通讯录'); await until(() => text().includes('渠道草稿已过期'));
+  await click('验证渠道凭据'); await until(() => text().includes('渠道草稿已过期'));
   assert.equal(env.events.ready.at(-1), false); assert.equal(env.events.change.at(-1), null); assert.equal(env.requests.some(r => r.url.endsWith('/employee-creations')), false);
 });
 
@@ -527,11 +451,11 @@ test('carousel dots and swipes browse freely, preserve fields and keep pending f
    await channelCard('credentials');
   input('渠道应用 ID', 'fixture-app'); input('渠道应用 Secret', 'synthetic-feedback-secret');
   await channelCard('create'); await channelCard('credentials'); assert.equal(document.querySelector('input[aria-label="渠道应用 ID"]').value, 'fixture-app');
-  await click('验证渠道并读取通讯录');
-  let feedback = document.querySelector('.channel-verification-feedback'); assert.match(feedback.textContent, /正在分层验证/); assert.ok(feedback.closest('.slide').classList.contains('is-current')); assert.equal(button('验证渠道并读取通讯录').disabled,true);assert.equal(env.events.busy.at(-1),true);
+  await click('验证渠道凭据');
+  let feedback = document.querySelector('.channel-verification-feedback'); assert.match(feedback.textContent, /正在分层验证/); assert.ok(feedback.closest('.slide').classList.contains('is-current')); assert.equal(button('验证渠道凭据').disabled,true);assert.equal(env.events.busy.at(-1),true);
   mode = 'failure'; release(); await until(() => feedback.textContent.includes('没有可用的通讯录读取权限'));
   assert.ok(feedback.querySelector('[role=alert]')); assert.ok(feedback.closest('.slide').classList.contains('is-current'));
-  mode = 'success'; await click('验证渠道并读取通讯录'); await until(() => feedback.textContent.includes('渠道草稿已准备'));
+  mode = 'success'; await click('验证渠道凭据'); await until(() => feedback.textContent.includes('渠道草稿已准备'));
   assert.match(feedback.textContent, /实际收发仍待后续验证/); assert.match(feedback.textContent, /最后确认创建才保存/);
   const viewport = document.querySelector('.step-viewport'); viewport.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, clientX: 300, clientY: 100 })); viewport.dispatchEvent(new PointerEvent('pointerup', { bubbles: true, clientX: 30, clientY: 105 })); await flush();
   assert.equal(document.querySelector('.channel-guide-dots button[aria-selected=true]').dataset.step, 'validate');
@@ -560,9 +484,9 @@ test('DingTalk requirements separate Stream receive, proactive send and scoped d
  assert.equal(document.querySelector('.channel-guide-dots'),null);
 });
 
-test('WeCom requirements distinguish independent robot, reusable directory and trusted public egress IP',async t=>{
+test('WeCom requirements use only robot credentials and default effective-message access',async t=>{
  const env=await mount(t,'requirements',{provider:'wecom'});
- for(const value of ['BotID / Secret','CorpID / AgentId / Secret','同一工作区复用','实际公网出口 IP','不支持标签范围','目录成功不等于消息收发已通过'])assert.ok(text().includes(value),value);
+ for(const value of ['BotID / Secret','新建默认空白名单，群内可用','私聊需加入白名单','首条通过校验的真实消息自动确认身份'])assert.ok(text().includes(value),value);
  assert.equal(env.requests.length,0);assert.equal(document.querySelector('.channel-guide-dots'),null);
 });
 
@@ -585,14 +509,14 @@ test('missing capability declaration does not offer controls even for Feishu', a
   assert.equal(document.querySelector('.channel-context-form'),null);
 });
 
-test('context retention is independent of keyword triggering and unauthorized capability cannot enable it', async t => {
+test('context retention is independent of keyword triggering and ungranted context preference can be saved without claiming authorization', async t => {
   const caps=fixtureCapabilities(); caps.recentGroupContext={supported:true,availability:'authorization_required'};caps.keywordTriggers={supported:true,availability:'authorization_required'};
   await mount(t,'settings',{base,canManage:true},async()=>[connection({capabilities:caps})]);
   await until(()=>!!document.querySelector('.channel-context-form'));
   assert.ok(text().includes('保留近期群消息作为上下文'));
   assert.ok(text().includes('仍接收消息并匹配关键词'));
   assert.equal(document.querySelector('.channel-context-form textarea').disabled,false);assert.ok(text().includes('未获权限时可保存草稿'));
-  assert.ok(document.querySelector('.channel-context-form .n-checkbox').classList.contains('n-checkbox--disabled'));
+  assert.equal(document.querySelector('.channel-context-form .n-checkbox').classList.contains('n-checkbox--disabled'),false);assert.ok(text().includes('普通群消息接收权限尚未验证'));
 });
 
 test('WeCom revalidation notice distinguishes reconnecting from disabled without claiming verified success', async t => {
@@ -604,8 +528,7 @@ test('WeCom revalidation notice distinguishes reconnecting from disabled without
       current={...current,status:enabled?'pending_verification':'disabled',revision:2};return current;
     });
     await click('重新验证已存凭据');
-    await until(()=>text().includes(enabled?'已开始重新连接，请完成机器人身份验证':'渠道仍保持停用'));
-    assert.ok(text().includes('通讯录关联和使用范围保留'));
+    await until(()=>text().includes('已提交重新验证或连接'));assert.ok(text().includes('使用范围、能力包、群共享和上下文设置均保留'));assert.ok(text().includes('停用状态不变'));assert.equal(current.enabled,enabled);
   });
 });
 
@@ -657,4 +580,62 @@ test('application preparation distinguishes saved states without inventing scope
 test('application configuration is primary and optional OAuth stays absent unless explicitly configured',async t=>{
  await mount(t,'business',{provider:'feishu'},async()=>({configured:false,application:{providers:[{provider:'feishu',supportedResources:['document','minutes'],appScopes:['docx:document:readonly'],objectAcl:'per_resource',availability:'available',limitations:['meeting_metadata_scopes_not_fully_verified','synthetic_unknown_internal_limit']} ]}}));
  await until(()=>text().includes('应用读取适配已接入'));assert.ok(text().includes('个人账号登录不是前置条件'));assert.ok(text().includes('不表示当前应用已获授权'));assert.equal(document.querySelector('.optional-oauth'),null);assert.equal(document.querySelector('input'),null);assert.ok(text().includes('会议、录制和笔记 API 权限仍需按官方后台和实际接口核验'));assert.ok(text().includes('还有尚未核验的限制'));assert.ok(!text().includes('meeting_metadata_scopes_not_fully_verified'));assert.ok(!text().includes('synthetic_unknown_internal_limit'));
+});
+
+test('I01 DingTalk and WeCom wait for a normal first message without a challenge action', async t=>{
+ for(const provider of ['dingtalk','wecom'])await t.test(provider,async t=>{
+  const env=await mount(t,'settings',{base,canManage:true},async request=>{
+   if(request.url.endsWith('/directory-credentials'))return [];
+   if(request.url.endsWith('/directory-access'))return {allow:[],deny:[],revision:0};
+   return [connection({provider,status:'pending_verification',...(provider==='wecom'?{directoryMode:'member_search',directoryStatus:'unavailable'}:{})})];
+  });
+  await until(()=>text().includes('等待首条消息'));
+  const detail=Array.from(document.querySelectorAll('button')).find(item=>item.textContent.trim()==='查看此连接');
+  if(detail)detail.click();
+  await until(()=>text().includes('系统会自动确认身份'));
+  assert.equal(text().includes('开始机器人身份验证'),false);
+  assert.ok(env.requests.every(request=>request.method==='GET'));
+ });
+});
+
+test('S01 WeCom picker searches multiple names and shows paths without department selection',async t=>{
+ const wecom=connection({provider:'wecom',directoryMode:'member_search',status:'pending_verification',directoryStatus:'unavailable'});
+ const env=await mount(t,'picker',{base,subjects:{sources:[wecom],users:[],departments:[]},rules:[],label:'企微权限'},async request=>{
+  assert.equal(request.method,'POST');
+  assert.deepEqual(request.body,{keywords:['测试甲','测试乙']});
+  return page([{externalId:'member-1',subjectId:'member-1',kind:'channel_user',displayName:'测试甲',departmentPaths:['测试部门 / 开发']}],{provider:'wecom',limited:true});
+ });
+ await until(()=>!!document.querySelector('input[aria-label="企微权限成员关键词"]'));
+ input('企微权限成员关键词','测试甲，测试乙');await click('搜索企微成员');
+ await until(()=>text().includes('测试部门 / 开发'));
+ assert.equal(document.querySelector('[aria-label="企微权限查询类型"]'),null);
+ assert.ok(text().includes('结果可能不完整'));
+ assert.ok(env.requests.some(request=>request.url.endsWith('/channels/wecom/member-search')));
+});
+
+test('WeCom credential status follows current authenticated transport independently of first-message identity',async t=>{
+ const stored=connection({provider:'wecom',directoryMode:'member_search',status:'pending_verification',inboundVerified:false});let state='connected';
+ await mount(t,'settings',{base,canManage:true},async()=>[stored],async()=>({observedAt:1792756800000,employee:{channels:[{...stored,transport:{state,changedAt:1792756800000}}]}}));
+ await until(()=>text().includes('当前长连接已认证'));assert.ok(text().includes('等待首条消息'));assert.ok(text().includes('保存机器人配置'));assert.ok(text().includes('重新连接并检查'));assert.ok(!text().includes('共享目录应用'));
+ state='connecting';await click('刷新渠道状态');await until(()=>text().includes('等待当前长连接认证结果'));assert.ok(!text().includes('当前长连接已认证'));
+ state='failed';await click('刷新渠道状态');await until(()=>text().includes('连接未通过，请查看连接错误'));assert.ok(!text().includes('当前长连接已认证'));
+});
+
+for(const provider of ['feishu','dingtalk','wecom'])test(provider+' rebind requires explicit confirmation, saves once with CAS, and never unbinds before save',async t=>{
+ let current=connection({provider,enabled:false,status:'disabled'}),release;const held=new Promise(resolve=>{release=resolve;});t.after(()=>release());
+ const env=await mount(t,'settings',{base,canManage:true},async request=>{if(request.method==='GET')return[current];await held;current=connection({provider,appId:request.body.appId,sourceId:'replacement-source',revision:2});return current;});
+ input('渠道应用 ID','replacement-app');input('渠道应用密钥','synthetic-replacement-secret');await flush();
+ assert.ok(text().includes('未保存前原绑定继续有效'));assert.ok(text().includes('可能扩大授权'));assert.ok(text().includes('启用新连接'));assert.ok(text().includes('其他渠道、网页权限和资源绑定不变'));assert.equal(button('保存换绑').disabled,true);assert.equal(env.requests.some(r=>r.method!=='GET'),false);
+ document.querySelector('[aria-label="确认换绑并重置当前渠道配置"]').click();await flush();input('渠道应用 ID','changed-replacement');await flush();assert.equal(button('保存换绑').disabled,true,'editing target invalidates confirmation');document.querySelector('[aria-label="确认换绑并重置当前渠道配置"]').click();await flush();
+ await click('保存换绑');assert.equal(document.querySelector('input[aria-label="渠道应用密钥"]').value,'');button('保存换绑').click();assert.equal(env.requests.filter(r=>r.method==='PUT').length,1);assert.equal(env.requests.some(r=>r.method==='DELETE'),false);
+ assert.deepEqual(env.requests.find(r=>r.method==='PUT').body,{appId:'changed-replacement',appSecret:'synthetic-replacement-secret',expectedRevision:1,replaceSource:true});release();await until(()=>text().includes('换绑已保存'));assert.equal(document.querySelector('[aria-label="确认换绑并重置当前渠道配置"]'),null);
+});
+for(const provider of ['feishu','dingtalk','wecom'])test(provider+' same identity credential rotation preserves disabled status and sends no replacement',async t=>{
+ let current=connection({provider,enabled:false,status:'disabled'});const env=await mount(t,'settings',{base,canManage:true},async request=>{if(request.method==='GET')return[current];current={...current,revision:2};return current;});
+ input('渠道应用密钥','synthetic-rotated-secret');await click('验证并保存渠道连接');await until(()=>text().includes('停用状态不变'));assert.deepEqual(env.requests.find(r=>r.method==='PUT').body,{appId:'fixture-app',appSecret:'synthetic-rotated-secret',expectedRevision:1,replaceSource:false});assert.equal(current.enabled,false);assert.equal(document.querySelector('[aria-label="确认换绑并重置当前渠道配置"]'),null);
+});
+test('Feishu cross-group context remains independent of employee scope and hidden from other providers',async t=>{
+ await mount(t,'settings',{base,canManage:true},async()=>[connection(),connection({provider:'dingtalk',sourceId:'ding-source'}),connection({provider:'wecom',sourceId:'wecom-source'})]);
+ await until(()=>!!document.querySelector('.group-sharing'));assert.equal(document.querySelector('.channel-access-settings .group-sharing'),null);assert.ok(text().includes('不是员工使用范围'));
+ await providerTab('钉钉');assert.equal(document.querySelector('.group-sharing'),null);assert.ok(document.querySelector('[aria-label="允许群成员在群内使用"]'));await providerTab('企业微信');assert.equal(document.querySelector('.group-sharing'),null);
 });

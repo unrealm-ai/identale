@@ -10,6 +10,7 @@ export const PLATFORM_TABLES = [
   'skill_resource_state', 'workspace_mcp_versions', 'workspace_mcp_state',
   'employee_channel_connections', 'employee_channel_verification_events',
   'employee_channel_audit', 'employee_channel_directory_credentials',
+  'wecom_bot_contacts',
   'channel_observation_receipts',
   'directory_sync_tasks', 'directory_snapshot_users', 'directory_snapshot_aliases',
   'directory_alias_projection_meta', 'directory_snapshot_departments',

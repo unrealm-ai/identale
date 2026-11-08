@@ -4,19 +4,38 @@ import type{Store}from'./store.js';
 import type{EmployeeChannelService}from'./employee-channels/service.js';
 import type{HumanTarget}from'./human-confirmation.js';
 import type{CapabilityConfigService}from'./capability-config.js';
+import {usesWeComBotSearch,weComSearchIdentityVerified} from './employee-channels/wecom-bot-contacts.js';
 /** Platform-owned rules. Opaque selectors are validated against this workspace's actual snapshots. */
 export function registerHumanConfiguration(app:FastifyInstance,store:Store,channels:EmployeeChannelService,manager:(r:FastifyRequest,w:string,e:string)=>void,usage:Pick<CapabilityConfigService,'authorizeEntity'|'authorizeChannel'>){
  const base='/api/workspaces/:workspaceId/entities/:entityId/human-confirmation';
+ const stored=(w:string,e:string)=>store.one<{version:number;rules_json:string}>('SELECT version,rules_json FROM employee_human_rules WHERE workspace_id=? AND entity_id=?',w,e);
  const candidates=(w:string,e:string)=>{
+  const existing=JSON.parse(stored(w,e)?.rules_json??'[]') as {target:HumanTarget}[];
   const people:{label:string;target:HumanTarget}[]=store.all<{user_id:string;display_name:string;username:string}>("SELECT m.user_id,u.display_name,u.username FROM members m JOIN users u ON u.id=m.user_id WHERE m.workspace_id=? AND m.status='active' AND u.status='active'",w).map(x=>({label:(x.display_name||x.username)+' · Web',target:{kind:'web',userId:x.user_id}}));
-  for(const c of channels.repository.list(w,e)){if(!c.enabled||c.status!=='verified'||c.directoryStatus!=='available'||!c.eventTenantId)continue;
-   const rows=store.all<{person_json:string}>('SELECT u.person_json FROM directory_snapshot_users u JOIN directory_sync_tasks t ON t.id=u.task_id WHERE t.workspace_id=? AND t.invalidated=0 AND t.connection_id=?',w,c.directoryBinding?.credentialId??c.id);
+  for(const c of channels.repository.list(w,e)){if(!c.enabled||c.status!=='verified'||!c.eventTenantId)continue;
+   if(usesWeComBotSearch(c)){
+    if(!weComSearchIdentityVerified(c))continue;
+    const contacts=channels.botContacts.recent(c);
+    for(const {target} of existing){
+     if(target.kind!=='channel'||target.connectionId!==c.id||target.provider!=='wecom'||target.appId!==c.appId||target.tenantId!==c.eventTenantId||target.identityNamespace!=='user_id')continue;
+     const contact=channels.botContacts.get(c,target.userId);
+     if(contact&&!contacts.some(person=>person.user_id===contact.user_id))contacts.push(contact);
+    }
+    for(const contact of contacts){
+     const paths=JSON.parse(contact.department_paths) as string[];
+     people.push({label:[contact.display_name,...paths,'企业微信',c.appId].join(' · '),target:{kind:'channel',connectionId:c.id,
+      userId:contact.user_id,identityNamespace:'user_id',provider:'wecom',appId:c.appId,tenantId:c.eventTenantId}});
+    }
+    continue;
+   }
+   if(c.provider==='wecom'||c.directoryStatus!=='available')continue;
+   const rows=store.all<{person_json:string}>('SELECT u.person_json FROM directory_snapshot_users u JOIN directory_sync_tasks t ON t.id=u.task_id WHERE t.workspace_id=? AND t.invalidated=0 AND t.connection_id=?',w,c.id);
    for(const row of rows){const p=JSON.parse(row.person_json)as{displayName:string;id:{id:string;namespace:string;applicationId?:string};aliases:{id:string;namespace:string;applicationId?:string}[];status?:unknown};if(p.status==='inactive')continue;const ids=[p.id,...p.aliases];const id=ids.find(x=>x.namespace===(c.provider==='feishu'?'open_id':'user_id')&&(x.applicationId===undefined||x.applicationId===c.appId));if(!id||!id.id)continue;
     people.push({label:p.displayName+' · '+({feishu:'飞书',dingtalk:'钉钉',wecom:'企业微信'}[c.provider])+' · '+c.appId,target:{kind:'channel',connectionId:c.id,userId:id.id,identityNamespace:id.namespace as 'open_id'|'user_id',provider:c.provider,appId:c.appId,tenantId:c.eventTenantId}});
    }
   }return [...new Map(people.map(x=>[JSON.stringify(x.target),x])).values()];
  };
- app.get(base,request=>{const p=request.params as{workspaceId:string;entityId:string};manager(request,p.workspaceId,p.entityId);const row=store.one<{version:number;rules_json:string}>('SELECT version,rules_json FROM employee_human_rules WHERE workspace_id=? AND entity_id=?',p.workspaceId,p.entityId);return{version:row?.version??0,rules:JSON.parse(row?.rules_json??'[]'),subjects:channels.subjects(p.workspaceId,p.entityId),candidates:candidates(p.workspaceId,p.entityId)};});
+ app.get(base,request=>{const p=request.params as{workspaceId:string;entityId:string};manager(request,p.workspaceId,p.entityId);const row=stored(p.workspaceId,p.entityId);return{version:row?.version??0,rules:JSON.parse(row?.rules_json??'[]'),subjects:channels.subjects(p.workspaceId,p.entityId),candidates:candidates(p.workspaceId,p.entityId)};});
  // Fence local policy/identity changes across the asynchronous directory check. Directory
  // uncertainty still follows the existing usage evaluator's fail-closed cache semantics.
  const permissionVersion=(w:string,e:string,target:HumanTarget)=>JSON.stringify([store.one('SELECT lifecycle_enabled,own_web_use,web_use_user_id FROM entities WHERE workspace_id=? AND id=?',w,e),store.one('SELECT status FROM workspaces WHERE id=?',w),target.kind==='web'?[store.one('SELECT * FROM entity_web_policies WHERE workspace_id=? AND entity_id=?',w,e),store.one('SELECT m.status AS member_status,u.status AS user_status FROM members m JOIN users u ON u.id=m.user_id WHERE m.workspace_id=? AND m.user_id=?',w,target.userId)]:[store.one('SELECT * FROM entity_directory_policies WHERE workspace_id=? AND entity_id=?',w,e),channels.currentBindingVersion(target.connectionId)]]);

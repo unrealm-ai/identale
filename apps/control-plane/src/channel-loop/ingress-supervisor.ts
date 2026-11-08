@@ -47,7 +47,10 @@ export class ChannelIngressSupervisor {
  private commit<T>(live:Live,write:()=>T):T{return this.owner.commit(()=>{this.assert(live);return write();});}
  private async receive(live:Live,envelope:unknown):Promise<ChannelIngressDisposition>{
   this.assert(live);const r=this.connections.repository.byId(live.session.connectionId)!;
-  const hints={...(r.botId?{botId:r.botId}:{}),...(r.provider==='wecom'?(r.directoryBinding?.status==='confirmed'&&r.directoryStatus==='available'?{tenantId:r.directoryBinding.corpId,tenantNamespace:'corp_id' as const}:{}):(r.eventTenantId?{tenantId:r.eventTenantId,tenantNamespace:r.provider==='feishu'?'tenant_key' as const:'corp_id' as const}:{})),...(r.robotCode?{robotCode:r.robotCode}:{})};
+  const tenantHints=r.provider==='wecom'
+   ? {tenantId:r.appId,tenantNamespace:'app_id' as const}
+   : r.eventTenantId?{tenantId:r.eventTenantId,tenantNamespace:r.provider==='feishu'?'tenant_key' as const:'corp_id' as const}:{};
+  const hints={...(r.botId?{botId:r.botId}:{}),...tenantHints,...(r.robotCode?{robotCode:r.robotCode}:{})};
   const target=ingressReplyTarget(live.session,envelope,hints),bindingVersion=this.connections.currentBindingVersion(r.id),text=ingressMessageText(r.provider,envelope);
   let fingerprint:string;try{fingerprint=JSON.stringify(envelope);}catch{fingerprint=randomUUID();}
   const traceId=createHash('sha256').update(JSON.stringify(target&&bindingVersion?[r.workspaceId,r.entityId,r.id,bindingVersion,target.conversation.tenantId,target.conversation.externalId,target.messageId,'initial']:[r.id,fingerprint])).digest('hex');
@@ -81,13 +84,25 @@ export class ChannelIngressSupervisor {
   if(normalized.kind==='ignored'){this.diagnostics.event({stage:'ingress.received',phase:'point',...correlation,status:'ignored',reason:normalized.reason==='self_message'?'self_message':'unsupported_message'});return this.commit(live,()=> 'ignored');}
   if(normalized.kind==='membership')return this.commit(live,()=>{if(r.status==='verified'){this.loop.membership(r.id,normalized.chatId,normalized.present,normalized.occurredAt);this.groups?.membership(r.id,normalized.chatId,normalized.present,normalized.occurredAt);}return 'accepted';});
   const {event}=normalized;
+  if(event.origin!=='live')return this.commit(live,()=> 'ignored');
   if(normalized.kind==='group_record'){
    if(r.status!=='verified'||!this.groups)return this.commit(live,()=> 'ignored');
    const binding=await this.connections.resolveBinding(r.id);if(!binding)return this.commit(live,()=> 'ignored');
    return this.commit(live,()=>{this.groups!.record(binding,event);return'accepted';});
   }
   if(this.connections.isVerificationEvent(r.id,event.eventId,event.message.id))return this.commit(live,()=> 'duplicate');
-  if(r.status==='pending_verification'){
+  if(r.provider!=='feishu'&&(normalized.verificationText===r.verification?.challengeText||
+     /^identity-verify-[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(normalized.verificationText)))
+   return this.commit(live,()=> 'ignored');
+  if(r.status==='pending_verification'&&r.provider!=='feishu'){
+   const isHuman=event.message.author.kind==='human'&&!!event.message.author.externalId;
+   const directed=event.message.conversationKind==='private'||(r.provider==='wecom'
+    ? event.message.providerDirectedBot===true
+    : event.message.mentions.includes(normalized.candidate.botId));
+   if(!isHuman||!directed)return this.commit(live,()=> 'ignored');
+   this.commit(live,()=>this.connections.observeFirstInbound(r.id,normalized.candidate));
+   bindingVersion=this.connections.currentBindingVersion(r.id);
+  }else if(r.status==='pending_verification'){
    const v=r.verification;
    if(!v||v.expiresAt<=this.now())return this.commit(live,()=> 'ignored');
    if(normalized.verificationText!==v.challengeText) return this.commit(live,()=> 'ignored');
@@ -95,6 +110,9 @@ export class ChannelIngressSupervisor {
    if(!botId||event.message.author.kind!=='human'||!event.message.author.externalId||event.message.author.externalId===botId||(event.message.conversationKind==='group'&&!event.message.mentions.includes(botId)&&!(r.provider==='wecom'&&event.message.providerDirectedBot===true)))throw new ChannelError('forbidden','channel_verification_invalid');
    return this.commit(live,()=>{this.connections.recordVerifiedCandidate(r.id,String(r.revision),{appId:r.appId,botId,tenantId:event.tenantId,...(normalized.candidate.robotCode?{robotCode:normalized.candidate.robotCode}:{}),challengeText:v.challengeText,eventId:event.eventId,messageId:event.message.id});return 'accepted';});
   }
+  if(r.provider==='wecom'&&event.message.author.kind==='human'&&event.message.author.externalId&&
+     (event.message.conversationKind==='private'||event.message.providerDirectedBot===true))
+   this.commit(live,()=>this.connections.observeWeComContact(r.id,event.message.author.externalId!));
   if(this.groups){const binding=await this.connections.resolveBinding(r.id);if(binding)this.commit(live,()=>this.groups!.record(binding,event));}
   try{
    if(normalized.media?.length&&this.captureAssets){const binding=await this.connections.resolveBinding(r.id);this.assert(live);if(binding)this.captureAssets(binding,event,normalized.media);}
@@ -117,10 +135,31 @@ export class ChannelIngressSupervisor {
   if(!live?.port.send)throw new ChannelError('not_ready','channel_session_unavailable');
   const guard=()=>{
    this.assert(live);const r=this.connections.repository.byId(connectionId)!;
-   if(r.status!=='verified'||r.inboundVerified!==true||r.directoryStatus!=='available'||r.directoryBinding?.status!=='confirmed'||r.provider!=='wecom'||request.conversation.connectionId!==connectionId||request.conversation.provider!=='wecom'||request.conversation.tenantId!==r.directoryBinding.corpId||this.status(connectionId).state!=='connected')throw new ChannelError('forbidden','channel_send_binding_expired');
+   if(r.inboundVerified!==true||!this.connections.currentBindingVersion(connectionId)||r.provider!=='wecom'||request.conversation.connectionId!==connectionId||request.conversation.provider!=='wecom'||request.conversation.tenantId!==r.eventTenantId||this.status(connectionId).state!=='connected')throw new ChannelError('forbidden','channel_send_binding_expired');
   };
-  guard();await request.beforeSend?.();guard();
-  return live.port.send({...request,beforeSend:async()=>{guard();},assertSendAllowed:()=>{guard();request.assertSendAllowed?.();guard();}});
+  const authorizeRecipient=async()=>{
+   guard();
+   if(request.conversation.conversationKind!=='private'||request.replyToMessageId)return;
+   const recipient=request.conversation.privateRecipientId;
+   if(!recipient)throw new ChannelError('forbidden','channel_send_recipient_unverified');
+   try{
+    if(request.originatingTaskScope!==undefined){
+     if(typeof request.originatingTaskScope!=='function')throw new ChannelError('forbidden');
+     const scope=request.originatingTaskScope(),source=scope.source,principal=scope.principal;
+     const binding=await this.connections.resolveBinding(connectionId);
+     if(!binding||scope.workspaceId!==binding.workspaceId||scope.entityId!==binding.entityId||!source||principal?.kind!=='channel'||
+        source.channelType!=='wecom'||source.applicationId!==binding.appId||source.connectionId!==connectionId||source.installationId!==connectionId||
+        source.tenantId!==binding.connection.tenantId||source.bindingVersion!==binding.bindingVersion||source.conversationKind!=='private'||source.threadId||
+        !source.sourceEventId||!source.replyToMessageId||source.conversationId!==recipient||request.conversation.externalId!==recipient||
+        principal.channelType!=='wecom'||principal.tenantId!==source.tenantId||principal.identityNamespace!=='user_id'||principal.externalUserId!==recipient)
+      throw new ChannelError('forbidden','channel_task_recipient_mismatch');
+     await this.connections.authorizeInvocation(binding,{kind:'human',externalId:recipient,idNamespace:'user_id',applicationId:binding.appId,identityEvidence:'channel_verified'},'private',source);
+    }else await this.connections.assertWeComPrivateRecipient(connectionId,recipient);
+   }catch{throw new ChannelError('forbidden','channel_send_recipient_unverified');}
+   guard();
+  };
+  await authorizeRecipient();await request.beforeSend?.();guard();
+  return live.port.send({...request,beforeSend:async()=>{await authorizeRecipient();guard();},assertSendAllowed:()=>{guard();request.assertSendAllowed?.();guard();}});
  }
  async stop(){if(this.stopPromise)return this.stopPromise;this.stopPromise=this.stopAll();return this.stopPromise;}
  private async closeActive(reason:string){const live=[...this.active.values()];this.active.clear();for(const item of live)this.setStatus(item.session.connectionId,{state:'stopped',changedAt:this.now()});await Promise.allSettled([...this.chains.values()]);await Promise.allSettled(live.map(item=>item.port.stop(reason)));}

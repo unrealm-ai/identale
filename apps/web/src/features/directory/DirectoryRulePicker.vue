@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onUnmounted, ref, watch } from 'vue';
-import { NAlert, NButton, NCheckbox, NCheckboxGroup, NSelect, NSpace, NTag } from 'naive-ui';
+import { NAlert, NButton, NCheckbox, NCheckboxGroup, NInput, NSelect, NSpace, NTag } from 'naive-ui';
 import { api, errorMessage } from '../../shared/api';
 import type { DirectoryAccessRule, DirectorySubjects, ConversationKind, DirectoryItem, DirectoryPage } from './types';
 import { providerLabel } from './types';
@@ -12,30 +12,39 @@ const trail = ref<{ externalId: string; subjectId: string; displayName: string }
 const labels = ref<Record<string, string>>({});
 let controller = new AbortController(); const seenCursors = new Set<string>();
 const key = (rule: Pick<DirectoryAccessRule, 'kind' | 'sourceId' | 'subjectId'>) => JSON.stringify([rule.kind, rule.sourceId, rule.subjectId]);
-const sources = computed(() => props.subjects.sources.filter(source => source.enabled && (props.draft || source.status === 'verified') && source.directoryStatus === 'available'));
+const sources = computed(() => props.subjects.sources.filter(source => source.enabled && (
+  source.provider==='wecom'&&!props.draft&&['verified','pending_verification'].includes(source.status) ||
+  (props.draft||source.status==='verified'||source.provider==='dingtalk'&&source.status==='pending_verification')&&source.directoryStatus==='available'
+)));
 watch(busy, value => emit('busyChanged', value), { flush: 'sync' });
 const source = computed(() => sources.value.find(item => item.sourceId === sourceId.value));
+const memberSearch=computed(()=>source.value?.provider==='wecom');
+const searchText=ref(''),searched=ref(false),limited=ref(false);
+const keywords=computed(()=>[...new Set(searchText.value.split(/[,，\n]/).map(value=>value.trim()).filter(Boolean))]);
 const kinds: { value: ConversationKind; label: string }[] = [{ value: 'private', label: '私聊' }, { value: 'group', label: '群聊' }, { value: 'meeting', label: '会议' }];
-function reset() { controller.abort(); controller = new AbortController(); busy.value = false; items.value = []; cursor.value = undefined; exhausted.value = true; error.value = ''; seenCursors.clear(); }
+function reset() { controller.abort(); controller = new AbortController(); busy.value = false; items.value = []; cursor.value = undefined; exhausted.value = true; error.value = ''; searched.value=false;limited.value=false;seenCursors.clear(); }
 watch(() => [props.base, props.subjects.sources], () => { reset(); labels.value = {}; trail.value = []; if (!sources.value.some(item => item.sourceId === sourceId.value)) sourceId.value = sources.value[0]?.sourceId ?? null; }, { immediate: true });
-watch(sourceId, () => { reset(); trail.value = []; });
+watch(sourceId, () => { reset(); trail.value = []; searchText.value=''; });
 watch(kind, reset);
 async function load(more = false) {
   if (!source.value || busy.value || props.disabled || props.readonly) return;
+  if(memberSearch.value&&(!keywords.value.length||keywords.value.length>10))return;
   if (!more) reset(); else if (exhausted.value || !cursor.value) return;
   const current = source.value, signal = controller.signal;
   const query = new URLSearchParams({ kind: kind.value }); const parent = trail.value.at(-1);
   if (parent) query.set('parentId', parent.externalId); if (more && cursor.value) query.set('cursor', cursor.value);
   busy.value = true; error.value = '';
   try {
-    const page = await api<DirectoryPage>(`${props.directoryBase ?? `${props.base}/channels/${current.provider}/directory`}?${query}`, signal);
+    const page = memberSearch.value
+      ? await api<DirectoryPage>(props.base+'/channels/wecom/member-search',signal,{keywords:keywords.value},'POST')
+      : await api<DirectoryPage>(`${props.directoryBase ?? `${props.base}/channels/${current.provider}/directory`}?${query}`, signal);
     if (signal.aborted) return;
     if (page.sourceId !== current.sourceId || page.appId !== current.appId || page.provider !== current.provider) throw new PickerError('连接来源已改变，请刷新员工配置后重新选择。');
     if (!page.exhausted && (!page.nextCursor || seenCursors.has(page.nextCursor))) throw new PickerError('目录分页游标无效，请重新读取。');
     if (page.nextCursor) seenCursors.add(page.nextCursor);
     const next = more ? [...items.value] : [];
     for (const item of page.items) { if (!next.some(value => value.kind === item.kind && value.subjectId === item.subjectId)) next.push(item); labels.value[key({ ...item, sourceId: current.sourceId })] = item.displayName; }
-    items.value = next; cursor.value = page.nextCursor; exhausted.value = page.exhausted;
+    items.value = next; cursor.value = page.nextCursor; exhausted.value = page.exhausted;searched.value=true;limited.value=page.limited===true;
   } catch (cause) { if (!signal.aborted) { error.value = cause instanceof PickerError ? cause.message : errorMessage(cause); items.value = []; cursor.value = undefined; exhausted.value = true; } }
   finally { if (!signal.aborted) busy.value = false; }
 }
@@ -51,11 +60,19 @@ onUnmounted(() => { controller.abort(); emit('busyChanged', false); });
   <div class="directory-rule-picker">
     <template v-if="!readonly">
       <NSelect v-if="!fixedSource" v-model:value="sourceId" :options="sources.map(item => ({label: `${providerLabel(item.provider)} · ${item.appId}`, value: item.sourceId}))" :disabled="disabled || busy" :aria-label="`${label}渠道来源`" placeholder="选择员工已验证渠道" />
-      <NSpace class="picker-note"><NSelect v-model:value="kind" :options="[{label: '部门', value: 'departments'}, {label: '人员', value: 'users'}]" :disabled="disabled || busy" :aria-label="`${label}查询类型`" /><NButton :disabled="disabled || busy || !source" :loading="busy" @click="load(false)">查询当前目录</NButton><NButton v-if="trail.length" :disabled="disabled || busy" @click="back">返回上级部门</NButton></NSpace>
-      <p class="field-note">按当前应用可见范围分页选择用户或部门，{{ trail.map(item => item.displayName).join(' / ') || '应用可见范围' }}</p>
+      <template v-if="memberSearch">
+        <NSpace class="picker-note"><NInput v-model:value="searchText" :disabled="disabled || busy" :maxlength="650" :input-props="{'aria-label':label+'成员关键词'}" placeholder="输入姓名、拼音或别名" @keydown.enter.prevent="load(false)" /><NButton :disabled="disabled || busy || !keywords.length || keywords.length>10" :loading="busy" @click="load(false)">搜索企微成员</NButton></NSpace>
+        <p class="field-note">用逗号分隔关键词，一次最多 10 个。</p>
+        <p v-if="limited" class="field-note" role="status">结果可能不完整，请用更具体的关键词搜索。</p>
+        <p v-if="searched && !items.length" class="field-note" role="status">未找到匹配成员。</p>
+      </template>
+      <template v-else>
+        <NSpace class="picker-note"><NSelect v-model:value="kind" :options="[{label: '部门', value: 'departments'}, {label: '人员', value: 'users'}]" :disabled="disabled || busy" :aria-label="`${label}查询类型`" /><NButton :disabled="disabled || busy || !source" :loading="busy" @click="load(false)">查询当前目录</NButton><NButton v-if="trail.length" :disabled="disabled || busy" @click="back">返回上级部门</NButton></NSpace>
+        <p class="field-note">按当前应用可见范围分页选择用户或部门，{{ trail.map(item => item.displayName).join(' / ') || '应用可见范围' }}</p>
+      </template>
       <NAlert v-if="!sources.length&&!hideUnavailableNotice" type="info">没有可用的员工渠道目录。请先在此员工的渠道连接中验证应用及通讯录权限；已有引用不会自动替换。</NAlert>
       <NAlert v-if="error" type="error" role="alert">{{ error }}</NAlert>
-      <div v-for="item in items" :key="`${item.kind}:${item.subjectId}`" class="directory-option"><span>{{ item.displayName }}</span><NSpace><NButton v-if="!selectPeopleOnly||item.kind==='channel_user'" size="small" :disabled="disabled || busy || rules.some(rule => rule.sourceId === sourceId && rule.subjectId === item.subjectId && rule.kind === item.kind)" @click="select(item)">选择{{ item.kind === 'department' ? '部门' : '人员' }}</NButton><NButton v-if="item.kind === 'department'" size="small" :disabled="disabled || busy" @click="enter(item)">进入部门</NButton></NSpace></div>
+      <div v-for="item in items" :key="`${item.kind}:${item.subjectId}`" class="directory-option"><div>{{ item.displayName }}<p v-if="item.departmentPaths?.length" class="field-note">{{item.departmentPaths.join(' · ')}}</p></div><NSpace><NButton v-if="!selectPeopleOnly||item.kind==='channel_user'" size="small" :disabled="disabled || busy || rules.some(rule => rule.sourceId === sourceId && rule.subjectId === item.subjectId && rule.kind === item.kind)" @click="select(item)">选择{{ item.kind === 'department' ? '部门' : '人员' }}</NButton><NButton v-if="item.kind === 'department'" size="small" :disabled="disabled || busy" @click="enter(item)">进入部门</NButton></NSpace></div>
       <NButton v-if="!exhausted" :disabled="disabled || busy" @click="load(true)">加载下一页</NButton>
     </template>
     <p v-if="!rules.length" class="field-note">尚未选择规则。</p>

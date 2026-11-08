@@ -77,7 +77,7 @@ export function startSdkClient(session: ChannelIngressSession, credentials: Chan
     }
   };
   client.registerCallbackListener(TOPIC_ROBOT, (envelope) => {
-    if (stopped || envelope.type !== 'CALLBACK' || envelope.headers?.topic !== TOPIC_ROBOT) return;
+    if (stopped || !client.connected || envelope.type !== 'CALLBACK' || envelope.headers?.topic !== TOPIC_ROBOT) return;
     void receive(envelope).then(() => {
       if (!stopped && client.connected) client.socketCallBackResponse(envelope.headers.messageId, {status: 'SUCCESS'});
     }).catch(() => {

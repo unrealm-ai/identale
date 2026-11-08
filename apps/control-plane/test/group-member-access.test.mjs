@@ -26,7 +26,7 @@ function setup(t){
  service.setAccessCheck((...args)=>capabilities.authorizeChannel(...args));
  t.after(()=>{capabilities.close();store.close();rmSync(dir,{recursive:true,force:true});});return{store,state,options,repository,service,capabilities};
 }
-async function ready(f,provider='feishu',entity='e',appId='app'){return f.service.save('w',entity,provider,'u',{appId,appSecret:'test-only-secret',expectedRevision:0});}
+async function ready(f,provider='feishu',entity='e',appId='app'){const c=await f.service.save('w',entity,provider,'u',{appId,appSecret:'test-only-secret',expectedRevision:0});if(provider==='dingtalk')f.service.observeFirstInbound(c.id,{appId,botId:'bot-'+appId,tenantId:'tenant',tenantNamespace:'corp_id',robotCode:appId});return c;}
 function rule(c,kind='department',subject='root',includeDescendants=true){return{sourceId:c.sourceId,kind,subjectId:channelSubject(kind,subject,kind==='department'?(c.provider==='feishu'?'open_department_id':'department_id'):(c.provider==='feishu'?'open_id':'user_id'),c.appId),...(kind==='department'?{includeDescendants}:{}),conversationKinds:['private','group']};}
 function scope(c,user='person'){return{workspaceId:'w',entityId:'e',requesterId:user,requesterKind:'channel_user',requesterIdentity:{idNamespace:c.provider==='feishu'?'open_id':'user_id',applicationId:c.appId},conversationKind:'group'};}
 function connection(c){return{workspaceId:'w',connectionId:c.id,provider:c.provider,tenantId:'tenant',identity:{kind:'bot',externalId:c.botId},credentialRef:'server-only'};}
@@ -37,10 +37,11 @@ function actor(c,id='outsider'){return{externalId:id,idNamespace:c.provider==='f
 function taskScope(f,b,chat='group-a',id='outsider',kind='group'){return channelInvocationScope(b,{schemaVersion:1,origin:'live',connectionId:b.connectionId,tenantId:b.connection.tenantId,eventId:'event-'+chat,receivedAt:f.state.clock,message:{id:'message-'+chat,conversationKind:kind,conversation:{provider:b.provider,connectionId:b.connectionId,tenantId:b.connection.tenantId,kind:'conversation',externalId:chat,conversationKind:kind,...(kind==='private'?{privateRecipientId:id}:{})},author:{externalId:id,idNamespace:b.provider==='feishu'?'open_id':'user_id',applicationId:b.appId,kind:'human',identityEvidence:'channel_verified'},occurredAt:f.state.clock,text:'Synthetic group permission input',mentions:[]}});}
 function open(f,extra={}){return f.capabilities.saveDirectoryAccess('w','e',{allow:[],deny:[],allowGroupMembers:true,...extra});}
 
-test('default closed; trusted group grants neither private/Web nor unproven group; disable invalidates immediately',async t=>{
+test('new source defaults trusted group open; grants neither private/Web nor unproven group; disable invalidates immediately',async t=>{
  const f=setup(t),c=await ready(f),b=await f.service.resolveBinding(c.id),a=actor(c),s=taskScope(f,b);
- assert.equal(f.capabilities.getDirectoryAccess('w','e').allowGroupMembers,false);
- await assert.rejects(f.service.authorizeInvocation(b,a,'group',s.source),code('channel_use_forbidden'));
+ assert.equal(f.capabilities.getDirectoryAccess('w','e').channelPolicies.find(p=>p.sourceId===c.sourceId).allowGroupMembers,true);
+ assert.equal(f.capabilities.getDirectoryAccess('w','e').channelPolicies.find(p=>p.sourceId===c.sourceId).mode,'allowlist');
+ await f.service.authorizeInvocation(b,a,'group',s.source);
  open(f);await f.service.authorizeInvocation(b,a,'group',s.source);
  await assert.rejects(f.service.authorizeInvocation(b,a,'group'),code('channel_use_forbidden'));
  await assert.rejects(f.service.authorizeInvocation(b,a,'private',{...s.source,conversationKind:'private'}),code('channel_use_forbidden'));
@@ -188,6 +189,7 @@ test('warm decisions isolate same external ID by namespace, tenant, application 
  await f.service.authorizeInvocation(b,actor(c),'group',s.source);await f.service.authorizeInvocation(b,{...actor(c),idNamespace:'user_id'},'group',s.source);assert.equal(new Set(seen).size,2);
  const original=f.options.verifyApplication;f.options.verifyApplication=async(...args)=>({...await original(...args),identity:{appId:'app2',tenantId:'tenant2',tenantIdNamespace:'tenant_key'},eventTenantId:'tenant2'});
  const c2=await ready(f,'feishu','e2','app2'),b2=await f.service.resolveBinding(c2.id),scope2=taskScope(f,b2);scope2.entityId='e2';
+ f.capabilities.saveDirectoryAccess('w','e2',{allow:[],deny:[],allowGroupMembers:false});
  await assert.rejects(f.service.authorizeInvocation(b2,actor(c2),'group',scope2.source),code('channel_use_forbidden'));
  f.capabilities.saveDirectoryAccess('w','e2',{allow:[],deny:[],allowGroupMembers:true});await f.service.authorizeInvocation(b2,actor(c2),'group',scope2.source);
  open(f,{allowGroupMembers:false});await assert.rejects(f.service.authorizeInvocation(b,actor(c),'group',s.source),code('channel_use_forbidden'));
@@ -223,4 +225,95 @@ test('combined keyword ingress → real employee group admission → builtin tas
  assert.equal(f.store.one('SELECT count(*) n FROM runs').n,1);assert.ok(models[1].messages.filter(m=>m.role==='tool').every(m=>!m.content.includes('channel_use_forbidden')));assert.ok(requests.every(url=>!url.includes('model')));
 });
 
-test('DingTalk trusted group opening, deny priority and inherited execution scope use real user_id without opening private/Web',async t=>{const f=setup(t),c=await ready(f,'dingtalk'),b=await f.service.resolveBinding(c.id),s=taskScope(f,b),a=actor(c);f.capabilities.patchDirectoryAccess('w','e',{sourceId:c.sourceId,allow:[],allowGroupMembers:true,expectedRevision:0});await f.service.authorizeInvocation(b,a,'group',s.source);await assert.rejects(f.service.authorizeInvocation(b,a,'private',{...s.source,conversationKind:'private'}),code('channel_use_forbidden'));await assert.rejects(f.service.authorizeInvocation(b,a,'group',{...s.source,bindingVersion:'old'}),code('channel_use_forbidden'));const inherited=f.capabilities.save('w','e',{name:'Ding group',enabled:true,mode:'inherit',allowMemberIds:[],denyMemberIds:[],resourceIds:[],conversationKinds:['group']});const auth=new ChannelTaskAuthorization(f.store,f.capabilities,f.service,()=>f.state.clock);await auth.refreshAuthorization(s);assert.deepEqual((await auth.resolveForTask(s)).packages.map(p=>p.id),[inherited.id]);open(f,{deny:[rule(c)]});await assert.rejects(f.service.authorizeInvocation(b,a,'group',s.source),code('channel_use_forbidden'));});
+test('DingTalk trusted group opening, deny priority and inherited execution scope use real user_id without opening private/Web',async t=>{const f=setup(t),c=await ready(f,'dingtalk'),b=await f.service.resolveBinding(c.id),s=taskScope(f,b),a=actor(c);f.capabilities.patchDirectoryAccess('w','e',{sourceId:c.sourceId,allow:[],allowGroupMembers:true,expectedRevision:f.capabilities.getDirectoryAccess('w','e').channelPolicies.find(p=>p.sourceId===c.sourceId).revision});await f.service.authorizeInvocation(b,a,'group',s.source);await assert.rejects(f.service.authorizeInvocation(b,a,'private',{...s.source,conversationKind:'private'}),code('channel_use_forbidden'));await assert.rejects(f.service.authorizeInvocation(b,a,'group',{...s.source,bindingVersion:'old'}),code('channel_use_forbidden'));const inherited=f.capabilities.save('w','e',{name:'Ding group',enabled:true,mode:'inherit',allowMemberIds:[],denyMemberIds:[],resourceIds:[],conversationKinds:['group']});const auth=new ChannelTaskAuthorization(f.store,f.capabilities,f.service,()=>f.state.clock);await auth.refreshAuthorization(s);assert.deepEqual((await auth.resolveForTask(s)).packages.map(p=>p.id),[inherited.id]);open(f,{deny:[rule(c)]});await assert.rejects(f.service.authorizeInvocation(b,a,'group',s.source),code('channel_use_forbidden'));});
+
+for(const legacyMode of ['restrict','inherit'])test('legacy '+legacyMode+' package toggle → edit → save preserves projected source restrictions',async t=>{
+ const f=setup(t),c=await ready(f),b=await f.service.resolveBinding(c.id);open(f);
+ const allow=[rule(c,'channel_user','person')],deny=[rule(c,'channel_user','blocked')];
+ let dto=f.capabilities.save('w','e',{name:'Legacy source policy',enabled:true,mode:legacyMode,allowMemberIds:[],denyMemberIds:[],resourceIds:[],directoryAccess:{allow,deny}});
+ const expected={sourceId:c.sourceId,mode:legacyMode==='restrict'?'allowlist':'denylist',allow,deny,...(legacyMode==='inherit'?{legacyAllowCheck:true}:{})};
+ const policy=value=>value.directoryAccess.channelPolicies.find(p=>p.sourceId===c.sourceId);
+ const assertAccess=async()=>{
+  for(const [person,allowed]of [['person',true],['blocked',false],['outsider',legacyMode==='inherit']]){
+   const s={...scope(c,person),groupContext:{conversationId:'source-policy',bindingVersion:b.bindingVersion}};
+   assert.equal((await f.capabilities.usableChannel(s,b.connection,'group')).some(p=>p.id===dto.id),allowed,person);
+  }
+ };
+ assert.deepEqual(policy(dto),expected,'create response carries the same projection as list');
+ assert.deepEqual(dto,f.capabilities.list('w','e').find(p=>p.id===dto.id));
+ assert.equal(JSON.parse(f.store.one('SELECT config_json FROM capability_packages WHERE id=?',dto.id).config_json).directoryAccess.channelPolicies,undefined,'fixture is an actual legacy package');
+ await assertAccess();
+ for(const enabled of [false,true]){
+  dto=f.capabilities.setEnabled({workspaceId:'w',entityId:'e',userId:'u'},dto.id,{enabled,expectedVersion:dto.version});
+  assert.deepEqual(policy(dto),expected,'toggle response must not replace the source policy with inherit');
+  assert.deepEqual(dto,f.capabilities.list('w','e').find(p=>p.id===dto.id));
+ }
+ await assertAccess();
+ // Simulate the editor replacing its DTO with the toggle response, editing only the name,
+ // and echoing its complete channel policy payload to the save endpoint.
+ const {id,workspaceId,entityId,version,...edit}=dto;
+ dto=f.capabilities.save(workspaceId,entityId,{...edit,name:'Only the name changed',expectedVersion:version},id);
+ assert.deepEqual(policy(dto),expected);assert.deepEqual(dto.directoryAccess.allow,allow);assert.deepEqual(dto.directoryAccess.deny,deny);
+ assert.deepEqual(dto,f.capabilities.list('w','e').find(p=>p.id===dto.id));
+ await assertAccess();
+});
+
+for(const provider of ['feishu','dingtalk','wecom'])test(provider+' durable admitted input survives employee revocation; new calls, package/resource/binding checks remain enforced',async t=>{
+ let loop;t.after(async()=>{await loop?.stop();});
+ const f=setup(t),c=await ready(f,provider);
+ if(provider==='wecom')f.service.observeFirstInbound(c.id,{appId:c.appId,botId:c.appId,tenantId:c.appId,tenantNamespace:'app_id'});
+ const b=await f.service.resolveBinding(c.id);assert.ok(b);
+ const policy=()=>f.capabilities.getDirectoryAccess('w','e').channelPolicies.find(p=>p.sourceId===c.sourceId);
+ f.capabilities.patchDirectoryAccess('w','e',{sourceId:c.sourceId,mode:'all',allow:[],deny:[],allowGroupMembers:false,expectedRevision:policy().revision});
+ const resource={id:'admitted-skill',kind:'skill',shared:true,resourceId:'approved-summary',version:'1',digest:'a'.repeat(64)};
+ f.capabilities.replaceApprovedResources([resource]);
+ let pack=f.capabilities.save('w','e',{name:'Current capability',enabled:true,mode:'inherit',allowMemberIds:[],denyMemberIds:[],resourceIds:[resource.id]});
+ const journal=new JsonlJournal({root:join(dirname(f.store.databasePath),'admitted-records'),ownerId:'admitted-'+provider,serialize:fn=>f.store.transaction(fn)}),conversations=new SqliteConversationRepository(f.store,journal,()=>f.state.clock);conversations.initialize(0);
+ const auth=new ChannelTaskAuthorization(f.store,f.capabilities,f.service,()=>f.state.clock),tasks=new TaskService(new SqliteTaskRepository(f.store),()=>f.state.clock,new MockRuntime(),auth,undefined,conversations);
+ const repository=new SqliteMessageLoopRepository(f.store,()=>f.state.clock);repository.setClaimFilter(()=>false);
+ loop=new ChannelMessageLoop(repository,f.service,{},tasks,()=>f.state.clock);
+ const event={schemaVersion:1,eventId:'admitted-event',connectionId:c.id,tenantId:b.connection.tenantId,receivedAt:f.state.clock,origin:'live',message:{id:'admitted-message',conversationKind:'private',conversation:{provider,connectionId:c.id,tenantId:b.connection.tenantId,kind:'conversation',externalId:'admitted-chat',conversationKind:'private',privateRecipientId:'person'},author:actor(c,'person'),occurredAt:f.state.clock,text:'Synthetic admitted work',mentions:[]}};
+ assert.equal((await loop.acceptAuthenticatedEvent(c.id,event)).status,'created');
+ const queued=f.store.one('SELECT scope_json,employee_use_admitted FROM channel_inbox');assert.equal(queued.employee_use_admitted,1);
+ const admittedScope=JSON.parse(queued.scope_json);conversations.create('admitted-conversation',admittedScope,'admitted-operation',f.state.clock,'real',0);
+ const scope={...admittedScope,conversationId:'admitted-conversation'},body={operationId:'after-employee-revocation',input:'Synthetic admitted work',contextMode:'new'};
+ f.capabilities.patchDirectoryAccess('w','e',{sourceId:c.sourceId,mode:'allowlist',allow:[],deny:[],allowGroupMembers:false,expectedRevision:policy().revision});
+ await assert.rejects(auth.resolveForTask(scope),code('entity_use_forbidden'));
+ await assert.rejects(tasks.create(scope,{...body,employeeUseAdmitted:true}),code('channel_use_forbidden'),'body fields cannot forge the host-only receipt');
+ const created=await tasks.create(scope,body,true);assert.ok(created.run?.id);
+ const snapshot=JSON.parse(f.store.one('SELECT config_snapshot_json FROM tasks WHERE id=?',created.id).config_snapshot_json);
+ assert.deepEqual(snapshot.packages.map(p=>p.id),[pack.id]);assert.deepEqual(snapshot.resources.map(r=>r.resource.id),[resource.id]);
+ // An employee-policy-only edit during preparation does not revoke this durable input.
+ const prepared=await auth.resolveForTask(scope,{employeeUseAdmitted:true});
+ f.capabilities.patchDirectoryAccess('w','e',{sourceId:c.sourceId,allowGroupMembers:true,expectedRevision:policy().revision});
+ assert.doesNotThrow(()=>auth.validatePreparedSnapshot(scope,prepared));
+ pack=f.capabilities.setEnabled({workspaceId:'w',entityId:'e',userId:'u'},pack.id,{enabled:false,expectedVersion:pack.version});
+ assert.throws(()=>auth.validatePreparedSnapshot(scope,prepared),code('capability_configuration_changed'));
+ const narrowed=await auth.resolveForTask(scope,{employeeUseAdmitted:true});assert.deepEqual(narrowed.packages,[]);assert.deepEqual(narrowed.resources,[]);
+ pack=f.capabilities.setEnabled({workspaceId:'w',entityId:'e',userId:'u'},pack.id,{enabled:true,expectedVersion:pack.version});
+ const resourceSnapshot=await auth.resolveForTask(scope,{employeeUseAdmitted:true});f.capabilities.replaceApprovedResources([]);
+ assert.throws(()=>auth.validatePreparedSnapshot(scope,resourceSnapshot),code('capability_configuration_changed'));
+ await assert.rejects(tasks.create(scope,{...body,operationId:'removed-resource'},true),code('approved_resource_unavailable'));
+ f.capabilities.replaceApprovedResources([resource]);
+ f.service.settings('w','e',provider,'u',{enabled:false,expectedRevision:f.service.list('w','e').find(channel=>channel.id===c.id).revision});
+ await assert.rejects(tasks.create(scope,{...body,operationId:'disabled-binding'},true),code('channel_binding_changed'));
+ assert.equal(f.store.one('SELECT count(*) n FROM tasks').n,1);assert.equal(f.store.one('SELECT count(*) n FROM runs').n,1);
+});
+
+test('legacy inherited allow-list uncertainty stays fail-closed across DTO reads, toggle and resource-only save',async t=>{
+ const f=setup(t),c=await ready(f),b=await f.service.resolveBinding(c.id),s={...scope(c,'outsider'),groupContext:{conversationId:'legacy-unknown',bindingVersion:b.bindingVersion}};open(f);
+ const allow=[rule(c)],deny=[rule(c,'channel_user','blocked')];let dto=f.capabilities.save('w','e',{name:'Legacy inherited membership check',enabled:true,mode:'inherit',allowMemberIds:[],denyMemberIds:[],resourceIds:[],directoryAccess:{allow,deny}});
+ assert.equal(dto.directoryAccess.channelPolicies[0].legacyAllowCheck,true);
+ assert.deepEqual((await f.capabilities.usableChannel(s,b.connection,'group')).map(p=>p.id),[dto.id],'a known matching allow fact inherits');f.state.unknown=true;
+ assert.deepEqual(await f.capabilities.usableChannel(s,b.connection,'group'),[],'unknown legacy allow fact must not become inherit');
+ for(const enabled of [false,true])dto=f.capabilities.setEnabled({workspaceId:'w',entityId:'e',userId:'u'},dto.id,{enabled,expectedVersion:dto.version});
+ assert.equal(dto.directoryAccess.channelPolicies[0].legacyAllowCheck,true);
+ const {id,workspaceId,entityId,version,...edit}=dto;dto=f.capabilities.save(workspaceId,entityId,{...edit,name:'Only name changed',expectedVersion:version},id);
+ assert.deepEqual(await f.capabilities.usableChannel(s,b.connection,'group'),[]);
+ f.state.unknown=false;f.state.dept='outside';
+ assert.deepEqual((await f.capabilities.usableChannel(s,b.connection,'group')).map(p=>p.id),[id],'a known nonmatch still inherits: compatibility is not an allowlist');
+ f.state.unknown=true;
+ const explicit=dto.directoryAccess.channelPolicies.map(({legacyAllowCheck,...policy})=>({...policy,mode:'inherit'}));
+ f.capabilities.save('w','e',{...edit,directoryAccess:{allow,deny,channelPolicies:explicit},expectedVersion:dto.version},id);
+ assert.deepEqual((await f.capabilities.usableChannel(s,b.connection,'group')).map(p=>p.id),[id],'explicit modern inherit has no legacy positive-list dependency');
+});

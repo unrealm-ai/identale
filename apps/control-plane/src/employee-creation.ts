@@ -23,7 +23,7 @@ export function registerEmployeeCreationRoutes(app: FastifyInstance, services: {
   trigger?:()=>TriggerService|undefined;
   auth(request: FastifyRequest): { id: string };
 }) {
-  const { store, entities, workspaces, profiles, capabilities, employeeChannels, channelDrafts } = services;
+  const { store, entities, workspaces, profiles, capabilities, channelDrafts } = services;
   store.db.exec(`CREATE TABLE IF NOT EXISTS employee_creation_operations (
     user_id TEXT NOT NULL REFERENCES users(id), workspace_id TEXT NOT NULL REFERENCES workspaces(id),
     operation_id TEXT NOT NULL, request_hash TEXT NOT NULL, entity_id TEXT NOT NULL REFERENCES entities(id),
@@ -34,7 +34,7 @@ export function registerEmployeeCreationRoutes(app: FastifyInstance, services: {
   app.get('/api/workspaces/:workspaceId/employee-creation-options', request => {
     const { workspaceId } = request.params as { workspaceId: string };
     manager(services.auth(request).id, workspaceId);
-    return { members: capabilities.members(workspaceId), resources: capabilities.resources(workspaceId), directoryCredentials: employeeChannels.directories.list(workspaceId).map(r => ({ id: r.id, label: r.label, corpId: r.corpId, agentId: r.agentId, status: r.status, revision: r.stateVersion })) };
+    return { members: capabilities.members(workspaceId), resources: capabilities.resources(workspaceId) };
   });
   const draftBase = '/api/workspaces/:workspaceId/employee-channel-drafts';
   app.post(draftBase, {config: {rateLimit: {max: 6, timeWindow: '1 minute'}}}, async request => {

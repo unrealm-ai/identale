@@ -5,9 +5,9 @@ import type {EmployeeChannelService} from '../employee-channels/service.js';
 import type {EmployeeChannelRepository} from '../employee-channels/repository.js';
 import type {EmployeeChannelRecord} from '../employee-channels/types.js';
 
-const fields=['identity','status','inboundVerified','identityEvidence','eventTenantId','botId','robotCode','previousInstallation','verification','validation','directoryStatus','lastError'] as const;
+const fields=['identity','status','inboundVerified','identityEvidence','eventTenantId','botId','robotCode','previousInstallation','verification','validation','directoryStatus','lastError','wecomContactIdentityRevision'] as const;
 type Observation=Record<typeof fields[number],unknown>;
-interface Report {reportId:string;connectionId:string;expected:{revision:number;authRevision:number;stateVersion:number};revisionDelta:0|1;observation:Observation|null;invalidation?:{sourceId:string;directoryBinding:EmployeeChannelRecord['directoryBinding']};verificationEvents:string[]}
+interface Report {reportId:string;connectionId:string;expected:{revision:number;authRevision:number;stateVersion:number};revisionDelta:0|1;observation:Observation|null;verificationEvents:string[]}
 const object=(v:unknown):v is Record<string,unknown>=>!!v&&typeof v==='object'&&!Array.isArray(v);
 const id=(v:unknown):v is string=>typeof v==='string'&&v.length>0&&v.length<=4096&&!/[\u0000-\u001f]/.test(v);
 const version=(v:unknown):v is number=>Number.isSafeInteger(v)&&Number(v)>=0;
@@ -15,24 +15,23 @@ const digest=(v:unknown)=>createHash('sha256').update(JSON.stringify(v)).digest(
 function observation(r:EmployeeChannelRecord):Observation{return Object.fromEntries(fields.map(k=>[k,r[k]??null])) as Observation;}
 function matches(r:EmployeeChannelRecord,expected:Report['expected']){return r.revision===expected.revision&&r.authRevision===expected.authRevision&&r.stateVersion===expected.stateVersion;}
 function valid(value:unknown):value is Report{
- if(!object(value)||Object.keys(value).some(k=>!['reportId','connectionId','expected','revisionDelta','observation','invalidation','verificationEvents'].includes(k))||!id(value['reportId'])||!id(value['connectionId'])||!object(value['expected'])||Object.keys(value['expected']).sort().join()!=='authRevision,revision,stateVersion'||!Object.values(value['expected']).every(version)||![0,1].includes(value['revisionDelta'] as number)||!Array.isArray(value['verificationEvents'])||value['verificationEvents'].length>100||value['verificationEvents'].some(v=>!id(v)||!/^event:|^message:/.test(v)))return false;
- const o=value['observation'];if(o===null)return value['revisionDelta']===0&&value['invalidation']===undefined;
- if(!object(o)||Object.keys(o).length!==fields.length||fields.some(k=>!(k in o))||Object.keys(o).some(k=>!(fields as readonly string[]).includes(k)))return false;
+ if(!object(value)||Object.keys(value).some(k=>!['reportId','connectionId','expected','revisionDelta','observation','verificationEvents'].includes(k))||!id(value['reportId'])||!id(value['connectionId'])||!object(value['expected'])||Object.keys(value['expected']).sort().join()!=='authRevision,revision,stateVersion'||!Object.values(value['expected']).every(version)||![0,1].includes(value['revisionDelta'] as number)||!Array.isArray(value['verificationEvents'])||value['verificationEvents'].length>100||value['verificationEvents'].some(v=>!id(v)||!/^event:|^message:/.test(v)))return false;
+ const o=value['observation'];if(o===null)return value['revisionDelta']===0;
+ if(!object(o)||fields.some(k=>k!=='wecomContactIdentityRevision'&&!(k in o))||Object.keys(o).some(k=>!(fields as readonly string[]).includes(k)))return false;
+ if(o['wecomContactIdentityRevision']!=null&&(!version(o['wecomContactIdentityRevision'])||o['wecomContactIdentityRevision']!==value['expected']['authRevision']))return false;
  if(!object(o['identity'])||Object.keys(o['identity']).sort().join()!=='appId,tenantId,tenantIdNamespace'||!id(o['identity']['appId'])||!id(o['identity']['tenantId'])||!['tenant_key','display_id','corp_id','app_id'].includes(String(o['identity']['tenantIdNamespace']))||!['verified','pending_verification','invalid','disabled'].includes(String(o['status']))||![null,true,false].includes(o['inboundVerified'] as null|boolean)||!['available','unavailable'].includes(String(o['directoryStatus'])))return false;
  for(const k of ['eventTenantId','botId','robotCode','lastError'] as const)if(o[k]!==null&&!id(o[k]))return false;
- if(o['identityEvidence']!==null&&!['provider_api','authenticated_event_confirmed','app_credentials_only','admin_asserted'].includes(String(o['identityEvidence'])))return false;
+ if(o['identityEvidence']!==null&&!['provider_api','authenticated_event_confirmed','authenticated_first_message','app_credentials_only','admin_asserted'].includes(String(o['identityEvidence'])))return false;
  if(o['previousInstallation']!==null&&(!object(o['previousInstallation'])||Object.keys(o['previousInstallation']).sort().join()!=='botId,tenantId'||!id(o['previousInstallation']['botId'])||!id(o['previousInstallation']['tenantId'])))return false;
  if(o['verification']!==null){const v=o['verification'];if(!object(v)||Object.keys(v).some(k=>!['challengeId','challengeText','expiresAt','candidate'].includes(k))||!id(v['challengeId'])||!id(v['challengeText'])||!version(v['expiresAt']))return false;if(v['candidate']!==undefined){const c=v['candidate'];if(!object(c)||Object.keys(c).some(k=>!['id','appId','botId','tenantId','robotCode','eventId','messageId'].includes(k))||!['id','appId','botId','tenantId','eventId','messageId'].every(k=>id(c[k]))||c['robotCode']!==undefined&&!id(c['robotCode']))return false;}}
  if(o['validation']!==null){const v=o['validation'];if(!object(v)||Object.keys(v).some(k=>!['version','provider','checkedAt','canContinue','checks'].includes(k))||v['version']!==1||!['feishu','dingtalk','wecom'].includes(String(v['provider']))||!version(v['checkedAt'])||typeof v['canContinue']!=='boolean'||!Array.isArray(v['checks'])||v['checks'].length>100)return false;const allowed=['id','required','supported','status','reason','httpStatus','providerCode','requestId','missingScopes','field','scopeDisclosure','scopeEvidence','scopeInventory','inventoryDiagnostics'];if(v['checks'].some(c=>!object(c)||Object.keys(c).some(k=>!allowed.includes(k))))return false;}
- if(value['invalidation']!==undefined){const i=value['invalidation'];if(!object(i)||Object.keys(i).sort().join()!=='directoryBinding,sourceId'||!id(i['sourceId'])||!object(i['directoryBinding'])||i['directoryBinding']['status']!=='reconfirmation_required'||value['revisionDelta']!==1||o['directoryStatus']!=='unavailable')return false;}
  return true;
 }
 function apply(old:EmployeeChannelRecord,report:Report):EmployeeChannelRecord{
  if(!report.observation)return old;
  const next={...old,revision:old.revision+report.revisionDelta};
- for(const field of fields){const value=report.observation[field];if(value===null&&field!=='lastError')delete (next as unknown as Record<string,unknown>)[field];else(next as unknown as Record<string,unknown>)[field]=structuredClone(value);}
+ for(const field of fields){if(!(field in report.observation))continue;const value=report.observation[field];if(value===null&&field!=='lastError')delete (next as unknown as Record<string,unknown>)[field];else(next as unknown as Record<string,unknown>)[field]=structuredClone(value);}
  if(next.identity.appId!==old.appId)throw Error('channel_observation_invalid');
- if(report.invalidation){const before=old.directoryBinding,after=report.invalidation.directoryBinding;if(!before||!after||after.sourceRevision!==before.sourceRevision+1||JSON.stringify({...after,status:before.status,sourceRevision:before.sourceRevision})!==JSON.stringify(before))throw Error('channel_observation_invalid');next.sourceId=report.invalidation.sourceId;next.directoryBinding=structuredClone(after);}
  // Only operational downgrades may update a disabled configuration.
  if(!old.enabled&&next.status!=='disabled')throw Error('channel_observation_invalid');
  return next;
@@ -68,9 +67,9 @@ export function installChannelObservationReporter(store:Store,repository:Employe
   if(replaying)return originalSave.call(this,record,previous);
   if(!previous)throw Error('runtime_channel_configuration_readonly');
   const delta=record.revision-previous.revision;
-  if(record.authRevision!==previous.authRevision||record.enabled!==previous.enabled||record.appId!==previous.appId||record.provider!==previous.provider||record.id!==previous.id||record.workspaceId!==previous.workspaceId||record.entityId!==previous.entityId||JSON.stringify(record.credential)!==JSON.stringify(previous.credential)||JSON.stringify(record.context)!==JSON.stringify(previous.context))throw Error('runtime_channel_configuration_readonly');
-  const report:Report={reportId:randomUUID(),connectionId:record.id,expected:{revision:previous.revision,authRevision:previous.authRevision,stateVersion:previous.stateVersion},revisionDelta:delta as 0|1,observation:observation(record),verificationEvents:[],...(record.sourceId!==previous.sourceId||JSON.stringify(record.directoryBinding)!==JSON.stringify(previous.directoryBinding)?{invalidation:{sourceId:record.sourceId,directoryBinding:record.directoryBinding}}:{})};
-  if(record.authRevision!==previous.authRevision||record.enabled!==previous.enabled||record.appId!==previous.appId||JSON.stringify(record.context)!==JSON.stringify(previous.context)||!valid(report))throw Error('runtime_channel_configuration_readonly');
+  if(record.sourceId!==previous.sourceId||record.authRevision!==previous.authRevision||record.enabled!==previous.enabled||record.appId!==previous.appId||record.provider!==previous.provider||record.id!==previous.id||record.workspaceId!==previous.workspaceId||record.entityId!==previous.entityId||JSON.stringify(record.credential)!==JSON.stringify(previous.credential)||JSON.stringify(record.context)!==JSON.stringify(previous.context))throw Error('runtime_channel_configuration_readonly');
+  const report:Report={reportId:randomUUID(),connectionId:record.id,expected:{revision:previous.revision,authRevision:previous.authRevision,stateVersion:previous.stateVersion},revisionDelta:delta as 0|1,observation:observation(record),verificationEvents:[]};
+  if(record.sourceId!==previous.sourceId||record.authRevision!==previous.authRevision||record.enabled!==previous.enabled||record.appId!==previous.appId||JSON.stringify(record.context)!==JSON.stringify(previous.context)||!valid(report))throw Error('runtime_channel_configuration_readonly');
   const saved=originalSave.call(this,record,previous);if(saved)enqueue(report);return saved;
  });};
  repository.markVerificationEvent=function(connectionId,eventId,messageId){return store.transaction(()=>{

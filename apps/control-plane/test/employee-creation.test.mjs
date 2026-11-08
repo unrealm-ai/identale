@@ -69,7 +69,7 @@ async function setup(t) {
   const config = extra => ({ name: '合成向导模型', provider: 'openai-compatible', endpoint: `${local}/v1`, modelId: 'supported', apiKey: secret, enabled: true, ...extra });
   async function receipt(configuration = config()) { const r = await call('POST', `${base}/model-profiles/test-connection`, configuration, owner.cookie); assert.equal(r.statusCode, 200, r.body); return { ...configuration, connectionTestReceipt: r.json().connectionTestReceipt }; }
   async function draft(provider = 'feishu', extra = {}) { const r = await call('POST', `${base}/employee-channel-drafts`, { provider, appId: `${provider}-fixture-app`, appSecret: 'synthetic-robot-secret', ...extra }, owner.cookie); assert.equal(r.statusCode, 200, r.body); return r.json(); }
-  const counts = () => Object.fromEntries(['entities', 'model_catalog', 'entity_model_bindings', 'employee_channel_connections', 'employee_channel_directory_credentials', 'capability_packages', 'employee_creation_operations'].map(table => [table, db.prepare(`SELECT count(*) n FROM ${table}`).get().n]));
+  const counts = () => Object.fromEntries(['entities', 'model_catalog', 'entity_model_bindings', 'employee_channel_connections', 'capability_packages', 'employee_creation_operations'].map(table => [table, db.prepare(`SELECT count(*) n FROM ${table}`).get().n]));
   t.after(async () => { await app.close(); db.close(); provider.closeAllConnections(); await new Promise(resolve => provider.close(resolve)); await rm(dir, { recursive: true, force: true }); });
   return { app, db, owner, base, call, body, config, receipt, draft, state, counts, register, channels, supervisor, advance: ms => { now += ms; } };
 }
@@ -86,7 +86,7 @@ test('wizard probe is nonpersistent; inline creation is rejected and existing mo
   const profile=expect(await f.call('POST',`${f.base}/model-profiles`,verified,f.owner.cookie),200);
   const request = f.body({ model: { kind: 'existing', profileId:profile.id }, packages: [packageDraft({ allowMemberIds: [f.owner.workspace.memberId] })] });
   const created = expect(await f.call('POST', `${f.base}/employee-creations`, request, f.owner.cookie), 200).entity;
-  assert.deepEqual(f.counts(), { entities: 1, model_catalog: 1, entity_model_bindings: 1, employee_channel_connections: 0, employee_channel_directory_credentials: 0, capability_packages: 1, employee_creation_operations: 1 });
+  assert.deepEqual(f.counts(), { entities: 1, model_catalog: 1, entity_model_bindings: 1, employee_channel_connections: 0, capability_packages: 1, employee_creation_operations: 1 });
   const raw = JSON.stringify(f.db.prepare('SELECT * FROM model_catalog').get()); assert.equal(raw.includes(secret), false);
   const oldNow = Date.now; Date.now = () => oldNow() + 600_000;
   try { assert.equal(expect(await f.call('POST', `${f.base}/employee-creations`, request, f.owner.cookie), 200).entity.id, created.id); } finally { Date.now = oldNow; }
@@ -164,32 +164,28 @@ test('wizard rechecks management authorization after network reads and never pub
   assert.ok(Object.values(f.counts()).every(n => n === 0));
 });
 
-const directoryInput = { label: '合成目录应用', corpId: 'fixture-corp', agentId: '1000005', appSecret: 'synthetic-directory-secret', confirmSameCorp: true };
-test('wizard WeCom keeps bot/directory secrets separate, creates both only at commit and rejects changed shared credentials', async t => {
-  const f = await setup(t);
-  expect(await f.call('POST', `${f.base}/employee-channel-drafts`, { provider: 'wecom', appId: 'bot-a', appSecret: 'synthetic-robot-secret', directory: { ...directoryInput, confirmSameCorp: false } }, f.owner.cookie), 400, 'same_corp_confirmation_required');
-  const channel = await f.draft('wecom', { appId: 'bot-a', directory: directoryInput });
-  assert.equal(channel.source.status, 'pending_verification'); assert.ok(Object.values(f.counts()).every(n => n === 0));
-  const request = f.body({ channelDraftId: channel.draftId });
-  expect(await f.call('POST', `${f.base}/employee-creations`, request, f.owner.cookie), 200);
-  assert.equal(f.counts().employee_channel_directory_credentials, 1); assert.equal(f.counts().employee_channel_connections, 1);
-  const record = f.channels.repository.all()[0], sharedId = record.directoryBinding.credentialId;
-  assert.equal(JSON.stringify(record).includes('synthetic-robot-secret'), false); assert.equal(f.channels.ingressConfiguration(record.id).credentials.botSecret, 'synthetic-robot-secret');
-  assert.equal(JSON.stringify(f.channels.directories.list(f.owner.workspace.id)).includes('synthetic-directory-secret'), false);
-  const reuse = await f.draft('wecom', { appId: 'bot-b', directory: { credentialId: sharedId, confirmSameCorp: true } });
-  const shared = f.channels.directories.byId(sharedId); shared.stateVersion++; f.db.prepare('UPDATE employee_channel_directory_credentials SET state_version=?,record_json=? WHERE id=?').run(shared.stateVersion, JSON.stringify(shared), sharedId);
-  expect(await f.call('POST', `${f.base}/employee-creations`, f.body({ channelDraftId: reuse.draftId }), f.owner.cookie), 409, 'directory_configuration_changed');
-  assert.equal(f.counts().entities, 1); assert.equal(f.counts().employee_channel_directory_credentials, 1);
-  const other = await f.register('wecom-other');
-  expect(await f.call('POST', `/api/workspaces/${other.workspace.id}/employee-channel-drafts`, { provider: 'wecom', appId: 'bot-c', appSecret: 'synthetic-robot-secret', directory: { credentialId: sharedId, confirmSameCorp: true } }, other.cookie), 404);
+test('wizard WeCom uses only bot credentials and persists one connection at atomic employee commit', async t => {
+  const f=await setup(t);
+  const old=await f.call('POST',`${f.base}/employee-channel-drafts`,{provider:'wecom',appId:'bot-a',appSecret:'synthetic-robot-secret',directory:{corpId:'corp',agentId:'7'}},f.owner.cookie);
+  assert.equal(old.statusCode,400);
+  const channel=await f.draft('wecom',{appId:'bot-a'});
+  assert.equal(channel.source.status,'pending_verification');assert.equal(channel.source.validation.canContinue,true);
+  assert.equal(channel.source.validation.checks.find(c=>c.id==='credentials').status,'unverified');
+  assert.ok(Object.values(f.counts()).every(n=>n===0));
+  expect(await f.call('POST',`${f.base}/employee-creations`,f.body({channelDraftId:channel.draftId,directoryAccess:{channelPolicies:[{sourceId:channel.source.sourceId,mode:'all',allow:[],deny:[]}]}}),f.owner.cookie),200);
+  assert.equal(f.counts().employee_channel_connections,1);
+  const record=f.channels.repository.all()[0];assert.equal(record.identity.tenantIdNamespace,'app_id');assert.equal(record.directoryBinding,undefined);
+  assert.equal(JSON.stringify(record).includes('synthetic-robot-secret'),false);
+  assert.equal(f.channels.ingressConfiguration(record.id).credentials.botSecret,'synthetic-robot-secret');
 });
 
-test('wizard new WeCom shared credential is rolled back with employee on final configuration failure', async t => {
-  const f = await setup(t), channel = await f.draft('wecom', { directory: directoryInput });
-  const request = f.body({ channelDraftId: channel.draftId, packages: [packageDraft({ resourceIds: ['not-approved'] })] });
-  expect(await f.call('POST', `${f.base}/employee-creations`, request, f.owner.cookie), 400, 'unknown_approved_resource'); assert.ok(Object.values(f.counts()).every(n => n === 0));
-  expect(await f.call('POST', `${f.base}/employee-creations`, { ...request, packages: [] }, f.owner.cookie), 200);
-  assert.equal(f.counts().employee_channel_directory_credentials, 1);
+test('wizard bot connection and policy roll back with employee on final configuration failure',async t=>{
+  const f=await setup(t),channel=await f.draft('wecom');
+  const request=f.body({channelDraftId:channel.draftId,packages:[packageDraft({resourceIds:['not-approved']})]});
+  expect(await f.call('POST',`${f.base}/employee-creations`,request,f.owner.cookie),400,'unknown_approved_resource');
+  assert.ok(Object.values(f.counts()).every(n=>n===0));
+  expect(await f.call('POST',`${f.base}/employee-creations`,{...request,packages:[]},f.owner.cookie),200);
+  assert.equal(f.counts().employee_channel_connections,1);
 });
 
 test('wizard postcommit transport failure remains visible without repeating employee or rolling back committed data', async t => {

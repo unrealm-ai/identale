@@ -10,7 +10,8 @@ export interface TaskAuthorizationPort {
   /** Trusted identity/workspace/employee association only; no usage-policy or package recomputation. */
   authorizeLocal?(scope:TaskScope):void;
   refreshAuthorization?(scope:TaskScope):Promise<void>;
-  resolveForTask?(scope: TaskScope): unknown|Promise<unknown>;
+  /** Host-only admission receipt; never read from HTTP bodies or model tool arguments. */
+  resolveForTask?(scope: TaskScope,admission?:{employeeUseAdmitted:true}): unknown|Promise<unknown>;
   validatePreparedSnapshot?(scope:TaskScope,snapshot:unknown):void;
   revalidateCurrent?(scope: TaskScope, snapshot: unknown): unknown;
   isAuthorizationError?(error: unknown): boolean;

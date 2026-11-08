@@ -45,6 +45,8 @@ export interface ChannelSpeakerProfile {displayName?:string;departmentNames?:rea
 export interface ChannelInboxRow {id:string;lane:string;connectionId:string;bindingVersion:string;scopeJson:string;eventJson:string;status:string;conversationId:string|null;turnId:string|null;leaseToken:string|null;createdAt:number;employeeUseAdmitted?:boolean;sourceKey?:string;payloadHash?:string;inputText?:string;historyBatchId?:string}
 export interface ChannelDeliveryRow {id:string;scopeJson:string;targetJson:string;text:string;status:string;taskDeliveryId:string|null;leaseToken:string|null;correlation?:DiagnosticContext}
 export interface MessageLoopRepository {
+ /** Returns original task scope only after checking persisted task/delivery provenance. */
+ originatingTaskScope?(row:ChannelDeliveryRow):TaskScope|undefined;
  onWork?(wake:()=>void):void;
  seenInbox?(id:string):boolean;
  checkDuplicate?(id:string,identity:{sourceKey:string;payloadHash:string}):boolean;
@@ -80,6 +82,7 @@ export interface MessageLoopRepository {
  cleanup(at:number):void;
 }
 const hash=(value:unknown)=>createHash('sha256').update(JSON.stringify(value)).digest('hex');
+const repliesInPlace=(conversation:ChannelResourceRef,threadId?:string)=>conversation.provider==='wecom'||conversation.conversationKind==='group'||!!threadId;
 const safeError=(error:unknown)=>error instanceof ChannelError?error.code:error&&typeof error==='object'&&'code'in error&&typeof error.code==='string'&&/^[a-zA-Z0-9_]{1,100}$/.test(error.code)?error.code:'channel_processing_failed';
 export function channelInvocationScope(binding:MessageLoopBinding,event:ChannelMessageEvent):TaskScope {
  const m=event.message,a=m.author,kind=m.conversationKind;
@@ -168,7 +171,7 @@ export class ChannelMessageLoop {
     if(b.provider==='feishu'&&route.conversation.conversationKind==='group'&&this.groups&&!this.groups.canSend(b.connectionId,route.conversation.externalId))throw new ChannelError('forbidden','bot_left_group');
     if(!route.messageId||!route.eventId)throw new ChannelError('invalid_request');
     const scope={kind:'channel_quick_reply',route,replyKind:kind,source:{connectionId:route.connectionId}};
-    const target={conversation:route.conversation,...((route.conversation.conversationKind==='group'||route.threadId)?{replyToMessageId:route.messageId}:{}),...(route.threadId?{threadId:route.threadId}:{})};
+    const target={conversation:route.conversation,...(repliesInPlace(route.conversation,route.threadId)?{replyToMessageId:route.messageId}:{}),...(route.threadId?{threadId:route.threadId}:{})};
     const result=commit(()=>this.repository.enqueueDelivery({id,scopeJson:JSON.stringify(scope),targetJson:JSON.stringify(target),text,status:'queued',taskDeliveryId:null,leaseToken:null,correlation},this.now())??'created');
     if(result==='created')this.diagnostics.event({stage:'reply.generated',phase:'point',outcome:'success',status:'generated',reason,text});
     return result;
@@ -231,7 +234,7 @@ export class ChannelMessageLoop {
   else if(['failed','canceled'].includes(result.turn.status))this.repository.markTerminal?.(row.id,result.turn.status);
  }
  private queueOutput(row:ChannelInboxRow,outputId:string,text:string){
-  const event=JSON.parse(row.eventJson) as ChannelMessageEvent,target={conversation:event.message.conversation,...((event.message.conversationKind==='group'||event.message.threadId)?{replyToMessageId:event.message.id}:{}),...(event.message.threadId?{threadId:event.message.threadId}:{})};
+  const event=JSON.parse(row.eventJson) as ChannelMessageEvent,target={conversation:event.message.conversation,...(repliesInPlace(event.message.conversation,event.message.threadId)?{replyToMessageId:event.message.id}:{}),...(event.message.threadId?{threadId:event.message.threadId}:{})};
   const correlation={traceId:row.id,messageId:outputId,causationId:row.id,...(row.conversationId?{conversationId:row.conversationId}:{}),...(row.turnId?{turnId:row.turnId}:{})};
   this.repository.enqueueDelivery({id:outputId,scopeJson:row.scopeJson,targetJson:JSON.stringify(target),text,status:'pending',taskDeliveryId:null,leaseToken:null,correlation},this.now());
   if(row.conversationId&&row.turnId)this.connections.queueAttachments?.({id:outputId,scopeJson:row.scopeJson,targetJson:JSON.stringify(target),text,status:'queued',taskDeliveryId:null,leaseToken:null,correlation},row.conversationId,row.turnId,this.now());
@@ -273,7 +276,7 @@ export class ChannelMessageLoop {
   let attempted=false;
   try{
    if(row.taskDeliveryId!==null||row.text!==channelQuickReplies[replyKind])throw new ChannelError('forbidden','invalid_quick_reply');
-   const b=await guard(),caps=await b.conversation.inspectCapabilities(route.conversation),reply=route.conversation.conversationKind==='group'||!!route.threadId;
+   const b=await guard(),caps=await b.conversation.inspectCapabilities(route.conversation),reply=repliesInPlace(route.conversation,route.threadId);
    if(route.threadId&&!reply)throw new ChannelError('unsupported','thread_reply_target_unavailable');
    requireChannelCapability(reply?caps.replyToMessage:caps.proactiveSend);
    attempted=true;
@@ -300,12 +303,15 @@ export class ChannelMessageLoop {
    if(b.provider==='feishu'&&target.conversation.conversationKind==='group'&&this.groups&&!this.groups.canSend(b.connectionId,target.conversation.externalId))throw new ChannelError('forbidden','bot_left_group');
    if(target.conversation.externalId!==scope.source!.conversationId||target.threadId!==scope.source!.threadId)throw new ChannelError('forbidden','reply_target_scope_mismatch');
    const caps=await b.conversation.inspectCapabilities(target.conversation);
-   const reply=target.replyToMessageId&&caps.replyToMessage.supported&&caps.replyToMessage.availability==='available';
+   // Interactive WeCom replies stay on the original callback, never proactive fallback.
+   const replyId=target.replyToMessageId;
+   const reply=replyId&&(b.provider==='wecom'||caps.replyToMessage.supported&&caps.replyToMessage.availability==='available');
+   const originalTask=!automation&&b.provider==='wecom'&&target.conversation.conversationKind==='private'&&!replyId?this.repository.originatingTaskScope?.(row):undefined;
    if(target.threadId&&!reply)throw new ChannelError('unsupported','thread_reply_target_unavailable');
    requireChannelCapability(reply?caps.replyToMessage:caps.proactiveSend);
    const attachment='artifact'in target?await this.connections.readAttachment?.(row):undefined;if('artifact'in target&&!attachment)throw new ChannelError('unsupported','artifact_reader_missing');
    attempted=true;
-   const receipt=await this.confirmedSend(row,token,()=>b.conversation.sendMessage({conversation:target.conversation,text:row.text,...(attachment?{attachment}:{}),operationId:hash(row.id).slice(0,40),assertSendAllowed:()=>{try{if(b.provider==='feishu'&&target.conversation.conversationKind==='group'&&this.groups&&!this.groups.canSend(b.connectionId,target.conversation.externalId))throw new ChannelError('forbidden','bot_left_group');this.repository.assertDeliveryAuthorization?.(row);if(this.connections.currentBindingVersion(scope.source!.connectionId)!==scope.source!.bindingVersion||!this.repository.ownsDelivery(row.id,token))throw new Error();}catch{attempted=false;throw new ChannelError('forbidden','delivery_authorization_changed');}},beforeSend:async()=>{try{await resolve();if(!this.repository.ownsDelivery(row.id,token))throw new ChannelError('forbidden','delivery_lease_lost');}catch(error){attempted=false;throw error;}},...(reply?{replyToMessageId:target.replyToMessageId!}:{}),...(target.threadId?{threadId:target.threadId}:{})}));if(!receipt)return;
+   const receipt=await this.confirmedSend(row,token,()=>b.conversation.sendMessage({conversation:target.conversation,text:row.text,...(attachment?{attachment}:{}),operationId:hash(row.id).slice(0,40),...(originalTask?{originatingTaskScope:()=>{if(!this.repository.ownsDelivery(row.id,token))throw new ChannelError('forbidden','delivery_lease_lost');this.repository.assertDeliveryAuthorization?.(row);const current=this.repository.originatingTaskScope?.(row);if(!current)throw new ChannelError('forbidden','task_delivery_origin_changed');return current;}}:{}),assertSendAllowed:()=>{try{if(b.provider==='feishu'&&target.conversation.conversationKind==='group'&&this.groups&&!this.groups.canSend(b.connectionId,target.conversation.externalId))throw new ChannelError('forbidden','bot_left_group');this.repository.assertDeliveryAuthorization?.(row);if(this.connections.currentBindingVersion(scope.source!.connectionId)!==scope.source!.bindingVersion||!this.repository.ownsDelivery(row.id,token))throw new Error();}catch{attempted=false;throw new ChannelError('forbidden','delivery_authorization_changed');}},beforeSend:async()=>{try{await resolve();if(!this.repository.ownsDelivery(row.id,token))throw new ChannelError('forbidden','delivery_lease_lost');}catch(error){attempted=false;throw error;}},...(reply?{replyToMessageId:replyId}:{}),...(target.threadId?{threadId:target.threadId}:{})}));if(!receipt)return;
    this.repository.finishDelivery(row.id,token,receipt.status,undefined,receipt.messageId,receipt.providerRequestId);
    this.diagnostics.event({stage:'outbox.send',phase:'point',outcome:receipt.status==='sent'?'success':'unknown',status:receipt.status,...(receipt.status==='unknown'?{reason:'delivery_unknown'}:{}),text:row.text});
   }catch(error){const status=!attempted?(error instanceof ChannelError&&error.code==='temporarily_unavailable'?'blocked':'failed'):error instanceof ChannelError&&['forbidden','unauthenticated','invalid_request','unsupported'].includes(error.code)?'failed':'unknown';this.diagnostics.event({stage:'outbox.send',phase:'point',outcome:status==='unknown'?'unknown':'failure',status,reason:status==='unknown'?'delivery_unknown':'send_failed',text:row.text,...diagnosticFailure(error)});if(!attempted&&error instanceof ChannelError&&error.code==='temporarily_unavailable')this.repository.finishDelivery(row.id,token,'blocked',safeError(error));else if(this.repository.deferDelivery&&(error instanceof ChannelError&&['rate_limited','temporarily_unavailable'].includes(error.code)||typeof error==='object'&&error!==null&&'details'in error&&[429,503].includes(Number((error as {details?:{httpStatus?:number}}).details?.httpStatus))))this.repository.deferDelivery(row.id,token,{safeToRetry:true,...(error instanceof ChannelError&&error.retryAfterMs!==undefined?{retryAfterMs:error.retryAfterMs}:{})});else this.repository.finishDelivery(row.id,token,status,safeError(error));}finally{clearInterval(renew);}

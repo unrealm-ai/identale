@@ -16,7 +16,7 @@ export const CONFIGURATION_MODULES = {
   permissions: ['entity_web_policies', 'entity_directory_policies', 'employee_handoff_policies', 'capability_packages'],
   models: ['model_profiles', 'model_catalog', 'entity_model_bindings', 'workspace_model_defaults', 'model_selection_epochs'],
   resources: ['skill_resource_versions', 'skill_resource_state', 'workspace_mcp_versions', 'workspace_mcp_state'],
-  channels: ['employee_group_sharing_rules', 'employee_channel_connections', 'employee_channel_directory_credentials', 'employee_channel_verification_events'],
+  channels: ['employee_group_sharing_rules', 'employee_channel_connections', 'employee_channel_verification_events','wecom_bot_contacts'],
   directory: ['directory_sync_tasks', 'directory_snapshot_users', 'directory_snapshot_aliases', 'directory_alias_projection_meta', 'directory_snapshot_departments', 'directory_sync_part_state'],
   triggers: ['trigger_bindings', 'trigger_credentials'],
 } as const;
@@ -31,7 +31,7 @@ export interface ConfigurationSnapshot {
   privateCredentials: { tables: { name: string; rows: ConfigurationRow[] }[] };
 }
 const allowedTables = new Set<string>(Object.values(CONFIGURATION_MODULES).flat());
-const privateTables = new Set(['employee_channel_connections', 'employee_channel_directory_credentials', 'trigger_credentials']);
+const privateTables = new Set(['employee_channel_connections', 'trigger_credentials']);
 const digest = (value: unknown) => createHash('sha256').update(JSON.stringify(value)).digest('hex');
 export function deriveRuntimeConfigurationKey(token: string): Buffer { return createHash('sha256').update('runtime-cache' + token).digest(); }
 function authorized(actual: string | undefined, token: string): boolean {
@@ -46,9 +46,8 @@ function jsonRecord(row: ConfigurationRow): Record<string, unknown> {
   if (!object(record)) throw Error('configuration_record_invalid');
   return record;
 }
-function credentialScope(name: string, record: Record<string, unknown>): (string | number)[] {
-  if (name === 'employee_channel_connections') return [String(record['workspaceId']), String(record['entityId']), String(record['id']), String(record['appId']), Number(record['authRevision'])];
-  return ['employee-shared-directory', String(record['workspaceId']), String(record['id']), String(record['corpId']), String(record['agentId']), Number(record['credentialRevision'])];
+function credentialScope(record: Record<string, unknown>): (string | number)[] {
+  return [String(record['workspaceId']), String(record['entityId']), String(record['id']), String(record['appId']), Number(record['authRevision'])];
 }
 function projectTable(name: string, rows: ConfigurationRow[], sourceVault: DirectoryCredentialVault, runtimeVault: DirectoryCredentialVault, triggerWorkspace: Map<string, string>): { rows: ConfigurationRow[]; privateRows?: ConfigurationRow[] } {
   const privateRows: ConfigurationRow[] = [];
@@ -56,10 +55,10 @@ function projectTable(name: string, rows: ConfigurationRow[], sourceVault: Direc
     const row = { ...source };
     if (name === 'model_profiles' || name === 'model_catalog') for (const key of ['ciphertext', 'nonce', 'tag']) row[key] = null;
     if (name === 'workspace_mcp_versions') { const record = jsonRecord(row); record['credential'] = null; row['record_json'] = JSON.stringify(record); }
-    if (name === 'employee_channel_connections' || name === 'employee_channel_directory_credentials') {
+    if (name === 'employee_channel_connections') {
       const record = jsonRecord(row), credential = record['credential'];
       if (!object(credential) || !['ciphertext', 'nonce', 'tag'].every(k => typeof credential[k] === 'string')) throw Error('configuration_credential_invalid');
-      const scope = credentialScope(name, record);
+      const scope = credentialScope(record);
       // A single unusable connection credential must not block unrelated employee configuration.
       // Preserve an explicitly undecryptable credential so its existing resolver fails closed locally.
       let restricted: SealedDirectoryCredential = { ciphertext: '', nonce: '', tag: '' };
@@ -178,7 +177,7 @@ function validateSnapshot(value: unknown): asserts value is ConfigurationSnapsho
     for (const row of table['rows']) {
       validateRow(row);
       if ((table['name'] === 'model_profiles' || table['name'] === 'model_catalog' || table['name'] === 'trigger_credentials') && ['ciphertext', 'nonce', 'tag'].some(key => row[key] !== null)) throw Error('configuration_credentials_invalid');
-      if (['workspace_mcp_versions', 'employee_channel_connections', 'employee_channel_directory_credentials'].includes(table['name']) && jsonRecord(row)['credential'] !== null) throw Error('configuration_credentials_invalid');
+      if (['workspace_mcp_versions', 'employee_channel_connections'].includes(table['name']) && jsonRecord(row)['credential'] !== null) throw Error('configuration_credentials_invalid');
     }
   }
   const privateSeen = new Set<string>();

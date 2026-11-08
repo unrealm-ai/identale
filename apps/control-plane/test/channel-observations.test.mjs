@@ -80,12 +80,10 @@ test('a stale snapshot arriving after report acceptance keeps candidate and chal
  assert.equal(f.runtime.service.verification('w','e','dingtalk').status,'observed');assert.equal(f.runtime.service.isVerificationEvent('c','event-1'),true);
 });
 
-test('official shared-directory scope revocation reports only reconfirmation downgrade, not credentials',async t=>{
- const binding={credentialId:'shared',corpId:'corp',agentId:'agent',sourceRevision:1,credentialRevision:1,scopeRevision:'original',status:'confirmed',assertion:{evidence:'admin_asserted',actorId:'u',confirmedAt:1,botId:'app',corpId:'corp',credentialRevision:1}};
- const f=fixture(t,r=>({...r,provider:'wecom',directoryBinding:binding})),old=f.runtime.repository.byId('c');
- const {verification,...base}=old;
- assert.equal(f.runtime.repository.save({...base,sourceId:'revoked-source',revision:old.revision+1,directoryStatus:'unavailable',status:'pending_verification',inboundVerified:false,lastError:'directory_scope_changed',directoryBinding:{...binding,status:'reconfirmation_required',sourceRevision:2}},old),true);
- await f.reporter.flush();const current=f.platform.repository.byId('c');assert.equal(current.directoryBinding.status,'reconfirmation_required');assert.equal(current.sourceId,'revoked-source');assert.equal(current.directoryStatus,'unavailable');assert.deepEqual(current.credential,old.credential);assert.equal(current.enabled,true);assert.equal(current.authRevision,old.authRevision);assert.equal(current.verification,undefined);
+test('runtime observation cannot change a bot source or reintroduce a traditional directory binding',t=>{
+ const f=fixture(t),old=f.runtime.repository.byId('c');
+ assert.throws(()=>f.runtime.repository.save({...old,sourceId:'changed'},old),/runtime_channel_configuration_readonly/);
+ assert.equal(f.platform.repository.byId('c').sourceId,old.sourceId);
 });
 test('pending durable reports survive runtime restart without persisting platform configuration',async t=>{
  const f=fixture(t),old=f.runtime.repository.byId('c');f.runtime.repository.save({...old,inboundVerified:true},old);
@@ -100,4 +98,16 @@ test('a rejected parent observation prevents dependent challenge markers from cr
  // Another legitimate observer wins the same next state version with a different candidate.
  f.platform.service.recordVerifiedCandidate('c','3',{...candidate,eventId:'other-event',messageId:'other-message',botId:'other-bot'});
  await f.reporter.flush();assert.equal(f.platform.service.isVerificationEvent('c','event-1'),false);assert.equal(f.platform.service.isVerificationEvent('c','other-event'),true);assert.equal(f.sent.length,1);assert.ok(f.reporter.status().every(r=>r.status==='conflict'));assert.equal(f.platform.repository.byId('c').stateVersion,current.stateVersion+1);
+});
+
+test('I06 automatic first inbound observation reaches the platform without changing the live configuration revision',async t=>{
+ const f=fixture(t),before=f.runtime.repository.byId('c');
+ f.runtime.service.observeFirstInbound('c',{appId:'app',botId:'bot',tenantId:'corp',tenantNamespace:'corp_id',robotCode:'distinct-code'});
+ assert.equal(f.runtime.repository.byId('c').revision,before.revision);
+ assert.equal(f.runtime.repository.byId('c').status,'verified');
+ f.lose();await f.reporter.flush();await f.reporter.flush();
+ const after=f.platform.repository.byId('c');
+ assert.equal(after.eventTenantId,'corp');assert.equal(after.botId,'bot');assert.equal(after.revision,before.revision);
+ assert.equal(after.stateVersion,before.stateVersion+1);
+ assert.equal(f.platform.store.one('SELECT count(*) n FROM channel_observation_receipts').n,1);
 });

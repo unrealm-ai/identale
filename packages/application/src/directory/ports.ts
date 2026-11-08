@@ -53,6 +53,12 @@ export interface DirectoryPort {
   listDepartmentMembers(departmentId:string,cursor?:string):Promise<DirectoryPage<DirectoryPerson>>;
   getUser(id:DirectoryExternalId):Promise<DirectoryPerson>;
 }
+export interface DirectoryMemberSearch {
+  search(keywords: readonly string[]): Promise<{
+    members: readonly {id:string;displayName:string;departmentPaths:readonly string[]}[];
+    limited:boolean;
+  }>;
+}
 export type DirectoryErrorCode='authentication_failed'|'authorization_denied'|'invalid_response'|'unavailable'|'unsupported'|'limit_exceeded';
 export class DirectoryError extends Error {
   constructor(readonly code:DirectoryErrorCode){super(code);}
@@ -67,5 +73,8 @@ export interface DirectorySubjectRef {
 export interface DirectoryAccessRule extends DirectorySubjectRef {
   conversationKinds:readonly ('private'|'group'|'meeting')[];
 }
-export interface DirectoryAccessConfig {allowGroupMembers?:boolean;allow:readonly DirectoryAccessRule[];deny:readonly DirectoryAccessRule[];revision:number}
+export interface DirectoryChannelPolicy {sourceId:string;mode:'all'|'allowlist'|'denylist';allow:readonly DirectoryAccessRule[];deny:readonly DirectoryAccessRule[];allowGroupMembers?:boolean;revision:number}
+/** Package rules only narrow this source's effective employee policy. */
+export interface DirectoryPackageChannelPolicy {sourceId:string;mode:'inherit'|'allowlist'|'denylist';allow:readonly DirectoryAccessRule[];deny:readonly DirectoryAccessRule[];/** Preserve legacy inherited allow-list unknown-fact checks until the source mode is explicitly changed. */legacyAllowCheck?:true}
+export interface DirectoryAccessConfig {channelPolicies?:readonly DirectoryChannelPolicy[];allowGroupMembers?:boolean;allow:readonly DirectoryAccessRule[];deny:readonly DirectoryAccessRule[];revision:number}
 

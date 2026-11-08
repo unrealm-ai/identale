@@ -40,7 +40,7 @@ export function resolveChannelConfigurationCapabilities(
     directedGroupMessages:gate(conversation?.directedBotMessageEvents??(record.provider==='wecom'?bot:unsupported('此渠道按真实 @ 事件处理。'))),
     ordinaryGroupMessages:gate(ordinary),keywordTriggers:gate(ordinary),recentGroupContext:gate(ordinary),
     ...(media?{media:{inbound:mapMedia('inbound'),outbound:mapMedia('outbound')}}:{}),
-    directoryRead:{supported:true,availability:record.directoryStatus==='available'?'available':'authorization_required',reason:record.directoryStatus==='available'?'仅覆盖目录授权范围；不代表消息或业务资料权限。':record.provider==='wecom'?'请关联独立目录应用并确认同企业与可见范围。':'请验证目录权限与可见范围。'},
+    directoryRead:record.provider==='wecom'?{supported:true,availability:'unknown',reason:'使用机器人凭据搜索成员；不支持部门或全量目录，搜索状态须单独核验。'}:{supported:true,availability:record.directoryStatus==='available'?'available':'authorization_required',reason:record.directoryStatus==='available'?'仅覆盖目录授权范围；不代表消息或业务资料权限。':'请验证目录权限与可见范围。'},
     meetingRead:business?.meetingRead??businessDefault('meeting'),documentRead:business?.documentRead??businessDefault('document'),
   };
 }

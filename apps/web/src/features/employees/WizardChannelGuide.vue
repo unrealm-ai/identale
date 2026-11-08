@@ -47,9 +47,8 @@ watch(() => props.provider, () => { current.value = props.editing ? guide.value.
         <p class="guide-location">{{ item.location }}</p>
         <p v-for="paragraph in item.paragraphs" :key="paragraph">{{ paragraph }}</p>
         <NButton v-if="item.action" tag="a" :href="item.action.url" target="_blank" rel="noopener noreferrer" secondary>{{ item.action.title }} ↗</NButton>
-        <div v-if="item.id === 'directory'" class="credential-fields"><slot name="directory" /></div>
         <div v-if="item.id === 'credentials'" class="credential-fields"><slot name="credentials" /></div>
-        <ChannelPermissionBlocks v-if="item.id === 'validate' && !report" :provider="provider" />
+        <ChannelPermissionBlocks v-if="item.id === 'validate' && !report && provider !== 'wecom'" :provider="provider" />
         <div v-if="item.id === 'validate'" class="credential-fields"><slot name="validation" /></div>
         <figure v-for="figure in item.figures" :key="figure.src" class="guide-figure">
           <img :src="figure.src" :alt="figure.alt" loading="lazy" />

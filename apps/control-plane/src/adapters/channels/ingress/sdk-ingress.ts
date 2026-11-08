@@ -78,8 +78,20 @@ export class SdkIngress implements ChannelIngressPort {
       }
       if(message.type==='send_result'&&message.requestId){
         const pending=this.sends.get(message.requestId);if(!pending)return;this.sends.delete(message.requestId);clearTimeout(pending.timer);
-        if(message.receipt&&message.receipt.status==='accepted'&&message.receipt.idempotent===false)pending.resolve({status:'accepted',idempotent:false,...(typeof message.receipt.providerRequestId==='string'&&message.receipt.providerRequestId.length<=256?{providerRequestId:message.receipt.providerRequestId}:{})});
-        else pending.reject(new ChannelError(message.error==='not_ready'?'not_ready':message.error==='invalid_request'?'invalid_request':message.error==='rate_limited'?'rate_limited':message.error==='temporarily_unavailable'?'temporarily_unavailable':message.error==='forbidden'?'forbidden':'delivery_unknown'));
+        if(message.receipt){
+          const receipt=message.receipt,requestId=receipt.providerRequestId;
+          // Success must belong to the committed request on this live runner.
+          // Only WeCom's business ACK is sent; other providers' accepted stays
+          // accepted. Never manufacture a message ID from a transport req_id.
+          const validStatus=receipt.status==='accepted'||(this.session.provider==='wecom'&&receipt.status==='sent');
+          const validRequestId=typeof requestId==='string'&&requestId.length>0&&requestId.length<=256&&!/[\x00-\x20\x7f]/.test(requestId);
+          if(!pending.committed||!child.connected||this.current.state!=='connected'||Date.now()>=pending.deadline||message.hash!==pending.hash||message.deadline!==pending.deadline||message.error!==undefined||!validStatus||receipt.idempotent!==false||receipt.messageId!==undefined||(receipt.status==='sent'?!validRequestId:requestId!==undefined&&!validRequestId)){
+            pending.reject(new ChannelError(pending.committed?'delivery_unknown':'temporarily_unavailable'));return;
+          }
+          // assertSendAllowed is a pre-dispatch hook: callers may record that
+          // nothing was sent when it throws. Do not rerun it after a real ACK.
+          pending.resolve({status:receipt.status,idempotent:false,...(validRequestId?{providerRequestId:requestId}:{})});
+        }else pending.reject(new ChannelError(message.error==='not_ready'?'not_ready':message.error==='invalid_request'?'invalid_request':message.error==='rate_limited'?'rate_limited':message.error==='temporarily_unavailable'?'temporarily_unavailable':message.error==='forbidden'?'forbidden':'delivery_unknown'));
         return;
       }
       if (message.type === 'status' && message.status && states.has(message.status.state)) {

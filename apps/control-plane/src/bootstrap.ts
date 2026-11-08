@@ -275,7 +275,7 @@ export async function bootstrap(server: FastifyInstance, config: ControlPlaneCon
     server.decorate('passiveRuntime',hostRuntime);
     store.db.exec('CREATE TABLE IF NOT EXISTS message_asset_task_selection(task_id TEXT PRIMARY KEY,ids_json TEXT NOT NULL)');
     const taskAuthorization=new ChannelTaskAuthorization(store,capabilities,employeeChannels,config.now,diagnostics,sharing);
-    if(config.split?.assertNewAdmission){const resolve=taskAuthorization.resolveForTask.bind(taskAuthorization);taskAuthorization.resolveForTask=scope=>{config.split!.assertNewAdmission!();return resolve(scope);};}
+    if(config.split?.assertNewAdmission){const resolve=taskAuthorization.resolveForTask.bind(taskAuthorization);taskAuthorization.resolveForTask=(scope,admission)=>{config.split!.assertNewAdmission!();return resolve(scope,admission);};}
     tasks = new TaskService(new SqliteTaskRepository(store), config.now, hostRuntime ?? config.runtime, taskAuthorization, new SqliteTaskRuntimeContextRetention(store), conversations, config.modelClient||config.modelClientForScope?undefined:scope=>{profiles.assertUsable(scope.workspaceId,scope.entityId);});
     const artifactRuntime=hostRuntime??config.runtime;
     const taskArtifacts=artifactRuntime?.artifacts&&artifactRuntime.artifactContent?new TaskArtifacts(store,tasks,{artifacts:artifactRuntime.artifacts.bind(artifactRuntime),artifactContent:artifactRuntime.artifactContent.bind(artifactRuntime)},(run,target)=>assets.assertBusinessOutputForRun(run,target)):undefined;

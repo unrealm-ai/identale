@@ -33,6 +33,7 @@ function choose(s:Selection,target:boolean,checked:boolean){if(!edit.value||busy
 function otherApp(s:Selection){return[...(edit.value?.sources??[]),...(edit.value?.targets??[])].some(r=>r.ref.connectionId!==s.ref.connectionId);}
 function close(){if(busy.value||unknown.value)return;confirmDiscard.value=true;}
 function discard(){edit.value=null;confirmDiscard.value=false;candidateGeneration++;}
+defineExpose({discard});
 function commit(){if(!valid.value||!edit.value||busy.value||unknown.value)return;const rules=clone(config.value.rules);if(editingIndex.value<0)rules.push(edit.value);else rules[editingIndex.value]=edit.value;void save(rules);}
 function toggle(index:number,enabled:boolean){if(busy.value||edit.value||unknown.value||props.disabled)return;const rules=clone(config.value.rules);rules[index]!.enabled=enabled;void save(rules);}
 watch(()=>props.base,()=>{generation++;candidateGeneration++;edit.value=null;loaded.value=false;applied.value=null;void load();});
@@ -40,7 +41,7 @@ onBeforeUnmount(()=>{generation++;candidateGeneration++;abort.abort();emit('dirt
 </script>
 <template>
  <section class="group-sharing form-section" aria-label="群消息共享">
-  <header class="sharing-heading"><div><h3>群消息共享<InfoHint label="群共享规则说明">默认不同群和私聊隔离。仅选定的群互通，或将选定源群提供给指定群或个人私聊。共享用于按需读取，不自动转发；不传递授权。仅支持同一飞书应用的文本历史。</InfoHint></h3><p class="field-note">按需配置同一飞书应用内的跨群或定向消息历史共享规则。</p></div><NButton :disabled="disabled||busy||!loaded||unknown" type="primary" @click="open()">新增共享规则</NButton></header>
+  <header class="sharing-heading"><div><h3>群消息共享<InfoHint label="群共享规则说明">默认不同群和私聊隔离。仅选定的群互通，或将选定源群提供给指定群或个人私聊。共享用于按需读取，不自动转发；不传递授权。仅支持同一飞书应用的文本历史。</InfoHint></h3><p class="field-note">这是不同群之间的上下文隔离与共享配置，不是员工使用范围。默认不共享；仅限同一飞书应用，其他渠道身份互不共享。</p></div><NButton :disabled="disabled||busy||!loaded||unknown" type="primary" @click="open()">新增共享规则</NButton></header>
   <NAlert v-if="error" type="error" role="alert">{{error}}<NButton :disabled="busy" @click="load">刷新并核对</NButton></NAlert>
   <NAlert v-if="unknown" type="warning" role="status">保存结果尚未确认，请先刷新核对，不要重复提交。</NAlert>
   <p v-if="notice" role="status">{{notice}}</p>

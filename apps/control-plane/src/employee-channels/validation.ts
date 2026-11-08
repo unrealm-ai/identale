@@ -26,6 +26,13 @@ export const validationOf = (error: unknown): ChannelValidation | undefined => e
 export function validationReport(provider: DirectoryProvider, checks: ChannelCheck[], now: () => number = Date.now): ChannelValidation {
   return { version: 1, provider, checkedAt: now(), canContinue: checks.filter(c => c.required).every(c => c.status === 'pass'), checks: structuredClone(checks) };
 }
+/** Saving bot credentials is format validation only. The sole ingress connection authenticates after creation. */
+export function wecomBotValidation(now:()=>number=Date.now):ChannelValidation {
+  return validationReport('wecom',[
+    {id:'credentials',required:false,supported:true,status:'unverified',reason:'after_creation'},
+    {id:'bot_identity',required:false,supported:true,status:'unverified',reason:'after_creation'},
+  ],now);
+}
 export function channelChecks(provider: DirectoryProvider): ChannelCheck[] {
   const required = (id: ChannelCheckId): ChannelCheck => ({ id, required: true, supported: true, status: 'unverified', reason: 'prerequisite' });
   return [required('credentials'), { ...required('bot_identity'), ...(provider !== 'feishu' ? { required: false, reason: 'after_creation' as const } : {}) },

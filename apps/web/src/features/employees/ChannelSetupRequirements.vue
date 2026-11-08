@@ -12,13 +12,13 @@ defineProps<{provider:DirectoryProvider}>();
     <details><summary>可选：群上下文与会议材料权限</summary><p>普通群消息需 <code>im:message.group_msg</code>；群历史基础读取满足 <code>im:message:readonly</code>、<code>im:message</code>、<code>im:message.history:readonly</code> 任一，并确保机器人在目标群中。</p><p>妙记逐字稿：<code>minutes:minutes.transcript:export</code>；已有纪要：<code>minutes:minutes.artifacts:read</code>。需同时拥有具体材料访问权。</p></details>
   </template>
   <template v-else-if="provider==='dingtalk'">
-    <ul><li>创建企业内部应用并启用机器人，使用 Stream 接收私聊和群 @ 消息，不使用群自定义 Webhook。</li><li>机器人主动发送：<code>qyapi_robot_sendmsg</code>。Stream 在线不代表已获发送权限。</li><li>读取部门、部门成员和成员详情：<code>qyapi_get_department_list</code>、<code>qyapi_get_department_member</code>、<code>qyapi_get_member</code>；同时设置应用可见部门/人员范围，核对必要的上级部门。</li><li>按官方要求完成审批和版本发布，再将机器人加入测试群；机器人身份通过已认证入站挑战确认。</li></ul>
+    <ul><li>创建企业内部应用并启用机器人，使用 Stream 接收私聊和群 @ 消息，不使用群自定义 Webhook。</li><li>机器人主动发送：<code>qyapi_robot_sendmsg</code>。Stream 在线不代表已获发送权限。</li><li>读取部门、部门成员和成员详情：<code>qyapi_get_department_list</code>、<code>qyapi_get_department_member</code>、<code>qyapi_get_member</code>；同时设置应用可见部门/人员范围，核对必要的上级部门。</li><li>按官方要求完成审批和版本发布，再将机器人加入测试群；首条通过校验的真实消息自动确认机器人身份。</li></ul>
     <p class="field-note">权限名称以当前控制台为准，验证结果以实际读取为准。基础姓名/部门接入不要求手机号、邮箱或流式卡片权限。</p>
     <p class="field-note">普通群消息不在当前员工机器人接入能力内。群历史和会议材料不在当前接入能力内。</p>
   </template>
   <template v-else>
-    <ul><li>消息：启用智能机器人 API 长连接，使用 BotID / Secret；同一机器人仅交给一个服务维持连接，不与 URL 回调同时使用。</li><li>通讯录：传统自建应用的 CorpID / AgentId / Secret，单独配置部门/人员可见范围及姓名读取。此目录应用可在同一工作区复用，每位数字员工仍使用独立机器人。</li><li>按自建应用后台要求设置可信 IP，填写服务实际公网出口 IP；这不是机器人长连接配置，也不是本机内网 IP。</li></ul>
-    <p class="field-note">当前目录适配不支持标签范围，请直接选择部门或人员。保存后分别核对目录读取、同企业声明与机器人入站身份；目录成功不等于消息收发已通过。</p>
+    <ul><li>启用智能机器人 API 长连接，仅需 BotID / Secret。同一机器人仅由一个服务维持连接，不与 URL 回调同时使用。</li><li>新建默认空白名单，群内可用；私聊需加入白名单或切换全员 + 黑名单。可独立设置仅允许名单或排除名单；成员搜索直接使用机器人凭据。</li></ul>
+    <p class="field-note">长连接在线后，首条通过校验的真实消息自动确认身份。使用范围不代表公司全量员工，也不按内外部联系人身份排除。</p>
   </template>
 </section>
 </template>

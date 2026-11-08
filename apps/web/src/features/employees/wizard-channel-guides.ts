@@ -31,17 +31,13 @@ export const wizardChannelGuides: Record<DirectoryProvider, WizardChannelGuide> 
     ], action: { title: '打开权限与发布后台', url: consoles.dingtalk }, figures: [diagram('credentials-to-draft', '应用凭据先在临时草稿验证，最后确认创建才保存。')] },
   ] },
   wecom: { title: '企业微信', consoleUrl: consoles.wecom, steps: [
-    { id: 'directory', title: '配置并验证通讯录应用', location: '管理后台 → 应用管理 → 传统自建应用', paragraphs: [
-      '已有目录应用可直接选择复用，跳过创建。新应用需 Corp ID、数字 Agent ID 和应用 Secret，与机器人凭据分开。',
-      '在此应用配置可见部门/人员及必要读取能力，按后台要求设置可信 IP。单独验证目录范围和成员姓名后，再配置机器人；不使用通讯录同步 Secret 替代。',
-    ], action: { title: '打开企业微信应用管理', url: consoles.wecom }, figures: [diagram('wecom-bot-directory', '企业微信双应用示意：先单独验证传统目录应用，再配置独立智能机器人。')] },
     { id: 'credentials', title: '创建智能机器人，填入凭据', location: '企业微信 → 智能机器人 → API / 长连接配置', paragraphs: [
       '为本员工创建独立智能机器人，复制 BotID 和 Secret。使用官方 WebSocket 长连接，无需公网回调或群 Webhook。',
-      '确认机器人与第一步所选目录应用属于同一企业。该关系由管理员声明，机器人真实入站身份在最终保存后另行验证。',
-    ], action: { title: '打开企业微信管理后台', url: consoles.wecom }, figures: [diagram('credentials-to-draft', '目录应用与机器人使用两套凭据，不可混用。')] },
-    { id: 'validate', title: '核对范围，完成接入验证', location: '核对同企业关系与目录结果 → 验证临时渠道草稿', paragraphs: [
-      '必要目录与姓名读取通过后才能进入能力包。范围或凭据变化需重新验证；企业微信按实际应用可见范围和可信 IP 配置，不要求飞书式版本发布。',
-      '当前不支持群历史或会议材料。最后确认才保存并启动连接；系统不发送测试消息。',
-    ] },
+      '创建后可在渠道使用范围中用机器人凭据搜索成员，配置允许或排除名单。',
+    ], action: { title: '打开企业微信管理后台', url: consoles.wecom } },
+    { id: 'validate', title: '检查机器人配置', location: '检查临时草稿 → 确认创建后启动长连接', paragraphs: [
+      '新建默认空白名单，群内可用；私聊需加入白名单或切换全员 + 黑名单。连接在线后，首条通过校验的真实消息会自动确认机器人身份。',
+      '当前不支持群历史或会议材料。',
+    ], figures: [diagram('credentials-to-draft', '机器人凭据先进入临时草稿，最后确认创建才保存。')] },
   ] },
 };

@@ -37,6 +37,49 @@ export class SqliteMessageLoopRepository implements MessageLoopRepository {
  setTaskDeliveryPolicy(policy:NonNullable<SqliteMessageLoopRepository['taskPolicy']>){this.taskPolicy=policy;}
  async refreshDeliveryAuthorization(row:ChannelDeliveryRow){await this.taskPolicy?.refresh(row);}
  assertDeliveryAuthorization(row:ChannelDeliveryRow){this.taskPolicy?.assert(row);}
+ /** No caller-supplied flag grants a target. Join durable publications back to the task. */
+ originatingTaskScope(input:ChannelDeliveryRow){
+  let row=input;
+  const persisted=this.store.one<{scope_json:string;target_json:string;task_delivery_id:string|null;text:string}>('SELECT scope_json,target_json,task_delivery_id,text FROM channel_deliveries WHERE id=?',input.id);
+  if(!persisted||persisted.scope_json!==input.scopeJson||persisted.target_json!==input.targetJson||persisted.task_delivery_id!==input.taskDeliveryId||persisted.text!==input.text)return;
+  const hasTable=(name:string)=>!!this.store.one("SELECT name FROM sqlite_master WHERE type='table' AND name=?",name);
+  const target=JSON.parse(input.targetJson);
+  if(target.artifact){
+   if(!hasTable('task_artifact_delivery_grants'))return;
+   const grant=this.store.one<{scope_hash:string;target_hash:string;parent_json:string}>('SELECT scope_hash,target_hash,parent_json FROM task_artifact_delivery_grants WHERE delivery_id=?',input.id);
+   const digest=(value:string)=>createHash('sha256').update(JSON.stringify(value)).digest('hex');
+   if(!grant||grant.scope_hash!==digest(input.scopeJson)||grant.target_hash!==digest(input.targetJson))return;
+   row=JSON.parse(grant.parent_json)as ChannelDeliveryRow;
+   if(row.scopeJson!==input.scopeJson)return;
+   const parent=JSON.parse(row.targetJson);
+   if(JSON.stringify(parent.conversation)!==JSON.stringify(target.conversation)||parent.replyToMessageId!==target.replyToMessageId||parent.threadId!==target.threadId)return;
+  }
+  const scope=scopeFromJson(row.scopeJson);
+  if(!scope.source||scope.source.channelType!=='wecom'||scope.source.conversationKind!=='private')return;
+  let taskId:string|undefined,runId:string|undefined;
+  if(row.taskDeliveryId!==null){
+   const delivery=this.store.one<{task_id:string;text:string}>('SELECT task_id,text FROM deliveries WHERE id=?',row.taskDeliveryId);
+   if(!delivery||delivery.text!==row.text)return;
+   taskId=delivery.task_id;
+  }else if(hasTable('task_completion_notifications')){
+   // Explicit publisher-written relation, never a model correlation or ID prefix.
+   if(!this.store.all<{name:string}>('PRAGMA table_info(task_completion_notifications)').some(c=>c.name==='delivery_id'))return;
+   const notice=this.store.one<{task_id:string;run_id:string;scope_json:string;status:string}>('SELECT task_id,run_id,scope_json,status FROM task_completion_notifications WHERE delivery_id=?',row.id);
+   if(!notice||notice.status!=='succeeded'||notice.scope_json!==row.scopeJson)return;
+   taskId=notice.task_id;runId=notice.run_id;
+   if(hasTable('business_notification_jobs')){
+    const job=this.store.one<{source_kind?:string;task_id?:string;run_id?:string;scope_json?:string;target_json?:string;state?:string}>('SELECT * FROM business_notification_jobs WHERE id=?',row.id);
+    if(job&&(job.source_kind!=='task'||job.task_id!==taskId||job.run_id!==runId||job.scope_json!==row.scopeJson||job.target_json!==row.targetJson||job.state!=='published'))return;
+   }
+  }
+  if(!taskId)return;
+  const task=this.store.one<{workspace_id:string;entity_id:string;source_json:string;run_id:string|null}>('SELECT workspace_id,entity_id,source_json,run_id FROM tasks WHERE id=?',taskId);
+  if(!task||task.workspace_id!==scope.workspaceId||task.entity_id!==scope.entityId||runId&&task.run_id!==runId)return;
+  const original=scopeFromJson(task.source_json);
+  if(JSON.stringify(original)!==JSON.stringify(scope))return;
+  return original;
+ }
+
  setClaimFilter(fn:(id:string)=>boolean){this.claimFilter=fn;}
  registerRetentionSweep(name:string,sweep:(now:number,limit:number)=>{deleted:number;more:boolean}){if(!/^[a-z][a-z0-9_.-]{0,63}$/.test(name))throw Error('Invalid retention sweep');this.retentionSweeps.set(name,sweep);}
  setRetentionReferenceGuard(fn:(kind:'inbox'|'outbox',id:string)=>boolean){this.referenceGuard=fn;}

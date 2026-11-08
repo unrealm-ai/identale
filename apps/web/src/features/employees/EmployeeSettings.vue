@@ -16,7 +16,6 @@ import StatusBadge from '../../shared/ui/StatusBadge.vue';
 import EmployeeIdentityFields from './EmployeeIdentityFields.vue';
 import EmployeeConfigurationReadOnly from './EmployeeConfigurationReadOnly.vue';
 import ChannelConnections from './ChannelConnections.vue';
-import GroupSharingSettings from './GroupSharingSettings.vue';
 import HandoffAccessSettings from './HandoffAccessSettings.vue';
 import {useWorkItemBeta} from '../work-items/useWorkItemBeta';
 import AccessSettings from './AccessSettings.vue';
@@ -30,15 +29,15 @@ const { avatarPreset,canManage, base, name, description, executionThinkingLevel,
 const workItemBeta=useWorkItemBeta(()=>base.value,()=>emit('sessionExpired'));
 const handoffBusy=ref(false),handoffDirty=ref(false);
 const statusRefresh=ref(0);watch(error,value=>{if(value)statusRefresh.value++;});
-const humanBusy=ref(false),humanDirty=ref(false),sharingBusy=ref(false),sharingDirty=ref(false);
+const humanBusy=ref(false),humanDirty=ref(false),channelBindingsVersion=ref(0);
 const triggerBusy=ref(false),modelDirty=ref(false),confirmLeave=ref(false),channelDirty=ref(false),editDetails=ref(false),confirmDetails=ref(false);
 const basicDirty=computed(()=>avatarPreset.value!==(props.entity.avatarPreset??null)||name.value!==props.entity.name||description.value!==(props.entity.description??''));
 const sections=[{value:'overview',label:'概览'},{value:'chat',label:'对话'},{value:'tasks',label:'任务'},{value:'capabilities',label:'能力包'},{value:'channels',label:'渠道'},{value:'automation',label:'触发器'},{value:'model',label:'模型'}];
 function normalizeSection(value?:string){return sections.some(s=>s.value===value)?value!:'overview';}
 const tab=ref(props.embedded?'channels':normalizeSection(props.section));
 const webAccess=useWebChatAccess(()=>base.value,()=>canManage.value&&tab.value==='overview',()=>{statusRefresh.value++;emit('configurationChanged');},()=>emit('sessionExpired'));
-const dirty=computed(()=>handoffDirty.value||sharingDirty.value||humanDirty.value||basicDirty.value||modelDirty.value||webAccess.dirty||channelDirty.value);
-const busy=computed(()=>handoffBusy.value||sharingBusy.value||humanBusy.value||settingsBusy.value||triggerBusy.value||webAccess.saving);
+const dirty=computed(()=>handoffDirty.value||humanDirty.value||basicDirty.value||modelDirty.value||webAccess.dirty||channelDirty.value);
+const busy=computed(()=>handoffBusy.value||humanBusy.value||settingsBusy.value||triggerBusy.value||webAccess.saving);
 watch([busy,dirty], () => emit('busyChanged', busy.value || dirty.value), { flush: 'sync' });
 watch(dirty, value => { if (!value) confirmLeave.value = false; });
 const webCard=ref<HTMLElement|null>(null);
@@ -83,8 +82,8 @@ function discardAndClose(){if(busy.value)return;emit('busyChanged',false);if(lea
       <NTabPane key="overview" name="overview" tab="概览" :tab-props="tabProps('overview')" v-bind="panelProps('overview')" display-directive="show:lazy"><EmployeeOverview @dirty-changed="v=>humanDirty=v" @busy-changed="v=>humanBusy=v" :base="base" :refresh-key="`${entity.lifecycleRevision??1}:${statusRefresh}`" @status-read="v=>{if(v.lifecycleRevision!==entity.lifecycleRevision||v.enabled!==entity.enabled)emit('entityUpdated',{...entity,...v})}" :can-manage="canManage" @status="statusConfirm=true" @section="selectSection" @chat="tab='chat'"><template #web-access><div ref="webCard" class="overview-web-access"><WebChatAccessSettings :state="webAccess" :disabled="saving||triggerBusy"/><HandoffAccessSettings v-if="workItemBeta.enabled.value" :base="base" :disabled="saving||triggerBusy||webAccess.saving" @busy-changed="v=>handoffBusy=v" @dirty-changed="v=>handoffDirty=v" @changed="emit('configurationChanged')" @session-expired="emit('sessionExpired')"/></div></template></EmployeeOverview></NTabPane>
       <NTabPane key="chat" name="chat" tab="对话" :tab-props="tabProps('chat')" v-bind="panelProps('chat')" display-directive="if"><EntityWorkspace :key="base" :entity="entity" :workspace="workspace" embedded v-bind="selectedConversationId?{initialConversationId:selectedConversationId}:{}" @close="requestNavigation('recent')" @session-expired="emit('sessionExpired')" @edit-settings="tab='overview'" @entity-updated="v=>emit('entityUpdated',v)" @conversation-selected="conversationSelected" @open-tasks="id=>{conversationSelected(id);tab='tasks'}"/></NTabPane>
       <NTabPane key="tasks" name="tasks" tab="任务" :tab-props="tabProps('tasks')" v-bind="panelProps('tasks')" display-directive="if"><EmployeeTasks :key="base" :entity="entity" :workspace="workspace" :conversation-id="selectedConversationId" embedded @session-expired="emit('sessionExpired')" @conversation-selected="conversationSelected" @open-conversation="openConversation"/></NTabPane>
-      <NTabPane key="capabilities" name="capabilities" tab="能力包" :tab-props="tabProps('capabilities')" v-bind="panelProps('capabilities')" display-directive="show:lazy"><AccessSettings :key="`${base}:capabilities`" :base="base" section="capabilities" @busy-changed="v=>accessBusy=v" @changed="emit('configurationChanged')" @session-expired="emit('sessionExpired')"/></NTabPane>
-      <NTabPane key="channels" name="channels" :tab-props="tabProps('channels')" v-bind="panelProps('channels')" tab="渠道" display-directive="show:lazy"><div class="employee-channels-stack"><ChannelConnections :key="base" @dirty-changed="v=>channelDirty=v" :base="base" :can-manage="canManage" :disabled="saving || triggerBusy" @busy-changed="v=>channelBusy=v" @changed="emit('configurationChanged')" @session-expired="emit('sessionExpired')"/><GroupSharingSettings :key="base+':sharing'" :base="base" :disabled="saving||triggerBusy||channelBusy" @busy-changed="v=>sharingBusy=v" @dirty-changed="v=>sharingDirty=v" @changed="emit('configurationChanged')" @session-expired="emit('sessionExpired')"/></div></NTabPane>
+      <NTabPane key="capabilities" name="capabilities" tab="能力包" :tab-props="tabProps('capabilities')" v-bind="panelProps('capabilities')" display-directive="show:lazy"><AccessSettings :key="`${base}:capabilities:${channelBindingsVersion}`" :base="base" section="capabilities" @busy-changed="v=>accessBusy=v" @changed="emit('configurationChanged')" @session-expired="emit('sessionExpired')"/></NTabPane>
+      <NTabPane key="channels" name="channels" :tab-props="tabProps('channels')" v-bind="panelProps('channels')" tab="渠道" display-directive="show:lazy"><div class="employee-channels-stack"><ChannelConnections @rebound="channelBindingsVersion++" :key="base" @dirty-changed="v=>channelDirty=v" :base="base" :can-manage="canManage" :disabled="saving || triggerBusy" @busy-changed="v=>channelBusy=v" @changed="emit('configurationChanged')" @session-expired="emit('sessionExpired')"/></div></NTabPane>
       <NTabPane key="automation" name="automation" tab="触发器" :tab-props="tabProps('automation')" v-bind="panelProps('automation')" display-directive="show:lazy"><TriggerSettings :key="base" :base="base" :disabled="saving||channelBusy" @busy-changed="v=>triggerBusy=v" @changed="emit('configurationChanged')" @session-expired="emit('sessionExpired')"/></NTabPane>
       <NTabPane key="model" name="model" tab="模型" :tab-props="tabProps('model')" v-bind="panelProps('model')" display-directive="show:lazy"><AtomicModelSettings :key="base" :base="base" :disabled="saving||triggerBusy" @busy-changed="v=>modelBusy=v" @dirty-changed="v=>modelDirty=v" @saved="v=>{executionThinkingLevel=v;emit('entityUpdated',{...entity,executionThinkingLevel:v})}" @session-expired="emit('sessionExpired')"/></NTabPane>
     </NTabs>

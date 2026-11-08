@@ -48,9 +48,10 @@ process.on('message', (value: unknown) => {
     const wire=message.request;
     let request:SendChannelMessage;
     try{request=decodeSend(wire);}catch{send({type:'send_result',generation,requestId,error:'invalid_request'});sends.delete(requestId);return;}
+    const deadline=message.deadline,hash=message.hash;
+    if(typeof deadline!=='number'||!Number.isSafeInteger(deadline)||deadline<=Date.now()||deadline>Date.now()+15_000||hash!==wireHash(wire)){send({type:'send_result',generation,requestId,error:'invalid_request'});sends.delete(requestId);return;}
+    request.assertSendAllowed=()=>{if(closing)throw new ChannelError('not_ready');if(Date.now()>=deadline)throw new ChannelError('temporarily_unavailable','channel_send_timeout');};
     if(request.attachment){
-      const deadline=message.deadline,hash=message.hash;
-      if(typeof deadline!=='number'||!Number.isSafeInteger(deadline)||deadline<=Date.now()||deadline>Date.now()+15_000||hash!==wireHash(wire)){send({type:'send_result',generation,requestId,error:'invalid_request'});sends.delete(requestId);return;}
       request.beforeSend=()=>new Promise<void>((resolve,reject)=>{
         if(closing){reject(new ChannelError('not_ready'));return;}
         if(Date.now()>=deadline){reject(new ChannelError('temporarily_unavailable','channel_send_timeout'));return;}
@@ -58,9 +59,8 @@ process.on('message', (value: unknown) => {
         commits.set(requestId,{nonce,hash,deadline,resolve,reject,timer});
         send({type:'send_prepared',generation,requestId,nonce,hash,deadline});
       });
-      request.assertSendAllowed=()=>{if(closing)throw new ChannelError('not_ready');if(Date.now()>=deadline)throw new ChannelError('temporarily_unavailable','channel_send_timeout');};
     }
-    void client.send(request).then(receipt=>send({type:'send_result',generation,requestId,receipt}),error=>send({type:'send_result',generation,requestId,error:error instanceof ChannelError?error.code:'delivery_unknown'})).finally(()=>sends.delete(requestId));
+    void client.send(request).then(receipt=>send({type:'send_result',generation,requestId,hash,deadline,receipt}),error=>send({type:'send_result',generation,requestId,error:error instanceof ChannelError?error.code:'delivery_unknown'})).finally(()=>sends.delete(requestId));
     return;
   }
   if (message.type === 'ack' && message.generation === generation && message.requestId) {

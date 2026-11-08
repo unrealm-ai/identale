@@ -59,6 +59,24 @@ async function fixture(t,{model,history=false,meeting=false,describeActor,diagno
 }
 function ref(chat='group',kind='group',user='alice'){return{provider:'feishu',connectionId:'connection',tenantId:'tenant',kind:'conversation',externalId:chat,conversationKind:kind,...(kind==='private'?{privateRecipientId:user}:{})};}
 function event(id='message',user='alice',chat='group',mentioned=true,kind='group'){return{schemaVersion:1,eventId:'event-'+id,connectionId:'connection',tenantId:'tenant',receivedAt:1800000000000,origin:'live',message:{id,conversationKind:kind,conversation:ref(chat,kind,user),author:{externalId:user,idNamespace:'open_id',applicationId:'app',displayName:user,kind:'human',identityEvidence:'channel_verified'},occurredAt:1800000000000,text:'请帮我处理 '+id,mentions:mentioned?['bot']:[]}};}
+test('authorized WeCom private interaction output replies to the originating message',async t=>{
+ const f=await fixture(t,{channel:'wecom'}),incoming=event('wecom-private','alice','alice',false,'private');
+ incoming.message.conversation.provider='wecom';incoming.message.author.idNamespace='user_id';
+ await f.receive(incoming);await f.drain();
+ assert.equal(f.models.length,1);assert.equal(f.sent.length,1);
+ assert.equal(f.sent[0].text,'回答完成');assert.equal(f.sent[0].replyToMessageId,incoming.message.id);
+ assert.equal(f.sent[0].conversation.privateRecipientId,'alice');assert.equal(f.sent[0].originatingTaskScope,undefined);
+});
+for(const denied of [false,true])test(`WeCom callback capability loss never falls back to proactive send (denied=${denied})`,async t=>{
+ const f=await fixture(t,{channel:'wecom'}),incoming=event('wecom-no-callback','alice','alice',false,'private');
+ incoming.message.conversation.provider='wecom';incoming.message.author.idNamespace='user_id';
+ if(denied)f.denied.add('alice');
+ const inspect=f.binding.conversation.inspectCapabilities;
+ f.binding.conversation.inspectCapabilities=async()=>({...await inspect(),replyToMessage:{supported:false,availability:'unsupported'}});
+ await f.receive(incoming);await f.drain();
+ assert.equal(f.sent.length,0);assert.equal(f.models.length,denied?0:1);
+ assert.equal(f.store.one("SELECT status FROM channel_message_receipts WHERE kind='outbox'").status,'failed');
+});
 test('diagnostics link generation and final delivery text without leaking model credentials',async t=>{
  const {log,rows}=await diagnosticFixture(t);const secret='SYNTHETIC_DIAGNOSTIC_PRIVATE_TOKEN',privateText='SYNTHETIC_DIAGNOSTIC_PRIVATE_BODY';
  const client=new OpenAICompatibleModelClient({endpoint:'https://example.invalid/v1',model:'fixture',secretRef:'fixture'},async()=>secret,async()=>new Response(JSON.stringify({choices:[{finish_reason:'stop',message:{content:privateText}}],usage:{prompt_tokens:1,completion_tokens:1}})),log);
@@ -152,6 +170,17 @@ test('task progress and final result route to original channel; delivery unknown
  const f=await fixture(t,{model:async(input)=>({...(input.messages.at(-1).role==='tool'?{text:'已受理'}:{toolCalls:[{id:'create',name:'task_create',arguments:{input:'后台业务'}}]}),usage:{inputTokens:3,outputTokens:3}})});await f.receive(event('task','alice','g'));await f.drain();await f.tasks.tick();assert.equal(f.commands.length,1);
  const task=f.store.one('SELECT * FROM tasks');f.tasks.ingest(task.run_id,{runId:task.run_id,eventId:'progress',sequence:1,type:'progress',text:'完成第一阶段'});await f.loop.tick();assert.equal(f.sent.at(-1).text,'完成第一阶段');assert.equal(f.sent.at(-1).conversation.externalId,'g');
  f.setUnknown(true);f.tasks.ingest(task.run_id,{runId:task.run_id,eventId:'final',sequence:2,type:'final_result',text:'业务结果',inputRevision:1});await f.loop.tick();const n=f.sent.length;await f.drain();assert.equal(f.sent.length,n);assert.equal(f.commands.length,1);assert.equal(f.store.one("SELECT status FROM deliveries WHERE event_id='final'").status,'channel_unknown');
+});
+test('WeCom long-task result uses the authorized private recipient after callback capability expires',async t=>{
+ const f=await fixture(t,{channel:'wecom',model:async input=>({...input.messages.at(-1).role==='tool'?{text:'已受理'}:{toolCalls:[{id:'create',name:'task_create',arguments:{input:'后台业务'}}]},usage:{inputTokens:3,outputTokens:3}})});
+ const incoming=event('wecom-long-task','alice','alice',false,'private');incoming.message.conversation.provider='wecom';incoming.message.author.idNamespace='user_id';
+ await f.receive(incoming);await f.drain();await f.tasks.tick();assert.equal(f.commands.length,1);
+ assert.equal(f.sent[0].replyToMessageId,incoming.message.id);
+ const inspect=f.binding.conversation.inspectCapabilities;
+ f.binding.conversation.inspectCapabilities=async()=>({...await inspect(),replyToMessage:{supported:false,availability:'unsupported'}});
+ const task=f.store.one('SELECT * FROM tasks');f.tasks.ingest(task.run_id,{runId:task.run_id,eventId:'final',sequence:1,type:'final_result',text:'业务结果',inputRevision:1});
+ await f.loop.tick();await f.drain();
+ const result=f.sent.find(r=>r.text==='业务结果');assert.ok(result);assert.equal(result.replyToMessageId,undefined);assert.equal(result.conversation.privateRecipientId,'alice');assert.equal(typeof result.originatingTaskScope,'function');assert.equal(f.sent[0].originatingTaskScope,undefined);assert.equal(f.commands.length,1);
 });
 test('durable inbox expired lease recovers; expired send lease becomes unknown, never resent',async t=>{
  const f=await fixture(t);await f.receive(event('persist'));const token='dead-worker';const row=f.repo.claimInbox(1800000000000,1800000000010,token);assert.ok(row);f.advance(20);await f.drain();assert.equal(f.sent.length,1);

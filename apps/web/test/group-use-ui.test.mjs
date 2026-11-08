@@ -32,16 +32,16 @@ const text = () => document.body.textContent;
 async function flush() { await new Promise(resolve => setTimeout(resolve, 10)); await nextTick(); }
 async function until(predicate, description = 'UI settled') { for (let index = 0; index < 100; index++) { await flush(); if (predicate()) return; } assert.fail(`${description}\n${text()}`); }
 function visible(el) { for (let node = el; node instanceof HTMLElement; node = node.parentElement) if (node.hidden || node.style.display === 'none' || node.style.visibility === 'hidden' || node.getAttribute('aria-hidden') === 'true') return false; return true; }
-function button(label) { const result = [...document.querySelectorAll('button')].find(item => visible(item) && (item.textContent.trim() === label || item.getAttribute('aria-label') === label)); assert.ok(result, `button ${label}`); return result; }
+function button(label) { const alias={'验证渠道凭据':'检查并继续','验证并保存渠道连接':'保存机器人配置','重新验证已存凭据':'重新连接并检查'};if(alias[label]&&[...document.querySelectorAll('button')].some(b=>visible(b)&&b.textContent.trim()===alias[label]))label=alias[label]; const result = [...document.querySelectorAll('button')].find(item => visible(item) && (item.textContent.trim() === label || item.getAttribute('aria-label') === label)); assert.ok(result, `button ${label}`); return result; }
 function input(label, value) { const field = document.querySelector(`input[aria-label="${label}"]`); assert.ok(field, label); field.value = value; field.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: value })); }
-async function click(label) { await nextTick(); if(['验证并保存渠道连接','重新验证已存凭据','停用此渠道','启用此渠道','解除渠道绑定','验证渠道并读取通讯录'].includes(label)&&document.querySelector('.channel-guide-dots button[data-step=validate]'))await channelCard('validate'); button(label).click(); await flush(); }
+async function click(label) { await nextTick(); if(['验证并保存渠道连接','重新验证已存凭据','停用此渠道','启用此渠道','解除渠道绑定','验证渠道凭据'].includes(label)&&document.querySelector('.channel-guide-dots button[data-step=validate]'))await channelCard('validate'); button(label).click(); await flush(); }
 async function channelCard(id) { id=id==='create'?'credentials':id==='optional'?'validate':id; const dot=document.querySelector(`.channel-guide-dots button[data-step="${id}"]`); assert.ok(dot); dot.click(); await flush(); }
 async function mount(t, name, initial, handler = async () => { throw new Error('Unexpected request'); }) {
   const props = reactive(initial), requests = [];
   globalThis.fetch = async (url, options = {}) => {
     assert.ok(String(url).startsWith('/api/'), 'Only relative local fixture API routes are permitted');
     const request = { url: String(url), method: options.method ?? 'GET', body: options.body ? JSON.parse(options.body) : undefined };
-    requests.push(request); const result = await handler(request);
+    requests.push(request); const result = name==='settings'&&request.url.endsWith('/group-sharing')?{revision:0,rules:[]}:name==='settings'&&request.url.endsWith('/group-sharing/status')?{appliedRevision:0}:await handler(request);
     return new Response(JSON.stringify(result?.data ?? result), { status: typeof result?.status === 'number' ? result.status : 200, headers: { 'content-type': 'application/json' } });
   };
   document.body.innerHTML = '<div id="app"></div>';
@@ -104,4 +104,46 @@ test('employee whitelist new selections default to both scenes while package pic
  env.props.employeeScope=false;await flush();assert.ok([...document.querySelectorAll('[role="checkbox"]')].some(el=>el.textContent.trim()==='私聊'),'generic/package picker keeps scene selection');
 });
 
-for(const provider of ['feishu','dingtalk','wecom'])test(provider+' channel group-use switch saves with source CAS, preserves hidden deny rules and cancels unsaved changes',async t=>{let policy={allow:[],deny:[{sourceId:'source-1',kind:'channel_user',subjectId:JSON.stringify(['channel_user',provider==='feishu'?'open_id':'user_id','fixture-app','blocked']),conversationKinds:['group']}],allowGroupMembers:false,revision:3};const env=await mount(t,'channelScope',{base,connection:connection({provider}),canManage:true},async request=>{if(request.method==='PATCH'){assert.equal(request.body.sourceId,'source-1');assert.equal(request.body.expectedRevision,3);assert.equal(request.body.allowGroupMembers,true);assert.equal(request.body.deny,undefined);policy={...policy,allowGroupMembers:true,revision:4};}return policy;});await until(()=>document.querySelector('[role="checkbox"][aria-label="允许群成员在群内使用"]'));const checkbox=document.querySelector('[role="checkbox"][aria-label="允许群成员在群内使用"]');checkbox.click();await flush();button('保存渠道使用策略').click();await until(()=>text().includes('已保存'));assert.equal(env.requests.filter(r=>r.method==='PATCH').length,1);assert.equal(document.querySelector('[role="checkbox"][aria-label="允许群成员在群内使用"]').getAttribute('aria-checked'),'true');assert.ok(text().includes('额外使用限制'));checkbox.click();await flush();button('取消渠道范围修改').click();await flush();assert.equal(document.querySelector('[role="checkbox"][aria-label="允许群成员在群内使用"]').getAttribute('aria-checked'),'true');assert.equal(env.requests.filter(r=>r.method==='PATCH').length,1);});
+
+async function selectMode(mode){const radio=document.querySelector(`input[type="radio"][value="${mode}"]`);assert.ok(radio,mode);radio.click();await flush();}
+const wecomConnection=()=>connection({provider:'wecom',directoryMode:'member_search',directoryStatus:'unavailable',status:'pending_verification'});
+for(const provider of ['feishu','dingtalk','wecom'])test(provider+' source policy starts with blank allowlist and group use, preserves deny in every mode, CAS and cancel',async t=>{
+ const blocked={sourceId:'source-1',kind:'channel_user',subjectId:'blocked-person',conversationKinds:['private','group']};
+ let policy={allow:[],deny:[],revision:30,channelPolicies:[{sourceId:'source-1',mode:'allowlist',allowGroupMembers:true,allow:[],deny:[blocked],revision:2}]};
+ const env=await mount(t,'channelScope',{base,connection:provider==='wecom'?wecomConnection():connection({provider}),canManage:true},async request=>{if(request.method==='PATCH')policy={...policy,channelPolicies:[{...request.body,revision:policy.channelPolicies[0].revision+1}]};return policy;});
+ await until(()=>document.querySelector('input[value="allowlist"]')?.checked);
+ assert.equal(document.querySelector('[aria-label="允许群成员在群内使用"]').getAttribute('aria-checked'),'true');assert.match(text(),/不授予私聊或网页使用权/);assert.match(text(),/黑名单始终优先/);assert.equal(document.querySelectorAll('.directory-rule-detail').length,1);
+ await selectMode('denylist');await click('保存渠道使用策略');await until(()=>text().includes('已保存'));
+ assert.deepEqual(env.requests.find(r=>r.method==='PATCH').body,{sourceId:'source-1',mode:'denylist',allow:[],deny:[blocked],allowGroupMembers:true,expectedRevision:2});
+ await selectMode('allowlist');await checkGroup();await click('取消渠道范围修改');assert.ok(document.querySelector('input[value="denylist"]').checked);assert.equal(document.querySelector('[aria-label="允许群成员在群内使用"]').getAttribute('aria-checked'),'true');
+ await selectMode('allowlist');await click('保存渠道使用策略');assert.equal(env.requests.filter(r=>r.method==='PATCH').at(-1).body.expectedRevision,3);assert.deepEqual(env.requests.filter(r=>r.method==='PATCH').at(-1).body.deny,[blocked]);
+});
+test('existing all mode is shown as everyone plus blacklist without becoming dirty or changing defaults',async t=>{
+ await mount(t,'channelScope',{base,connection:wecomConnection(),canManage:true},async()=>({allow:[],deny:[],revision:20,channelPolicies:[{sourceId:'source-1',mode:'all',allow:[],deny:[],allowGroupMembers:false,revision:2}]}));
+ await until(()=>document.querySelector('input[value="denylist"]')?.checked);assert.equal(button('保存渠道使用策略').disabled,true);assert.equal(document.querySelector('[aria-label="允许群成员在群内使用"]').getAttribute('aria-checked'),'false');
+});
+test('source policy conflict retains edits, reload updates CAS, and switching employee drops late reads',async t=>{
+ let revision=4,stale=true;const env=await mount(t,'channelScope',{base,connection:wecomConnection(),canManage:true},async request=>{
+  if(request.method==='PATCH'&&stale)return{status:409,data:{error:'directory_policy_changed'}};
+  return{allow:[],deny:[],revision:90,channelPolicies:[{sourceId:'source-1',mode:'allowlist',allow:[],deny:[],allowGroupMembers:true,revision},{sourceId:'source-next',mode:'denylist',allow:[],deny:[],allowGroupMembers:false,revision:7}]};
+ });
+ await until(()=>document.querySelector('input[value="allowlist"]')?.checked);await selectMode('denylist');await click('保存渠道使用策略');assert.ok(document.querySelector('input[value="denylist"]').checked);
+ revision=5;await click('读取服务器配置并核对');assert.ok(text().includes('你的修改已保留'));stale=false;await click('保存渠道使用策略');assert.equal(env.requests.filter(r=>r.method==='PATCH').at(-1).body.expectedRevision,5);
+ env.props.connection={...wecomConnection(),sourceId:'source-next'};await until(()=>document.querySelector('input[value="denylist"]')?.checked);assert.equal(button('保存渠道使用策略').disabled,true);
+});
+test('source switch ignores a late policy response from previous employee',async t=>{
+ let release;const held=new Promise(resolve=>{release=resolve;});t.after(()=>release());
+ const env=await mount(t,'channelScope',{base,connection:wecomConnection(),canManage:true},async request=>{if(request.url===`/api${base}/directory-access`){await held;return{allow:[],deny:[],revision:1,channelPolicies:[{sourceId:'source-1',mode:'allowlist',allow:[],deny:[],allowGroupMembers:true,revision:8}]};}return{allow:[],deny:[],revision:2,channelPolicies:[{sourceId:'source-next',mode:'denylist',allow:[],deny:[],allowGroupMembers:false,revision:9}]};});
+ env.props.base='/workspaces/workspace-a/entities/employee-next';env.props.connection={...wecomConnection(),sourceId:'source-next'};await until(()=>document.querySelector('input[value="denylist"]')?.checked);release();await flush();assert.ok(document.querySelector('input[value="denylist"]').checked);assert.equal(button('保存渠道使用策略').disabled,true);
+});
+test('WeCom allowlist searches and saves people under current robot source',async t=>{
+ const policy={allow:[],deny:[],revision:30,channelPolicies:[{sourceId:'source-1',mode:'allowlist',allow:[],deny:[],allowGroupMembers:true,revision:0}]};
+ const env=await mount(t,'channelScope',{base,connection:wecomConnection(),canManage:true},async request=>{if(request.url.endsWith('/member-search'))return page([{externalId:'member-a',subjectId:'member-a',displayName:'合成成员',kind:'channel_user',departmentPaths:['部门仅用于识别']}],{provider:'wecom'});if(request.method==='PATCH')return{...policy,channelPolicies:[{...request.body,revision:1}]};return policy;});
+ await until(()=>document.querySelector('input[value="allowlist"]')?.checked);input('允许成员成员关键词','合成成员');await click('搜索企微成员');await until(()=>text().includes('选择人员'));await click('选择人员');await click('保存渠道使用策略');
+ const saved=env.requests.find(r=>r.method==='PATCH').body;assert.equal(saved.mode,'allowlist');assert.equal(saved.expectedRevision,0);assert.deepEqual(saved.allow,[{sourceId:'source-1',kind:'channel_user',subjectId:'member-a',conversationKinds:['private','group']}]);assert.deepEqual(saved.deny,[]);assert.equal(saved.allowGroupMembers,true);assert.ok(!text().includes('查询当前目录'));
+});
+test('channel policy blocks duplicate or uncertain saves and reconciles server result without erasing group choice',async t=>{
+ let release;const held=new Promise(resolve=>{release=resolve;});t.after(()=>release());let policy={allow:[],deny:[],revision:20,channelPolicies:[{sourceId:'source-1',mode:'allowlist',allow:[],deny:[],allowGroupMembers:true,revision:1}]};
+ const env=await mount(t,'channelScope',{base,connection:wecomConnection(),canManage:true},async request=>{if(request.method==='PATCH'){await held;policy={...policy,channelPolicies:[{...request.body,revision:2}]};return{status:503,data:{error:'runtime_service_unavailable'}};}return policy;});
+ await until(()=>document.querySelector('input[value="allowlist"]')?.checked);await selectMode('denylist');await checkGroup();await click('保存渠道使用策略');button('保存渠道使用策略').click();assert.equal(env.requests.filter(r=>r.method==='PATCH').length,1);release();await until(()=>text().includes('保存结果尚未确认'));assert.equal(button('保存渠道使用策略').disabled,true);await click('读取服务器配置并核对');await until(()=>!text().includes('保存结果尚未确认'));assert.equal(button('保存渠道使用策略').disabled,true);assert.equal(document.querySelector('[aria-label="允许群成员在群内使用"]').getAttribute('aria-checked'),'false');assert.equal(env.requests.filter(r=>r.method==='PATCH').length,1);
+});

@@ -1,152 +1,75 @@
 import assert from 'node:assert/strict';
-import {test} from 'node:test';
-import {createServer} from 'node:http';
+import test from 'node:test';
 import {mkdtempSync,rmSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import Fastify from 'fastify';
 import {Store} from '../dist/store.js';
 import {EmployeeChannelRepository} from '../dist/employee-channels/repository.js';
-import {EmployeeChannelService,channelSubject} from '../dist/employee-channels/service.js';
-import {EmployeeApplicationTransport} from '../dist/employee-channels/provider.js';
-import {CapabilityConfigService} from '../dist/capability-config.js';
+import {EmployeeChannelService} from '../dist/employee-channels/service.js';
 import {registerEmployeeChannelRoutes} from '../dist/employee-channels/routes.js';
 
-// Real local HTTP + temporary SQLite; not live enterprise verification or a fake directory port.
-async function setup(t){
- const dir=mkdtempSync(join(tmpdir(),'identity-wecom-employee-')),store=new Store(join(dir,'test.sqlite'));
+function setup(t){
+ const dir=mkdtempSync(join(tmpdir(),'identity-wecom-bot-')),store=new Store(join(dir,'test.sqlite'));
  store.run("INSERT INTO users(id,username,display_name) VALUES('u','owner','Owner')");
- store.run("INSERT INTO workspaces(id,name,created_by) VALUES('w','Workspace','u'),('other','Other','u')");
- store.run("INSERT INTO members(id,workspace_id,user_id,role) VALUES('m','w','u','owner'),('om','other','u','owner')");
- store.run("INSERT INTO entities(id,workspace_id,name,owner_member_id,created_by_member_id,own_web_use,web_use_user_id,interaction_runtime) VALUES('e','w','First','m','m',1,'u','builtin'),('e2','w','Second','m','m',1,'u','builtin'),('oe','other','Other','om','om',1,'u','builtin')");
- const state={parties:[1],users:['person'],status:1,fail:false,hold:null,calls:[]};
- const server=createServer(async(req,res)=>{const url=new URL(req.url,'http://fixture');state.calls.push(url.pathname);let row={errcode:0};if(url.pathname==='/cgi-bin/gettoken'){row={...row,access_token:'fixture-token',expires_in:7200};}else if(state.fail){row={errcode:48002};}else if(url.pathname==='/cgi-bin/agent/get'){if(state.hold){const hold=state.hold;state.onHold?.();await hold;}row={...row,agentid:Number(url.searchParams.get('agentid')),close:0,allow_userinfos:{user:state.users.map(userid=>({userid}))},allow_partys:{partyid:state.parties},allow_tags:{tagid:[]}};}else if(url.pathname==='/cgi-bin/user/get'){row={...row,userid:url.searchParams.get('userid'),name:'Fixture member',department:[1],status:state.status};}else if(url.pathname==='/cgi-bin/department/get'){row={...row,department:{id:Number(url.searchParams.get('id')),name:'Fixture department',parentid:0}};}else if(url.pathname==='/cgi-bin/user/simplelist'){row={...row,userlist:state.listUsers??[]};}else{row={...row,department_id:[]};}res.writeHead(200,{'content-type':'application/json'});res.end(JSON.stringify(row));});
- await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));
- const localFetch=(input,init)=>{const url=new URL(input);assert.equal(url.origin,'https://qyapi.weixin.qq.com');return fetch(`http://127.0.0.1:${server.address().port}${url.pathname}${url.search}`,init);};
- const options={masterKey:new Uint8Array(32).fill(7),fetch:localFetch,now:()=>{state.onNow?.();return Date.now();}};
- const repository=new EmployeeChannelRepository(store),service=new EmployeeChannelService(repository,options),capabilities=new CapabilityConfigService(store,[],service);service.setAccessCheck((...args)=>capabilities.authorizeChannel(...args));
- t.after(async()=>{await state.snapshot?.stop();await new Promise(resolve=>server.close(resolve));store.close();rmSync(dir,{recursive:true,force:true});});
- return{store,state,repository,service,capabilities,options};
+ store.run("INSERT INTO workspaces(id,name,created_by) VALUES('w','Workspace','u')");
+ store.run("INSERT INTO members(id,workspace_id,user_id,role) VALUES('m','w','u','owner')");
+ store.run("INSERT INTO entities(id,workspace_id,name,owner_member_id,created_by_member_id,own_web_use,web_use_user_id,interaction_runtime) VALUES('e','w','Employee','m','m',1,'u','builtin'),('e2','w','Second','m','m',1,'u','builtin')");
+ const repository=new EmployeeChannelRepository(store),service=new EmployeeChannelService(repository,{masterKey:Buffer.alloc(32,7)});
+ t.after(()=>{store.close();rmSync(dir,{recursive:true,force:true});});return {store,repository,service};
 }
-const input={label:'Shared directory',corpId:'fixture-corp',agentId:'1000005',appSecret:'fixture-directory-secret'};
-const save=(f,e='e',bot='bot-a')=>f.service.save('w',e,'wecom','u',{appId:bot,appSecret:'fixture-bot-secret',expectedRevision:0});
-async function bind(f,c,d,e='e'){return f.service.bindDirectory('w',e,'u',{credentialId:d.id,expectedRevision:c.revision,confirmSameCorp:true});}
-function confirm(f,c,e='e'){const v=f.service.startVerification('w',e,'wecom','u',{expectedRevision:c.revision});f.service.recordVerifiedCandidate(c.id,String(v.revision),{appId:c.appId,botId:c.appId,tenantId:c.tenantId,challengeText:v.challengeText,eventId:`event-${e}`,messageId:`message-${e}`});const candidate=f.service.verification('w',e,'wecom');return f.service.confirmVerification('w',e,'wecom','u',{expectedRevision:candidate.revision,candidateId:candidate.candidateId});}
-async function ready(f,e='e',bot='bot-a',directory){let c=await save(f,e,bot);const d=directory??await f.service.createDirectoryCredential('w',e,'u',input);c=await bind(f,c,d,e);return{c:confirm(f,c,e),d};}
-const rule=c=>({sourceId:c.sourceId,kind:'department',subjectId:channelSubject('department','1','department_id',c.appId),conversationKinds:['private','group']});
-const scope=c=>({workspaceId:'w',entityId:c.entityId,requesterId:'person',requesterKind:'channel_user',requesterIdentity:{idNamespace:'user_id',applicationId:c.appId},conversationKind:'group'});
-const connection=c=>({workspaceId:'w',connectionId:c.id,provider:'wecom',tenantId:c.tenantId,identity:{kind:'bot',externalId:c.botId},credentialRef:'server-only'});
+const save=(f,expectedRevision=0,appSecret='synthetic-secret')=>f.service.save('w','e','wecom','u',{appId:'synthetic-bot',appSecret,expectedRevision});
 
-test('WeCom two-step onboarding keeps independent bot secret and explicit administrator enterprise assertion',async t=>{const f=await setup(t);const c=await save(f);assert.equal(c.status,'pending_verification');assert.equal(c.directoryStatus,'unavailable');assert.throws(()=>f.service.startVerification('w','e','wecom','u',{expectedRevision:c.revision}),{code:'directory_binding_required'});const d=await f.service.createDirectoryCredential('w','e','u',input);await assert.rejects(f.service.bindDirectory('w','e','u',{credentialId:d.id,expectedRevision:c.revision,confirmSameCorp:false}),{code:'same_corp_confirmation_required'});const b=await bind(f,c,d);assert.equal(b.identityEvidence,'admin_asserted');assert.equal(b.status,'pending_verification');const confirmed=confirm(f,b);assert.equal(confirmed.status,'verified');assert.equal(confirmed.identityEvidence,'admin_asserted');assert.equal(confirmed.inboundVerified,true);assert.equal(f.service.ingressConfiguration(c.id).credentials.botSecret,'fixture-bot-secret');const raw=f.repository.byId(c.id);assert.equal(raw.directoryBinding.assertion.corpId,input.corpId);assert.ok(!JSON.stringify(raw).includes('fixture-bot-secret'));assert.ok(!JSON.stringify(f.service.listDirectoryCredentials('w','e')).includes('fixture-directory-secret'));});
-
-test('WeCom directory reuse does not reuse robot, source or access rules',async t=>{const f=await setup(t),{c,d}=await ready(f),second=await ready(f,'e2','bot-b',d);assert.notEqual(c.sourceId,second.c.sourceId);assert.equal(f.service.listDirectoryCredentials('w','e')[0].referenceCount,2);f.capabilities.saveDirectoryAccess('w','e',{allow:[rule(c)],deny:[]});assert.equal(await f.capabilities.authorizeChannel(scope(c),connection(c),'group'),true);assert.equal(await f.capabilities.authorizeChannel(scope(second.c),connection(second.c),'group'),false);await assert.rejects(f.service.save('w','e2','wecom','u',{appId:'bot-a',appSecret:'fixture',expectedRevision:second.c.revision,replaceSource:true}),{code:'channel_connection_conflict'});});
-
-test('WeCom cannot reference another workspace directory credential or use wrong enterprise identity',async t=>{const f=await setup(t),{c}=await ready(f);const other=await f.service.createDirectoryCredential('other','oe','u',{...input,corpId:'other-corp'});await assert.rejects(f.service.bindDirectory('w','e','u',{credentialId:other.id,expectedRevision:c.revision,confirmSameCorp:true}),{code:'directory_credential_not_found'});f.capabilities.saveDirectoryAccess('w','e',{allow:[rule(c)],deny:[]});assert.equal(await f.capabilities.authorizeChannel(scope(c),{...connection(c),tenantId:'other-corp'},'group'),false);});
-
-test('WeCom shared rotation atomically revokes every referenced employee and requires reassertion',async t=>{const f=await setup(t),{c,d}=await ready(f),second=await ready(f,'e2','bot-b',d);const oldBinding=f.service.currentBindingVersion(c.id),impact=f.service.directoryImpact('w','e',d.id);assert.equal(impact.employees.length,2);const updated=await f.service.updateDirectoryCredential('w','e',d.id,'u',{...input,appSecret:'new-fixture-secret',expectedRevision:impact.revision,impactRevision:impact.impactRevision});assert.equal(updated.credentialRevision,2);for(const entity of ['e','e2']){const current=f.service.list('w',entity)[0];assert.equal(current.directoryBinding.status,'reconfirmation_required');assert.equal(current.directoryStatus,'unavailable');assert.equal(f.service.currentBindingVersion(current.id),undefined);}const current=f.service.list('w','e')[0],bound=await bind(f,current,updated),verified=confirm(f,bound);assert.notEqual(f.service.currentBindingVersion(verified.id),oldBinding);assert.equal(f.service.list('w','e2')[0].directoryStatus,'unavailable');assert.notEqual(second.c.sourceId,f.service.list('w','e2')[0].sourceId);});
-
-test('WeCom stale impact preview cannot change newly added shared references',async t=>{const f=await setup(t),{d}=await ready(f),impact=f.service.directoryImpact('w','e',d.id);await ready(f,'e2','bot-b',d);await assert.rejects(f.service.updateDirectoryCredential('w','e',d.id,'u',{...input,expectedRevision:impact.revision,impactRevision:impact.impactRevision}),{code:'directory_impact_changed'});assert.equal(f.service.listDirectoryCredentials('w','e')[0].credentialRevision,1);});
-
-test('WeCom changed official scope revokes both employees, old grants cannot authorize',async t=>{const f=await setup(t),{c,d}=await ready(f),second=await ready(f,'e2','bot-b',d);f.capabilities.saveDirectoryAccess('w','e',{allow:[rule(c)],deny:[]});f.capabilities.saveDirectoryAccess('w','e2',{allow:[rule(second.c)],deny:[]});assert.equal(await f.capabilities.authorizeChannel(scope(c),connection(c),'group'),true);f.state.parties=[2];assert.equal(await f.capabilities.authorizeChannel(scope(c),connection(c),'group'),false);assert.equal(f.service.currentBindingVersion(second.c.id),undefined);assert.equal(f.service.list('w','e')[0].directoryBinding.status,'reconfirmation_required');assert.equal(f.service.listDirectoryCredentials('w','e')[0].status,'verified');const rebound=await bind(f,f.service.list('w','e')[0],d);assert.equal(rebound.directoryStatus,'available');});
-
-test('WeCom failed credential rotation persists revocation rather than restoring old successes',async t=>{const f=await setup(t),{c,d}=await ready(f);f.state.fail=true;const impact=f.service.directoryImpact('w','e',d.id);await assert.rejects(f.service.updateDirectoryCredential('w','e',d.id,'u',{...input,expectedRevision:impact.revision,impactRevision:impact.impactRevision}),{code:'channel_validation_failed'});assert.equal(f.service.currentBindingVersion(c.id),undefined);assert.equal(f.service.listDirectoryCredentials('w','e')[0].status,'invalid');});
-
-test('WeCom permission failure on a reused credential revokes all employee bindings',async t=>{const f=await setup(t),{c,d}=await ready(f),second=await ready(f,'e2','bot-b',d);f.capabilities.saveDirectoryAccess('w','e',{allow:[rule(c)],deny:[]});f.state.fail=true;assert.equal(await f.capabilities.authorizeChannel(scope(c),connection(c),'group'),false);assert.equal(f.service.currentBindingVersion(second.c.id),undefined);assert.equal(f.service.listDirectoryCredentials('w','e')[0].status,'invalid');});
-
-test('WeCom unbinding one employee leaves shared credentials and other employee intact; FK blocks shared deletion',async t=>{const f=await setup(t),{c,d}=await ready(f),second=await ready(f,'e2','bot-b',d);assert.throws(()=>f.store.run('DELETE FROM employee_channel_directory_credentials WHERE id=?',d.id));f.service.unbindDirectory('w','e','u',{expectedRevision:c.revision});assert.equal(f.service.listDirectoryCredentials('w','e')[0].referenceCount,1);assert.ok(f.service.currentBindingVersion(second.c.id));assert.equal(f.service.list('w','e')[0].directoryBinding,undefined);});
-
-test('WeCom secret rotation only affects that robot and clears obsolete enterprise assertion',async t=>{const f=await setup(t),{c,d}=await ready(f),second=await ready(f,'e2','bot-b',d);const next=await f.service.save('w','e','wecom','u',{appId:c.appId,appSecret:'rotated-bot-secret',expectedRevision:c.revision});assert.equal(next.directoryBinding,undefined);assert.equal(next.status,'pending_verification');assert.notEqual(next.sourceId,c.sourceId);assert.ok(f.service.currentBindingVersion(second.c.id));});
-
-test('WeCom stored credential revalidation preserves directory association and rules while fencing the old live identity',async t=>{
- const f=await setup(t),{c,d}=await ready(f),second=await ready(f,'e2','bot-b',d);
- f.capabilities.saveDirectoryAccess('w','e',{allow:[rule(c)],deny:[]});
- const oldBinding=f.service.currentBindingVersion(c.id),otherBinding=f.service.currentBindingVersion(second.c.id),sharedBefore=f.service.listDirectoryCredentials('w','e')[0],sourceBefore=f.service.directorySource(c.id),callsBefore=f.state.calls.length;
- const next=await f.service.revalidate('w','e','wecom','u',c.revision);
- assert.equal(next.sourceId,c.sourceId);assert.deepEqual(next.directoryBinding,c.directoryBinding);
- assert.equal(next.directoryStatus,'available');assert.equal(next.tenantId,c.tenantId);
- assert.equal(next.authRevision,c.authRevision+1);assert.equal(next.status,'pending_verification');assert.equal(next.inboundVerified,false);
- assert.equal(f.service.currentBindingVersion(c.id),undefined);assert.equal(f.service.currentBindingVersion(second.c.id),otherBinding);
- assert.deepEqual(f.service.listDirectoryCredentials('w','e')[0],sharedBefore);
- assert.equal(f.service.directorySource(c.id).sourceVersion,sourceBefore.sourceVersion);
- assert.deepEqual(f.service.directorySource(c.id).rules(),sourceBefore.rules());
- assert.equal(f.state.calls.length,callsBefore,'bot retry does not use shared directory credentials as bot authentication');
- assert.equal(f.service.ingressConfiguration(c.id).credentials.botSecret,'fixture-bot-secret');
- assert.ok(!JSON.stringify(next).includes('fixture-bot-secret'));
- const v=f.service.startVerification('w','e','wecom','u',{expectedRevision:next.revision});
- f.service.recordVerifiedCandidate(c.id,String(v.revision),{appId:c.appId,botId:c.appId,tenantId:c.tenantId,challengeText:v.challengeText,eventId:'event-revalidated',messageId:'message-revalidated'});
- const candidate=f.service.verification('w','e','wecom');
- const confirmed=f.service.confirmVerification('w','e','wecom','u',{expectedRevision:candidate.revision,candidateId:candidate.candidateId});
- assert.notEqual(f.service.currentBindingVersion(c.id),oldBinding);
- assert.equal(await f.capabilities.authorizeChannel(scope(confirmed),connection(confirmed),'group'),true);
+test('WeCom bot-only source has no traditional directory dependency or manual verification',async t=>{
+ const f=setup(t),c=await save(f);
+ assert.equal(c.directoryMode,'member_search');assert.equal(c.directoryStatus,'unavailable');assert.equal(c.status,'pending_verification');
+ assert.equal(c.validation.canContinue,true);assert.equal(c.validation.checks[0].status,'unverified');
+ assert.equal(c.tenantIdNamespace,'app_id');assert.equal(c.tenantId,c.appId);assert.equal(c.directoryBinding,undefined);
+ assert.deepEqual(f.service.directorySources(),[]);assert.equal(f.service.directorySource(c.id),undefined);
+ assert.throws(()=>f.service.startVerification('w','e','wecom','u',{expectedRevision:c.revision}),{code:'channel_verification_automatic'});
+ assert.equal(f.store.one("SELECT name FROM sqlite_master WHERE name='employee_channel_directory_credentials'"),undefined);
+ assert.equal(f.store.all('PRAGMA table_info(employee_channel_connections)').some(c=>c.name==='directory_credential_id'),false);
+ assert.ok(!JSON.stringify(c).includes('synthetic-secret'));
 });
 
-test('WeCom stored revalidation neither invents a directory assertion nor re-enables a disabled channel',async t=>{
- const f=await setup(t),c=await save(f);
- const next=await f.service.revalidate('w','e','wecom','u',c.revision);
- assert.equal(next.sourceId,c.sourceId);assert.equal(next.directoryBinding,undefined);assert.equal(next.directoryStatus,'unavailable');
- assert.throws(()=>f.service.startVerification('w','e','wecom','u',{expectedRevision:next.revision}),{code:'directory_binding_required'});
+test('same BotID credential rotation preserves source, fences session evidence and keeps disabled state',async t=>{
+ const f=setup(t),first=await save(f);
+ f.service.observeFirstInbound(first.id,{appId:first.appId,botId:first.appId,tenantId:first.appId,tenantNamespace:'app_id'});
+ const oldVersion=f.service.currentBindingVersion(first.id),next=await save(f,first.revision,'rotated-secret');
+ assert.equal(next.id,first.id);assert.equal(next.sourceId,first.sourceId);assert.equal(next.authRevision,first.authRevision+1);assert.equal(next.status,'pending_verification');assert.equal(next.inboundVerified,false);
+ assert.equal(f.service.currentBindingVersion(first.id),undefined);
+ f.service.observeFirstInbound(first.id,{appId:first.appId,botId:first.appId,tenantId:first.appId,tenantNamespace:'app_id'});
+ assert.notEqual(f.service.currentBindingVersion(first.id),oldVersion);
  const disabled=f.service.settings('w','e','wecom','u',{enabled:false,expectedRevision:next.revision});
- const retried=await f.service.revalidate('w','e','wecom','u',disabled.revision);
- assert.equal(retried.enabled,false);assert.equal(retried.status,'disabled');assert.equal(f.service.ingressConfiguration(c.id),undefined);
- const raw=f.repository.byId(c.id);
- await assert.rejects(f.service.revalidate('w','e','wecom','u',disabled.revision),{code:'channel_configuration_changed'});
- assert.deepEqual(f.repository.byId(c.id),raw);
+ const retry=await f.service.revalidate('w','e','wecom','u',disabled.revision);
+ assert.equal(retry.status,'disabled');assert.equal(retry.sourceId,first.sourceId);
 });
 
-test('WeCom service restart restores only persisted binding and secrets, not online status',async t=>{const f=await setup(t),{c}=await ready(f);const service=new EmployeeChannelService(new EmployeeChannelRepository(f.store),f.options);assert.equal(service.list('w','e')[0].transport.state,'stopped');assert.equal(service.currentBindingVersion(c.id),f.service.currentBindingVersion(c.id));assert.equal(service.ingressConfiguration(c.id).credentials.botSecret,'fixture-bot-secret');});
-
-test('WeCom employee routes reject ordinary readers and forged fields; expose no shared secret',async t=>{const f=await setup(t),app=Fastify();t.after(()=>app.close());await registerEmployeeChannelRoutes(app,f.service,{requireReader:()=>({canManage:false}),requireManager:req=>{if(req.headers['x-manager']!=='yes'){const e=new Error('forbidden');e.statusCode=403;throw e;}return'u';}});const base='/api/workspaces/w/entities/e/channels/wecom';assert.equal((await app.inject({url:base+'/directory-credentials'})).statusCode,403);const created=await app.inject({method:'POST',url:base+'/directory-credentials',headers:{'x-manager':'yes'},payload:input});assert.equal(created.statusCode,200);assert.ok(!created.body.includes(input.appSecret));assert.equal((await app.inject({method:'POST',url:base+'/directory-credentials',headers:{'x-manager':'yes'},payload:{...input,identityEvidence:'provider_api'}})).statusCode,400);});
-
-
-test('WeCom in-flight authorization cannot survive a shared credential rotation',async t=>{const f=await setup(t),{c,d}=await ready(f);f.capabilities.saveDirectoryAccess('w','e',{allow:[rule(c)],deny:[]});let release,observed;f.state.hold=new Promise(r=>release=r);const reached=new Promise(r=>observed=r);f.state.onHold=observed;const pending=f.capabilities.authorizeChannel(scope(c),connection(c),'group');await reached;f.state.hold=null;const impact=f.service.directoryImpact('w','e',d.id);await f.service.updateDirectoryCredential('w','e',d.id,'u',{...input,appSecret:'new-secret',expectedRevision:impact.revision,impactRevision:impact.impactRevision});release();assert.equal(await pending,false);assert.equal(f.service.currentBindingVersion(c.id),undefined);});
-
-test('WeCom validation candidates cannot override administrator-bound enterprise or bot',async t=>{const f=await setup(t);const c=await save(f),d=await f.service.createDirectoryCredential('w','e','u',input),b=await bind(f,c,d);const v=f.service.startVerification('w','e','wecom','u',{expectedRevision:b.revision});const candidate={appId:b.appId,botId:b.appId,tenantId:'wrong-corp',challengeText:v.challengeText,eventId:'bad-event',messageId:'bad-message'};assert.throws(()=>f.service.recordVerifiedCandidate(c.id,String(v.revision),candidate),{code:'channel_verification_invalid'});assert.throws(()=>f.service.recordVerifiedCandidate(c.id,String(v.revision),{...candidate,tenantId:input.corpId,botId:'wrong-bot'}),{code:'channel_verification_invalid'});assert.equal(f.service.verification('w','e','wecom').status,'waiting');});
-
-
-test('WeCom bot credentials cannot enter the Feishu/DingTalk application-token transport',()=>{assert.throws(()=>new EmployeeApplicationTransport('wecom','bot',{appSecret:'fixture'},{}),{code:'unsupported'});});
-
-
-// These race schedulers use the injected clock boundary and a second real SQLite connection.
-// They do not replace the repository, transaction implementation, directory HTTP, or SDK.
-test('WeCom update rechecks impact inside the transaction after a second SQLite connection adds a reference',async t=>{
- const f=await setup(t),{c,d}=await ready(f),second=await save(f,'e2','bot-b');const impact=f.service.directoryImpact('w','e',d.id);
- const otherStore=new Store(f.store.databasePath),otherRepo=new EmployeeChannelRepository(otherStore);t.after(()=>otherStore.close());let raced=false;
- f.state.onNow=()=>{if(!new Error().stack.includes('EmployeeChannelService.updateDirectoryCredential'))return;f.state.onNow=null;raced=true;const old=otherRepo.byId(second.id),first=otherRepo.byId(c.id);otherStore.transaction(()=>{assert.equal(otherRepo.save({...old,directoryBinding:{...first.directoryBinding,assertion:{...first.directoryBinding.assertion,botId:old.appId}},revision:old.revision+1},old),true);});};
- await assert.rejects(f.service.updateDirectoryCredential('w','e',d.id,'u',{...input,appSecret:'replacement',expectedRevision:impact.revision,impactRevision:impact.impactRevision}),{code:'directory_impact_changed'});
- assert.equal(raced,true);assert.equal(f.service.listDirectoryCredentials('w','e')[0].credentialRevision,1);assert.ok(f.service.currentBindingVersion(c.id));assert.equal(f.service.listDirectoryCredentials('w','e')[0].referenceCount,2);
+test('robot replacement and stale credential writes are rejected without changing source',async t=>{
+ const f=setup(t),c=await save(f);
+ await assert.rejects(save(f,0,'other'),{code:'channel_configuration_changed'});
+ await assert.rejects(f.service.save('w','e','wecom','u',{appId:'other-bot',appSecret:'secret',expectedRevision:c.revision}),{code:'channel_unbind_required'});
+ await assert.rejects(f.service.save('w','e2','wecom','u',{appId:c.appId,appSecret:'secret',expectedRevision:0}),{code:'channel_connection_conflict'});
+ assert.equal(f.repository.byId(c.id).sourceId,c.sourceId);
+ for(const appSecret of ['  ','a\nb','a\0b'])await assert.rejects(save(f,c.revision,appSecret),{code:'invalid_channel_credentials'});
 });
 
-test('WeCom bind rechecks the shared version inside its transaction after another SQLite connection updates it',async t=>{
- const f=await setup(t),{d}=await ready(f),second=await save(f,'e2','bot-b');const otherStore=new Store(f.store.databasePath);t.after(()=>otherStore.close());let raced=false;
- f.state.onNow=()=>{const stack=new Error().stack;if(!stack.includes('EmployeeChannelService.bindDirectory')||stack.includes('WeComDirectoryAdapter'))return;f.state.onNow=null;raced=true;otherStore.transaction(()=>{otherStore.run("UPDATE employee_channel_directory_credentials SET record_json=json_set(record_json,'$.stateVersion',state_version+1),state_version=state_version+1 WHERE id=?",d.id);});};
- await assert.rejects(bind(f,second,d,'e2'),{code:'channel_configuration_changed'});assert.equal(raced,true);assert.equal(f.service.list('w','e2')[0].directoryBinding,undefined);assert.equal(f.service.listDirectoryCredentials('w','e')[0].referenceCount,1);
+test('traditional directory API is retired and department discovery is explicitly unsupported',async t=>{
+ const f=setup(t),app=Fastify();t.after(()=>app.close());
+ await registerEmployeeChannelRoutes(app,f.service,{requireManager:()=> 'u'});await save(f);
+ const base='/api/workspaces/w/entities/e/channels/wecom';
+ assert.equal((await app.inject({method:'POST',url:base+'/directory-credentials',payload:{corpId:'corp',agentId:'7',appSecret:'secret'}})).statusCode,404);
+ assert.equal((await app.inject({method:'PUT',url:base+'/directory-binding',payload:{credentialId:'old',confirmSameCorp:true}})).statusCode,404);
+ const discovery=await app.inject({method:'GET',url:base+'/directory?kind=departments'});
+ assert.equal(discovery.statusCode,400);assert.equal(discovery.json().error,'channel_directory_unsupported');
 });
 
 
-import {DirectorySnapshots} from '../dist/directory-sync/service.js';
-import {channelInvocationScope} from '@dentity/application';
-import {ChannelTaskAuthorization} from '../dist/channel-loop/authorization.js';
-test('workspace shared directory uses one snapshot and schedule across robot references without sharing employee grants',async t=>{
- const f=await setup(t),{c,d}=await ready(f),second=await ready(f,'e2','bot-b',d);
- f.capabilities.saveDirectoryAccess('w','e',{allow:[rule(c)],deny:[]});
- f.state.listUsers=[{userid:'person',name:'Fixture member',department:[1]}];
- const snapshots=new DirectorySnapshots(f.store,()=>f.service.directorySources(),Date.now,undefined,id=>f.service.directorySource(id));f.service.setDirectorySnapshots(snapshots);f.state.snapshot=snapshots;
- const tasks=snapshots.list('w').tasks;assert.equal(tasks.length,1);assert.equal(tasks[0].connectionId,d.id);assert.deepEqual(new Set(tasks[0].memberConnectionIds),new Set([c.id,second.c.id]));
- snapshots.requestUser(c.id,{id:'person',namespace:'user_id'});snapshots.requestUser(second.c.id,{id:'person',namespace:'user_id'});snapshots.manual('w',tasks[0].id);await snapshots.waitForIdle();assert.equal(snapshots.list('w').tasks[0].lastResult,'success');assert.equal(snapshots.peekUser(c.id,{id:'person',namespace:'user_id'}).status,'active');assert.deepEqual(snapshots.peekUser(c.id,{id:'person',namespace:'user_id'}),snapshots.peekUser(second.c.id,{id:'person',namespace:'user_id'}));
- const before=f.state.calls.filter(p=>p==='/cgi-bin/user/get').length;await snapshots.directory(second.c.id).getUser({id:'person',namespace:'user_id'});assert.equal(f.state.calls.filter(p=>p==='/cgi-bin/user/get').length,before);
- assert.equal(await f.capabilities.authorizeChannel(scope(c),connection(c),'group'),true);assert.equal(await f.capabilities.authorizeChannel(scope(second.c),connection(second.c),'group'),false);
- assert.equal(snapshots.list('other').tasks.length,0);assert.throws(()=>snapshots.history('other',tasks[0].id),e=>e.status===404);
- const updated=snapshots.patch('w',tasks[0].id,{expectedVersion:tasks[0].version,periodMs:7200000});assert.equal(snapshots.list('w').tasks.length,1);assert.equal(updated.periodMs,7200000);
- const impact=f.service.directoryImpact('w','e',d.id);await f.service.updateDirectoryCredential('w','e',d.id,'u',{...input,appSecret:'new-fixture-secret',expectedRevision:impact.revision,impactRevision:impact.impactRevision});assert.equal(snapshots.peekUser(c.id,{id:'person',namespace:'user_id'}),undefined);
-});
-test('trusted WeCom group opening retains shared enterprise fence and does not open private or another employee',async t=>{
- const f=await setup(t),{c}=await ready(f),b=await f.service.resolveBinding(c.id),actor={externalId:'outsider',idNamespace:'user_id',applicationId:c.appId,kind:'human',identityEvidence:'channel_verified'},source={channelType:'wecom',connectionId:c.id,applicationId:c.appId,tenantId:c.tenantId,bindingVersion:b.bindingVersion,conversationId:'group-1',conversationKind:'group'};
- f.capabilities.patchDirectoryAccess('w','e',{sourceId:c.sourceId,allow:[],allowGroupMembers:true,expectedRevision:0});await f.service.authorizeInvocation(b,actor,'group',source);
- const scopeForTask=channelInvocationScope(b,{schemaVersion:1,origin:'live',eventId:'formal-wecom-group',connectionId:c.id,tenantId:c.tenantId,receivedAt:Date.now(),message:{id:'formal-wecom-message',conversationKind:'group',providerDirectedBot:true,conversation:{provider:'wecom',connectionId:c.id,tenantId:c.tenantId,kind:'conversation',externalId:'group-1',conversationKind:'group'},author:actor,occurredAt:Date.now(),text:'Synthetic group task',mentions:[]}});
- const makePackage=(name,extra={})=>f.capabilities.save('w','e',{name,enabled:true,mode:'inherit',allowMemberIds:[],denyMemberIds:[],resourceIds:[],conversationKinds:['group'],...extra});
- const inherited=makePackage('Shared-group inherited'),restricted=makePackage('Independent named-user scope',{mode:'restrict',directoryAccess:{allow:[{sourceId:c.sourceId,kind:'channel_user',subjectId:channelSubject('channel_user','named','user_id',c.appId),conversationKinds:['group']}],deny:[]}});makePackage('Private-only',{conversationKinds:['private']});makePackage('Disabled',{enabled:false});
- const taskAuth=new ChannelTaskAuthorization(f.store,f.capabilities,f.service,Date.now);await taskAuth.refreshAuthorization(scopeForTask);taskAuth.authorizeEntity(scopeForTask);const taskSnapshot=await taskAuth.resolveForTask(scopeForTask);assert.deepEqual(taskSnapshot.packages.map(p=>p.id),[inherited.id]);assert.ok(!taskSnapshot.packages.some(p=>p.id===restricted.id));taskAuth.validatePreparedSnapshot(scopeForTask,taskSnapshot);
-
- await assert.rejects(f.service.authorizeInvocation(b,actor,'private',{...source,conversationKind:'private'}),{code:'channel_use_forbidden'});await assert.rejects(f.service.authorizeInvocation(b,actor,'group',{...source,tenantId:'wrong'}),{code:'channel_use_forbidden'});
- f.state.parties=[2];await assert.rejects(f.service.authorizeInvocation(b,actor,'group',source),{code:'channel_use_forbidden'});assert.equal(f.service.currentBindingVersion(c.id),undefined);
+test('retired enterprise-scoped records do not reconnect or use directory fallback',async t=>{
+ const f=setup(t),c=await save(f),old=f.repository.byId(c.id);
+ f.repository.save({...old,identity:{appId:c.appId,tenantId:'old-corp',tenantIdNamespace:'corp_id'},eventTenantId:'old-corp',status:'verified',directoryStatus:'available'},old);
+ assert.equal(f.service.ingressConfiguration(c.id),undefined);
+ assert.equal(f.service.currentBindingVersion(c.id),undefined);
+ await assert.rejects(f.service.revalidate('w','e','wecom','u',c.revision),{code:'wecom_bot_reconfiguration_required'});
+ assert.deepEqual(f.service.directorySources(),[]);
 });

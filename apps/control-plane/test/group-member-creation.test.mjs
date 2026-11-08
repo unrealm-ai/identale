@@ -69,7 +69,7 @@ async function setup(t) {
   const config = extra => ({ name: '合成向导模型', provider: 'openai-compatible', endpoint: `${local}/v1`, modelId: 'supported', apiKey: secret, enabled: true, ...extra });
   async function receipt(configuration = config()) { const r = await call('POST', `${base}/model-profiles/test-connection`, configuration, owner.cookie); assert.equal(r.statusCode, 200, r.body); return { ...configuration, connectionTestReceipt: r.json().connectionTestReceipt }; }
   async function draft(provider = 'feishu', extra = {}) { const r = await call('POST', `${base}/employee-channel-drafts`, { provider, appId: `${provider}-fixture-app`, appSecret: 'synthetic-robot-secret', ...extra }, owner.cookie); assert.equal(r.statusCode, 200, r.body); return r.json(); }
-  const counts = () => Object.fromEntries(['entities', 'model_catalog', 'entity_model_bindings', 'employee_channel_connections', 'employee_channel_directory_credentials', 'capability_packages', 'employee_creation_operations'].map(table => [table, db.prepare(`SELECT count(*) n FROM ${table}`).get().n]));
+  const counts = () => Object.fromEntries(['entities', 'model_catalog', 'entity_model_bindings', 'employee_channel_connections', 'capability_packages', 'employee_creation_operations'].map(table => [table, db.prepare(`SELECT count(*) n FROM ${table}`).get().n]));
   t.after(async () => { await app.close(); db.close(); provider.closeAllConnections(); await new Promise(resolve => provider.close(resolve)); await rm(dir, { recursive: true, force: true }); });
   return { app, db, owner, base, call, body, config, receipt, draft, state, counts, register, channels, supervisor, advance: ms => { now += ms; } };
 }

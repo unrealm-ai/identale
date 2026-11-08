@@ -212,7 +212,7 @@ export class TaskService {
     const existing=this.repository.findCreatedTask(scope,operationId);if(existing)return this.createTask(scope,body,false);
     if(signal?.aborted)return fail(409,'task_creation_interrupted');
     if(!admitted)await this.refreshAuthorization(scope);
-    let snapshot:unknown;try{snapshot=await this.capabilities?.resolveForTask?.(scope);}catch(error){if(this.repository.findCreatedTask(scope,operationId))return this.createTask(scope,body,false);throw error;}
+    let snapshot:unknown;try{snapshot=await this.capabilities?.resolveForTask?.(scope,{employeeUseAdmitted:true});}catch(error){if(this.repository.findCreatedTask(scope,operationId))return this.createTask(scope,body,false);throw error;}
     if(signal?.aborted)return fail(409,'task_creation_interrupted');
     return this.createTask(scope,body,false,snapshot);
   }
@@ -293,7 +293,7 @@ export class TaskService {
     if(initial.run_id)return fail(409,'already_started');if(initial.status!=='planned')return fail(409,'task_terminal');
     if(!admitted)await this.refreshAuthorization(scope);
     if(signal?.aborted)return fail(409,'task_creation_interrupted');
-    const preparedSnapshot=await this.capabilities?.resolveForTask?.(this.contextOfTask(initial));
+    const preparedSnapshot=await this.capabilities?.resolveForTask?.(this.contextOfTask(initial),{employeeUseAdmitted:true});
     if(signal?.aborted)return fail(409,'task_creation_interrupted');
     return this.repository.transaction(()=>{
       const task=this.task(scope,id),prior=this.repository.operationHash(id,operationId);
