@@ -102,7 +102,7 @@ export function render(template, values) {
 export function renderNginx(template, host, port) {
   host = validateHost(host); port = validatePort(port);
   const origin = `https://${host}${port === 443 ? '' : `:${port}`}`;
-  const redirect = (listener, tls = '') => `server {\n    listen ${listener};\n    server_name ${host};\n${tls}    return 308 ${origin}$request_uri;\n}\n`;
+  const redirect = (listener, tls = '') => `server {\n    listen ${listener};\n    server_name ${host};\n    access_log /var/log/nginx/identity-access.log identity_safe;\n${tls}    return 308 ${origin}$request_uri;\n}\n`;
   const tls = '    ssl_certificate /etc/identity/tls/server.crt;\n    ssl_certificate_key /etc/identity/tls/server.key;\n    ssl_protocols TLSv1.2 TLSv1.3;\n';
   return render(template, { HOST: host, PORT: port, REDIRECTS: redirect('80') + (port === 443 ? '' : redirect('443 ssl', tls)) });
 }

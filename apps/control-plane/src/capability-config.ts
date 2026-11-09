@@ -343,7 +343,10 @@ export class CapabilityConfigService {
     if(!this.directory||!evaluation||scope.workspaceId!==connection.workspaceId)return{allowed:false,cacheable:false};
     const deny=await Promise.all(rules.deny.map(rule=>this.directory!.matches(scope.workspaceId,rule,scope,connection,kind,evaluation)));if(deny.some(v=>v!==false))return{allowed:false,cacheable:!deny.includes('unknown')};
     if(groupMemberAccess)return{allowed:true,cacheable:true};
-    const allow=await Promise.all(rules.allow.map(rule=>this.directory!.matches(scope.workspaceId,rule,scope,connection,kind,evaluation)));return{allowed:!allow.includes('unknown')&&(inherit||allow.includes(true)),cacheable:!allow.includes('unknown')};
+    const allow=await Promise.all(rules.allow.map(rule=>this.directory!.matches(scope.workspaceId,rule,scope,connection,kind,evaluation))),unknown=allow.includes('unknown');
+    // A proven whitelist match does not depend on other pending identities.
+    // Preserve legacy inheritance's fail-closed positive-list dependency.
+    return{allowed:inherit?!unknown:allow.includes(true),cacheable:!unknown};
   }
   private async directoryDecision(scope:ChannelAccessScope,connection:ChannelConnection,kind:'private'|'group'|'meeting',rules:{allow:readonly DirectoryAccessRule[];deny:readonly DirectoryAccessRule[]},inherit=false,evaluation?:DirectoryEvaluation):Promise<boolean>{return(await this.directoryDecisionResult(scope,connection,kind,rules,inherit,evaluation)).allowed;}
   /** Host ingress supplies authenticated actor identity; not a public user-id authorization API. */
@@ -361,7 +364,8 @@ export class CapabilityConfigService {
       this.assertActive(scope);if(directory.admissionGuard(scope,connection)!==binding)return false;
       if(!this.admissionCache.current(group,generation))continue;
       if(this.getDirectoryAccess(scope.workspaceId,scope.entityId).revision!==policy.revision){this.invalidateAdmission(scope.workspaceId,scope.entityId);continue;}
-      if(!decision.cacheable)return false;
+      // Unknown rules prevent reuse, not a separately proven current grant.
+      if(!decision.cacheable)return decision.allowed;
       if(this.admissionCache.put(group,key,generation,binding,decision.allowed))return decision.allowed;
     }
     return false;

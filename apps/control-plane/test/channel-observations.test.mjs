@@ -19,7 +19,7 @@ function fixture(t,customize=r=>r){
  t.after(async()=>{await reporter.close();await server.close();for(const store of stores)store.close();rmSync(dir,{recursive:true,force:true});});
  return{platform,runtime,reporter,server,sent,async reopen(){await reporter.close();runtime.store.close();stores.splice(stores.indexOf(runtime.store),1);const reopened=new Store(join(dir,'runtime.sqlite'),{role:'runtime'});stores.push(reopened);return reopened;},lose(){loseResponse=true;}};
 }
-const candidate={appId:'app',botId:'observed-bot',tenantId:'tenant',robotCode:'robot',challengeText:'challenge-text',eventId:'event-1',messageId:'message-1'};
+const candidate={appId:'app',botId:'robot',tenantId:'tenant',robotCode:'robot',challengeText:'challenge-text',eventId:'event-1',messageId:'message-1'};
 test('real installation candidate and verification markers reach platform, survive authoritative confirmation',async t=>{
  const f=fixture(t);f.runtime.service.recordVerifiedCandidate('c','3',candidate);
  assert.equal(f.platform.service.verification('w','e','dingtalk').status,'waiting');
@@ -96,18 +96,18 @@ test('pending durable reports survive runtime restart without persisting platfor
 test('a rejected parent observation prevents dependent challenge markers from crossing a colliding state version',async t=>{
  const f=fixture(t);f.runtime.service.recordVerifiedCandidate('c','3',candidate);const current=f.platform.repository.byId('c');
  // Another legitimate observer wins the same next state version with a different candidate.
- f.platform.service.recordVerifiedCandidate('c','3',{...candidate,eventId:'other-event',messageId:'other-message',botId:'other-bot'});
+ f.platform.service.recordVerifiedCandidate('c','3',{...candidate,eventId:'other-event',messageId:'other-message',botId:'other-robot',robotCode:'other-robot'});
  await f.reporter.flush();assert.equal(f.platform.service.isVerificationEvent('c','event-1'),false);assert.equal(f.platform.service.isVerificationEvent('c','other-event'),true);assert.equal(f.sent.length,1);assert.ok(f.reporter.status().every(r=>r.status==='conflict'));assert.equal(f.platform.repository.byId('c').stateVersion,current.stateVersion+1);
 });
 
 test('I06 automatic first inbound observation reaches the platform without changing the live configuration revision',async t=>{
  const f=fixture(t),before=f.runtime.repository.byId('c');
- f.runtime.service.observeFirstInbound('c',{appId:'app',botId:'bot',tenantId:'corp',tenantNamespace:'corp_id',robotCode:'distinct-code'});
+ f.runtime.service.observeFirstInbound('c',{appId:'app',botId:'distinct-code',tenantId:'corp',tenantNamespace:'corp_id',robotCode:'distinct-code'});
  assert.equal(f.runtime.repository.byId('c').revision,before.revision);
  assert.equal(f.runtime.repository.byId('c').status,'verified');
  f.lose();await f.reporter.flush();await f.reporter.flush();
  const after=f.platform.repository.byId('c');
- assert.equal(after.eventTenantId,'corp');assert.equal(after.botId,'bot');assert.equal(after.revision,before.revision);
+ assert.equal(after.eventTenantId,'corp');assert.equal(after.botId,'distinct-code');assert.equal(after.revision,before.revision);
  assert.equal(after.stateVersion,before.stateVersion+1);
  assert.equal(f.platform.store.one('SELECT count(*) n FROM channel_observation_receipts').n,1);
 });
@@ -150,4 +150,78 @@ test('Feishu automatic identity report survives runtime restart without storing 
  const store=await f.reopen(),repository=new EmployeeChannelRepository(store);assert.equal(repository.byId('c'),undefined);
  const reporter=installChannelObservationReporter(store,repository,{url:'http://127.0.0.1:1',token,fetch:async(_url,init)=>{const r=await f.server.inject({method:'POST',url:'/internal/config/channel-observation',headers:init.headers,payload:JSON.parse(init.body)});return new Response(r.body,{status:r.statusCode});}});
  try{await reporter.flush();const actual=f.platform.repository.byId('c');assert.equal(actual.status,'verified');assert.equal(actual.eventTenantId,'tenant-key');assert.equal(actual.botId,'ou_verified_bot');assert.equal(actual.inboundVerified,true);assert.equal(reporter.status()[0].status,'accepted');assert.equal(store.one("SELECT 1 FROM main.sqlite_master WHERE name='employee_channel_connections'"),undefined);}finally{await reporter.close();}
+});
+
+test('WeCom per-member evidence reaches platform without treating the legacy global flag as identity',async t=>{
+ const f=fixture(t,r=>({...r,provider:'wecom',botId:'app',eventTenantId:'app',status:'verified',inboundVerified:true,directoryStatus:'unavailable',verification:undefined,wecomContactIdentityRevision:r.authRevision}));
+ assert.equal(f.platform.service.dto(f.platform.repository.byId('c')).memberSearchIdentityVerified,false);
+ const current=f.runtime.repository.byId('c');
+ f.runtime.service.botContacts.remember(current,[{id:'person-one',displayName:'Fixture Member',departmentPaths:[]}]);
+ f.runtime.service.observeWeComContact('c','person-one');
+ await f.reporter.flush();
+ assert.deepEqual(f.platform.repository.byId('c').wecomVerifiedContactIds,['person-one']);
+ assert.deepEqual(f.platform.service.dto(f.platform.repository.byId('c')).memberSearchVerifiedUserIds,['person-one']);
+ assert.equal(f.platform.repository.byId('c').revision,current.revision);
+ const report=f.sent[0];
+ for(const ids of [['person-one','person-one'],[''],[1],Array.from({length:501},(_,i)=>'user-'+i)]){
+  const response=await f.server.inject({method:'POST',url:'/internal/config/channel-observation',headers:{authorization:'Bearer '+token},payload:{...report,reportId:'invalid-'+JSON.stringify(ids).length,observation:{...report.observation,wecomVerifiedContactIds:ids}}});
+  assert.equal(response.statusCode,400);
+ }
+});
+
+test('WeCom administrator-relay proof crosses split observations with no clear code stored',async t=>{
+ const phrase='000123',now=Date.now(),hash=(await import('../dist/employee-channels/wecom-member-verification.js')).weComMemberCodeHash('fixture-secret',{id:'c',sourceId:'source',authRevision:1},phrase);
+ const challenge={requestId:'11111111-1111-4111-8111-111111111111',userId:'search-person',authRevision:1,phraseHash:hash,createdAt:now-1000,expiresAt:now+86399000,status:'pending',method:'administrator_relay',createdBy:'manager',issuedAt:now-500};
+ const f=fixture(t,r=>({...r,provider:'wecom',botId:'app',eventTenantId:'app',status:'verified',inboundVerified:true,directoryStatus:'unavailable',verification:undefined,wecomMemberChallenges:[challenge]}));
+ const before=f.runtime.repository.byId('c');
+ const {WeComMemberVerification}=await import('../dist/employee-channels/wecom-member-verification.js');const verifier=new WeComMemberVerification(f.runtime.repository,Date.now,{secret:()=> 'fixture-secret'});
+ assert.equal(verifier.accept(before,{text:phrase,callbackUserId:'callback-person',eventId:'event-proof',messageId:'message-proof',privateMessage:true}),'verified');
+ await f.reporter.flush();
+ const mapped=f.platform.repository.byId('c');assert.deepEqual(mapped.wecomContactMappings.map(m=>[m.userId,m.callbackUserId]),[['search-person','callback-person']]);
+ assert.equal(mapped.wecomMemberChallenges[0].status,'verified');assert.equal(f.platform.service.memberVerification.status(mapped,'search-person').status,'verified');
+ assert.equal(f.platform.service.isVerificationEvent('c','event-proof','message-proof'),true);
+ assert.equal(JSON.stringify(f.sent).includes(phrase),false);
+ const check={connectionId:'c',sourceId:'source',authRevision:1,requestId:challenge.requestId,callbackUserId:'callback-person'};
+ assert.equal((await f.server.inject({method:'POST',url:'/internal/config/wecom-member-confirmed',payload:check})).statusCode,401);
+ for(const [patch,expected]of [[{},true],[{callbackUserId:'someone-else'},false],[{sourceId:'old-source'},false],[{authRevision:2},false]]){const verified=await f.server.inject({method:'POST',url:'/internal/config/wecom-member-confirmed',headers:{authorization:'Bearer '+token},payload:{...check,...patch}});assert.equal(verified.statusCode,200);assert.equal(verified.json().confirmed,expected);}
+ // Lost/older configuration is reconciled from a durable observation without replaying a send.
+ f.runtime.store.run('UPDATE employee_channel_connections SET record_json=?,state_version=? WHERE id=?',JSON.stringify(before),before.stateVersion,'c');f.reporter.reconcile();
+ assert.deepEqual(f.runtime.repository.byId('c').wecomContactMappings,mapped.wecomContactMappings);
+});
+
+test('WeCom completed proof safely merges with a concurrent platform challenge without discarding either',async t=>{
+ const phrase='000456',now=Date.now(),hash=(await import('../dist/employee-channels/wecom-member-verification.js')).weComMemberCodeHash('fixture-secret',{id:'c',sourceId:'source',authRevision:1},phrase);
+ const challenge={requestId:'22222222-2222-4222-8222-222222222222',userId:'search-a',authRevision:1,phraseHash:hash,createdAt:now-1000,expiresAt:now+86399000,status:'pending',method:'administrator_relay',createdBy:'manager',issuedAt:now-500};
+ const f=fixture(t,r=>({...r,provider:'wecom',botId:'app',eventTenantId:'app',status:'verified',inboundVerified:true,directoryStatus:'unavailable',verification:undefined,wecomMemberChallenges:[challenge,{...challenge,requestId:'44444444-4444-4444-8444-444444444444',userId:'historical-failure',status:'failed'}]}));
+ const {WeComMemberVerification}=await import('../dist/employee-channels/wecom-member-verification.js');let tick=now;const verification=new WeComMemberVerification(f.runtime.repository,()=>++tick,{secret:()=> 'fixture-secret'});
+ verification.accept(f.runtime.repository.byId('c'),{text:phrase,callbackUserId:'callback-a',eventId:'merge-event',messageId:'merge-message',privateMessage:true});
+ const before=f.platform.repository.byId('c'),other={...challenge,requestId:'33333333-3333-4333-8333-333333333333',userId:'search-b',phraseHash:'c'.repeat(64)};
+ f.platform.repository.save({...before,wecomMemberChallenges:[...before.wecomMemberChallenges,other]},before);
+ await f.reporter.flush();
+ const after=f.platform.repository.byId('c');assert.equal(after.wecomContactMappings[0].callbackUserId,'callback-a');assert.equal(after.wecomMemberChallenges.length,3);assert.equal(after.wecomMemberChallenges[0].status,'verified');assert.equal(after.wecomMemberChallenges[1].status,'failed');assert.equal(after.wecomMemberChallenges[2].status,'pending');
+ assert.equal(f.reporter.status().some(row=>row.status==='conflict'),false);assert.equal(f.platform.service.isVerificationEvent('c','merge-event','merge-message'),true);
+});
+
+for(const unexpected of ['expired-history','active-challenge','history-with-new-mapping'])test(`WeCom concurrent pruning reconciles ${unexpected} without granting an unissued identity`,async t=>{
+ const day=86400000,phrase='000789',now=Date.now();
+ const {WeComMemberVerification,weComMemberCodeHash}=await import('../dist/employee-channels/wecom-member-verification.js');
+ const challenge={requestId:'active-request',userId:'active-person',authRevision:1,phraseHash:weComMemberCodeHash('fixture-secret',{id:'c',sourceId:'source',authRevision:1},phrase),createdAt:now-1000,expiresAt:now+day-1000,status:'pending',method:'administrator_relay',createdBy:'manager',issuedAt:now-1000};
+ const historical={...challenge,requestId:'old-request',userId:'old-person',phraseHash:'a'.repeat(64),createdAt:now-4*day-1000,expiresAt:now-3*day-1000,issuedAt:now-4*day-1000};
+ const f=fixture(t,r=>({...r,provider:'wecom',botId:'app',eventTenantId:'app',status:'verified',inboundVerified:true,directoryStatus:'unavailable',verification:undefined,wecomMemberChallenges:[historical,challenge]}));
+ const current=f.platform.repository.byId('c');
+ f.platform.repository.save({...current,wecomMemberChallenges:[challenge,{...challenge,requestId:'newly-issued',userId:'new-person',phraseHash:'b'.repeat(64)}]},current);
+ const verifier=new WeComMemberVerification(f.runtime.repository,()=>now,{secret:()=> 'fixture-secret'});
+ assert.equal(verifier.accept(f.runtime.repository.byId('c'),{text:phrase,callbackUserId:'callback-current',eventId:'prune-proof',messageId:'prune-message',privateMessage:true}),'verified');
+ if(unexpected!=='expired-history'){
+  const row=f.runtime.store.one("SELECT id,body_json FROM channel_state_reports WHERE json_extract(body_json,'$.observation.wecomContactMappings') IS NOT NULL ORDER BY rowid DESC LIMIT 1");
+  const report=JSON.parse(row.body_json);
+  if(unexpected==='active-challenge')report.observation.wecomMemberChallenges[0]={...historical,createdAt:now-1000,expiresAt:now+day-1000,issuedAt:now-1000};
+  else report.observation.wecomContactMappings.push({userId:'old-person',callbackUserId:'forged-callback',verifiedAt:historical.createdAt+1,requestId:historical.requestId,method:'administrator_relay'});
+  f.runtime.store.run('UPDATE channel_state_reports SET body_json=? WHERE id=?',JSON.stringify(report),row.id);
+ }
+ await f.reporter.flush();
+ const after=f.platform.repository.byId('c');
+ if(unexpected==='expired-history'){
+  assert.equal(after.wecomContactMappings[0].callbackUserId,'callback-current');assert.equal(after.wecomMemberChallenges.length,2);assert.equal(after.wecomMemberChallenges.some(c=>c.requestId==='old-request'),false);assert.ok(f.reporter.status().every(r=>r.status==='accepted'));
+ }else{assert.equal(after.wecomContactMappings,undefined);assert.ok(f.reporter.status().some(r=>r.status==='conflict'));}
 });

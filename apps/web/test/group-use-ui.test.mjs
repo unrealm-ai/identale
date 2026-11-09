@@ -14,7 +14,7 @@ const window = new Window({ url: 'http://127.0.0.1:5173/' });
 for (const name of ['window', 'document', 'navigator', 'location', 'history', 'localStorage', 'Node', 'ShadowRoot', 'Document', 'Element', 'HTMLElement', 'SVGElement', 'HTMLDialogElement', 'Event', 'MouseEvent', 'KeyboardEvent', 'PointerEvent', 'FocusEvent', 'InputEvent', 'Image', 'HTMLInputElement', 'HTMLTextAreaElement', 'getComputedStyle', 'MutationObserver', 'ResizeObserver', 'requestAnimationFrame', 'cancelAnimationFrame']) Object.defineProperty(globalThis, name, { value: name === 'window' ? window : window[name], configurable: true });
 const { createApp, h, reactive, nextTick } = await import('vue');
 const bundle = await mkdtemp(resolve('apps/web/.group-use-ui-test-'));
-const paths={picker:'apps/web/src/features/directory/DirectoryRulePicker.vue',settings:'apps/web/src/features/employees/ChannelConnections.vue',access:'apps/web/src/features/employees/AccessSettings.vue',scope:'apps/web/src/features/employees/WizardEmployeeAccess.vue',summary:'apps/web/src/features/employees/EmployeeScopeSummary.vue',channelScope:'apps/web/src/features/employees/ChannelAccessSettings.vue'};
+const paths={verification:'apps/web/src/features/directory/WecomMemberVerification.vue',human:'apps/web/src/features/employees/HumanConfirmationSettings.vue',picker:'apps/web/src/features/directory/DirectoryRulePicker.vue',settings:'apps/web/src/features/employees/ChannelConnections.vue',access:'apps/web/src/features/employees/AccessSettings.vue',scope:'apps/web/src/features/employees/WizardEmployeeAccess.vue',summary:'apps/web/src/features/employees/EmployeeScopeSummary.vue',channelScope:'apps/web/src/features/employees/ChannelAccessSettings.vue'};
 const components = {};
 for (const [name, path] of Object.entries(paths)) {
   const outfile = join(bundle, `${name}.mjs`);
@@ -146,4 +146,104 @@ test('channel policy blocks duplicate or uncertain saves and reconciles server r
  let release;const held=new Promise(resolve=>{release=resolve;});t.after(()=>release());let policy={allow:[],deny:[],revision:20,channelPolicies:[{sourceId:'source-1',mode:'allowlist',allow:[],deny:[],allowGroupMembers:true,revision:1}]};
  const env=await mount(t,'channelScope',{base,connection:wecomConnection(),canManage:true},async request=>{if(request.method==='PATCH'){await held;policy={...policy,channelPolicies:[{...request.body,revision:2}]};return{status:503,data:{error:'runtime_service_unavailable'}};}return policy;});
  await until(()=>document.querySelector('input[value="allowlist"]')?.checked);await selectMode('denylist');await checkGroup();await click('保存渠道使用策略');button('保存渠道使用策略').click();assert.equal(env.requests.filter(r=>r.method==='PATCH').length,1);release();await until(()=>text().includes('保存结果尚未确认'));assert.equal(button('保存渠道使用策略').disabled,true);await click('读取服务器配置并核对');await until(()=>!text().includes('保存结果尚未确认'));assert.equal(button('保存渠道使用策略').disabled,true);assert.equal(document.querySelector('[aria-label="允许群成员在群内使用"]').getAttribute('aria-checked'),'false');assert.equal(env.requests.filter(r=>r.method==='PATCH').length,1);
+});
+
+test('WeCom blacklist warning remains until every selected person has identity evidence',async t=>{
+ const deny={sourceId:'source-1',kind:'channel_user',subjectId:JSON.stringify(['channel_user','user_id','bot','unverified']),conversationKinds:['private','group']};
+ const env=await mount(t,'channelScope',{base,connection:{...wecomConnection(),memberSearchIdentityVerified:true,memberSearchVerifiedUserIds:['someone-else']},canManage:true},async()=>({allow:[],deny:[deny],revision:1,channelPolicies:[{sourceId:'source-1',mode:'all',allow:[],deny:[deny],allowGroupMembers:true,revision:1}]}));
+ await until(()=>text().includes('名单中仍有人员身份待核验'));
+ env.props.connection={...env.props.connection,memberSearchVerifiedUserIds:['someone-else','unverified']};await flush();
+ assert.equal(text().includes('名单中仍有人员身份待核验'),false);
+ env.props.connection={...env.props.connection,memberSearchVerifiedUserIds:[]};await flush();
+ assert.equal(text().includes('名单中仍有人员身份待核验'),true);
+});
+
+
+const verificationPerson={externalId:'searched-person',subjectId:JSON.stringify(['wecom','user_id','fixture-app','searched-person']),displayName:'核验测试成员',kind:'channel_user',departmentPaths:['研发部'],identityVerified:false};
+const verificationProps={base,sourceId:'source-1',userId:'searched-person',authRevision:1,label:'核验测试成员'};
+const currentCode=()=>({userId:'searched-person',status:'pending',phrase:'000123',expiresAt:Date.now()+86400000});
+const codeInput=()=>document.querySelector('input[aria-label="核验测试成员验证码"]');
+test('WeCom selected member auto-generates one six-digit 24-hour code, copies exact leading zeros and updates on reply',async t=>{
+ let verified=false;const events=[];const env=await mount(t,'verification',{...verificationProps,onVerified:()=>events.push(true)},async r=>r.method==='POST'?currentCode():{userId:'searched-person',status:verified?'verified':'unverified'});
+ await until(()=>codeInput());assert.equal(codeInput().value,'000123');await click('复制验证码');assert.equal(await navigator.clipboard.readText(),'000123');assert.match(text(),/24 小时有效/);assert.match(text(),/请让核验测试成员通过企微私聊向机器人发送验证码 000123，完成身份绑定。/);assert.equal(text().includes('可附带文字'),false);assert.equal(env.requests.filter(r=>r.method==='POST').length,1);
+ verified=true;await click('查询验证状态');await until(()=>events.length===1);assert.equal(codeInput(),null);assert.match(text(),/身份已验证/);
+});
+test('WeCom reopen restores current code without POST; replacement is explicit and duplicate clicks blocked',async t=>{
+ let release;const held=new Promise(resolve=>release=resolve);t.after(()=>release());
+ const env=await mount(t,'verification',{...verificationProps},async r=>{if(r.method==='POST'){await held;return{...currentCode(),phrase:'000456'};}return currentCode();});
+ await until(()=>codeInput());assert.equal(codeInput().value,'000123');assert.equal(env.requests.some(r=>r.method==='POST'),false);
+ const generate=button('重新生成验证码');generate.click();generate.click();await flush();assert.equal(env.requests.filter(r=>r.method==='POST').length,1);assert.equal(env.requests.find(r=>r.method==='POST').body.replace,true);release();await until(()=>codeInput().value==='000456');
+});
+test('WeCom failed generation never automatically retries and explicit retry reuses requestId',async t=>{
+ let posts=0;const env=await mount(t,'verification',{...verificationProps},async r=>{if(r.method==='POST'){posts++;if(posts===1)throw Error('fixture network failure');return currentCode();}return{userId:'searched-person',status:'unverified'};});
+ await until(()=>text().includes('结果未知'));assert.equal(posts,1);await click('重试获取验证码');const requests=env.requests.filter(r=>r.method==='POST');assert.equal(requests[0].body.requestId,requests[1].body.requestId);assert.equal(codeInput().value,'000123');
+});
+for(const boundary of ['stop','unmount','source'])test(`WeCom automatic generation ignores late response after ${boundary}`,async t=>{
+ let release;const held=new Promise(resolve=>release=resolve);t.after(()=>release());
+ const env=await mount(t,'verification',{...verificationProps},async r=>{if(r.method==='POST'){await held;return currentCode();}return r.url.includes('source-next')?{userId:'searched-person',status:'failed'}:{userId:'searched-person',status:'unverified'};});
+ await until(()=>env.requests.some(r=>r.method==='POST'));if(boundary==='stop')await click('停止查询');else if(boundary==='unmount')env.app.unmount();else{env.props.sourceId='source-next';await flush();}release();await flush();assert.equal(codeInput(),null);
+});
+test('WeCom expired code auto-renews on visible opening but never while hidden',async t=>{
+ const original=Object.getOwnPropertyDescriptor(document,'visibilityState');let visibility='hidden';Object.defineProperty(document,'visibilityState',{get:()=>visibility,configurable:true});t.after(()=>{if(original)Object.defineProperty(document,'visibilityState',original);else delete document.visibilityState;});
+ const env=await mount(t,'verification',{...verificationProps},async r=>r.method==='POST'?currentCode():{userId:'searched-person',status:'expired',expiresAt:Date.now()-1000});
+ assert.equal(env.requests.length,0);visibility='visible';document.dispatchEvent(new Event('visibilitychange'));await until(()=>codeInput());assert.equal(env.requests.filter(r=>r.method==='POST').length,1);assert.equal(env.requests.find(r=>r.method==='POST').body.replace,undefined);
+});
+test('WeCom visible code expiry refreshes once without background rotation',async t=>{
+ let reads=0;const env=await mount(t,'verification',{...verificationProps},async r=>{if(r.method==='POST')return{...currentCode(),phrase:'000456'};return ++reads===1?{...currentCode(),expiresAt:Date.now()+100}:{userId:'searched-person',status:'expired'};});
+ await until(()=>codeInput()?.value==='000456');assert.equal(env.requests.filter(r=>r.method==='POST').length,1);
+});
+test('WeCom rules select immediately and retain automatic code entry after reopening without search',async t=>{
+ let env;env=await mount(t,'picker',{base,label:'使用范围',subjects:subjects(wecomConnection()),rules:[],'onUpdate:rules':rules=>{env.props.rules=rules;}},async r=>r.url.endsWith('/member-search')?page([{...verificationPerson}],{provider:'wecom'}):currentCode());
+ input('使用范围成员关键词','测试');await click('搜索企微成员');await click('选择人员');await until(()=>document.querySelector('.directory-rule-detail'));assert.equal(env.props.rules.length,1);assert.match(text(),/可先保存/);env.props.base='/workspaces/workspace-a/entities/employee-next';await flush();assert.equal(document.querySelector('.directory-option'),null);await until(()=>document.querySelector('.directory-rule-detail input[readonly]'));
+});
+const pendingHumanTarget={kind:'wecom_directory',connectionId:'connection-1',provider:'wecom',appId:'fixture-app',tenantId:'fixture-tenant',sourceId:'source-1',authRevision:1,directoryUserId:'searched-person',identityNamespace:'user_id'};
+for(const initiallyVerified of [false,true])test(`WeCom confirmation saves ${initiallyVerified?'verified':'pending'} target without waiting for member`,async t=>{
+ let verified=initiallyVerified;const env=await mount(t,'human',{base},async r=>{
+  if(r.url.endsWith('/member-search'))return page([{...verificationPerson,identityVerified:verified}],{provider:'wecom'});
+  if(r.url.includes('/member-verification'))return verified?{userId:'searched-person',status:'verified'}:currentCode();
+  if(r.method==='PUT')return{version:2,rules:r.body.rules};
+  return{version:1,rules:[],subjects:subjects(wecomConnection()),candidates:[{label:verificationPerson.displayName,directorySubjectId:verificationPerson.subjectId,identityVerified:verified,target:pendingHumanTarget}]};
+ });
+ await until(()=>!button('从渠道目录选择').disabled);await click('从渠道目录选择');input('人工确认人成员关键词','测试');await click('搜索企微成员');await click('选择人员');await until(()=>document.querySelector('.human-rule'));await click('保存确认设置');await until(()=>text().includes('人工确认接收人已保存'));assert.deepEqual(env.requests.find(r=>r.method==='PUT').body.rules,[{questionScope:'*',target:pendingHumanTarget}]);
+ if(!initiallyVerified){assert.match(text(),/身份待验证/);verified=true;await click('查询验证状态');await until(()=>text().includes('身份已验证'));assert.equal(button('保存确认设置').disabled,true);}
+});
+test('saved pending confirmation reopens current code without search or candidate',async t=>{
+ const env=await mount(t,'human',{base},async r=>r.url.includes('/member-verification')?currentCode():{version:1,rules:[{questionScope:'*',target:pendingHumanTarget}],subjects:subjects(wecomConnection()),candidates:[]});
+ await until(()=>document.querySelector('.human-rule input[readonly]'));assert.equal(env.requests.some(r=>r.method==='POST'),false);assert.equal(button('保存确认设置').disabled,true);
+});
+test('readonly WeCom identity rows never fetch or generate manager codes',async t=>{
+ const env=await mount(t,'verification',{...verificationProps,readonly:true},async()=>{throw Error('read-only must not request');});assert.equal(env.requests.length,0);assert.equal(codeInput(),null);assert.equal(document.querySelector('button'),null);
+});
+test('WeCom confirmation rejects another robot even for the same directory identity and name',async t=>{
+ const env=await mount(t,'human',{base},async r=>r.url.endsWith('/member-search')?page([verificationPerson],{provider:'wecom'}):{version:1,rules:[],subjects:subjects(wecomConnection()),candidates:[{label:verificationPerson.displayName,directorySubjectId:verificationPerson.subjectId,target:{...pendingHumanTarget,connectionId:'other-connection'}}]});
+ await until(()=>!button('从渠道目录选择').disabled);await click('从渠道目录选择');input('人工确认人成员关键词','测试');await click('搜索企微成员');await click('选择人员');await until(()=>document.querySelector('.human-settings [role=alert]'));assert.equal(document.querySelector('.human-rule'),null);assert.equal(env.requests.some(r=>r.method==='PUT'),false);
+});
+test('WeCom verification updates warning and search badges without losing dirty rules or other pending people',async t=>{
+ const people=[{...verificationPerson},{...verificationPerson,externalId:'second-person',subjectId:JSON.stringify(['wecom','user_id','fixture-app','second-person']),displayName:'另一个待验证成员'}],verified=new Set(),evidence=[];
+ const policy={allow:[],deny:[],revision:1,channelPolicies:[{sourceId:'source-1',mode:'all',allow:[],deny:[],allowGroupMembers:true,revision:7}]};
+ const env=await mount(t,'channelScope',{base,connection:wecomConnection(),canManage:true,onIdentityVerified:value=>evidence.push(value)},async r=>{
+  if(r.url.endsWith('/member-search'))return page(people,{provider:'wecom'});
+  if(r.url.includes('/member-verification')){const id=r.body?.userId??new URL(r.url,'http://fixture').searchParams.get('userId');return{...currentCode(),userId:id,status:verified.has(id)?'verified':'pending'};}
+  return policy;
+ });
+ await until(()=>document.querySelector('input[value="denylist"]')?.checked);input('拒绝成员成员关键词','测试');await click('搜索企微成员');
+ for(const option of document.querySelectorAll('.directory-option')){[...option.querySelectorAll('button')].find(b=>b.textContent.trim()==='选择人员').click();await flush();}
+ assert.equal(document.querySelectorAll('.directory-rule-detail').length,2);assert.equal(button('保存渠道使用策略').disabled,false);assert.match(text(),/名单中仍有人员身份待核验/);
+ verified.add('searched-person');const first=document.querySelectorAll('.directory-rule-detail')[0];[...first.querySelectorAll('button')].find(b=>b.textContent.trim()==='查询验证状态').click();await flush();
+ assert.match(text(),/名单中仍有人员身份待核验/);assert.match(document.querySelectorAll('.directory-option')[0].textContent,/身份已核验/);assert.equal(document.querySelectorAll('.directory-option')[1].textContent.includes('身份已核验'),false);
+ verified.add('second-person');const second=document.querySelectorAll('.directory-rule-detail')[1];[...second.querySelectorAll('button')].find(b=>b.textContent.trim()==='查询验证状态').click();await flush();assert.equal(text().includes('名单中仍有人员身份待核验'),false);assert.equal(document.querySelectorAll('.directory-rule-detail').length,2);assert.equal(button('保存渠道使用策略').disabled,false);assert.equal(env.requests.some(r=>r.method==='PATCH'),false);assert.deepEqual(evidence[0],{sourceId:'source-1',authRevision:1,userId:'searched-person'});
+ env.props.connection={...env.props.connection,memberSearchVerifiedUserIds:['searched-person','second-person']};await flush();assert.equal(document.querySelectorAll('.directory-option').length,2);assert.equal(document.querySelector('input[aria-label="拒绝成员成员关键词"]').value,'测试');assert.equal(button('保存渠道使用策略').disabled,false);
+ verified.clear();env.props.connection={...env.props.connection,authRevision:2,memberSearchVerifiedUserIds:[]};await flush();assert.match(text(),/名单中仍有人员身份待核验/);assert.equal(document.querySelectorAll('.directory-rule-detail').length,2);assert.equal(button('保存渠道使用策略').disabled,false);
+});
+test('ChannelConnections merges verified evidence without resetting credentials draft or reloading channel policy',async t=>{
+ let verified=false;const policy={allow:[],deny:[],revision:1,channelPolicies:[{sourceId:'source-1',mode:'all',allow:[],deny:[],allowGroupMembers:true,revision:7}]};
+ const env=await mount(t,'settings',{base,canManage:true},async r=>{
+  if(r.url.endsWith('/channels'))return[wecomConnection()];if(r.url.endsWith('/runtime-status'))return{observedAt:null,employee:null};
+  if(r.url.endsWith('/member-search'))return page([{...verificationPerson}],{provider:'wecom'});
+  if(r.url.includes('/member-verification'))return{...currentCode(),status:verified?'verified':'pending'};
+  if(r.url.endsWith('/directory-access'))return policy;
+  return{};
+ });
+ await providerTab('企业微信');await until(()=>document.querySelector('input[value="denylist"]')?.checked);input('渠道应用 ID','unsaved-bot-id');input('拒绝成员成员关键词','测试');await click('搜索企微成员');await click('选择人员');await until(()=>document.querySelector('.member-verification input[readonly]'));
+ verified=true;await click('查询验证状态');await until(()=>!text().includes('名单中仍有人员身份待核验'));assert.equal(document.querySelector('input[aria-label="渠道应用 ID"]').value,'unsaved-bot-id');assert.equal(document.querySelectorAll('.directory-option').length,1);assert.match(document.querySelector('.directory-option').textContent,/身份已核验/);assert.equal(button('保存渠道使用策略').disabled,false);assert.equal(env.requests.filter(r=>r.url.endsWith('/channels')).length,1);assert.equal(env.requests.filter(r=>r.url.endsWith('/directory-access')).length,1);assert.equal(env.requests.some(r=>r.method==='PATCH'),false);
 });

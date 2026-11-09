@@ -27,7 +27,7 @@ export function dingtalkIdentityDiagnostic(session:ChannelIngressSession,envelop
   result.conversationKind=row['conversationType']==='1'?'private':row['conversationType']==='2'?'group':'unknown';
   result.mentioned=row['isInAtList']===true?'yes':row['isInAtList']===false?'no':row['isInAtList']===undefined?'unknown':'invalid';
   result.fields={
-   chatbotUserId:compare(row['chatbotUserId'],hints.botId),robotCode:compare(row['robotCode'],hints.robotCode),
+   chatbotUserId:shape(row['chatbotUserId']),robotCode:compare(row['robotCode'],hints.robotCode),
    // An app_id hint is deliberately not a corporate identity assertion.
    chatbotCorpId:hints.tenantNamespace==='app_id'?(shape(row['chatbotCorpId'])==='present'?'unknown':shape(row['chatbotCorpId'])):compare(row['chatbotCorpId'],hints.tenantId),
    appId:compare(row['appId'],session.appId),appKey:compare(row['appKey'],session.appId),

@@ -282,13 +282,13 @@ test('DingTalk identity rejection persists safe field diagnostics without loggin
  const f=await fixture(t,{diagnostics}),c=await f.save('dingtalk'),live=await f.transport.current(c.id);
  for(const group of [true,false]){
   const raw=ding('PRIVATE_MESSAGE_SENTINEL_'+group,'PRIVATE_TEXT_SENTINEL');const data=JSON.parse(raw.data);
-  Object.assign(data,{chatbotUserId:'PRIVATE_BOT_SENTINEL',senderStaffId:'PRIVATE_SENDER_SENTINEL',senderId:'PRIVATE_OPAQUE_SENTINEL',conversationId:'PRIVATE_CHAT_SENTINEL',conversationType:group?'2':'1',isInAtList:group,sessionWebhook:'https://private.invalid/PRIVATE_WEBHOOK_SENTINEL',accessToken:'PRIVATE_TOKEN_SENTINEL'});raw.data=JSON.stringify(data);
-  await assert.rejects(live.sink.onEvent(raw),/ingress_bot_mismatch/);
+  Object.assign(data,{chatbotUserId:'PRIVATE_BOT_SENTINEL',appId:'PRIVATE_WRONG_APP_SENTINEL',senderStaffId:'PRIVATE_SENDER_SENTINEL',senderId:'PRIVATE_OPAQUE_SENTINEL',conversationId:'PRIVATE_CHAT_SENTINEL',conversationType:group?'2':'1',isInAtList:group,sessionWebhook:'https://private.invalid/PRIVATE_WEBHOOK_SENTINEL',accessToken:'PRIVATE_TOKEN_SENTINEL'});raw.data=JSON.stringify(data);
+  await assert.rejects(live.sink.onEvent(raw),/ingress_app_mismatch/);
  }
  await diagnostics.flush();const logs=[];for(const file of await readdir(diagnostics.root))logs.push(...(await readFile(join(diagnostics.root,file),'utf8')).trim().split('\n').map(JSON.parse));
  const failures=logs.filter(log=>log.stage==='ingress.received'&&log.reason==='identity_invalid');assert.equal(failures.length,2);
  for(const [index,failed] of failures.entries()){
-  assert.equal(failed.ingressIdentity.channel,'dingtalk');assert.equal(failed.ingressIdentity.error,'ingress_bot_mismatch');assert.equal(failed.ingressIdentity.conversationKind,index===0?'group':'private');assert.equal(failed.ingressIdentity.mentioned,index===0?'yes':'no');assert.equal(failed.ingressIdentity.fields.chatbotUserId,'mismatch');assert.equal(failed.ingressIdentity.fields.chatbotCorpId,'match');assert.equal(failed.ingressIdentity.fields.senderStaffId,'present');assert.equal(failed.ingressIdentity.fields.appId,'missing');
+  assert.equal(failed.ingressIdentity.channel,'dingtalk');assert.equal(failed.ingressIdentity.error,'ingress_app_mismatch');assert.equal(failed.ingressIdentity.conversationKind,index===0?'group':'private');assert.equal(failed.ingressIdentity.mentioned,index===0?'yes':'no');assert.equal(failed.ingressIdentity.fields.chatbotUserId,'present');assert.equal(failed.ingressIdentity.fields.chatbotCorpId,'match');assert.equal(failed.ingressIdentity.fields.senderStaffId,'present');assert.equal(failed.ingressIdentity.fields.appId,'mismatch');
  }
  assert.ok(logs.filter(log=>log.stage==='ingress.received').every(log=>log.text===undefined&&log.json===undefined));assert.ok(!JSON.stringify(logs).includes('PRIVATE_'));assert.equal(f.count(),0);assert.equal(f.repository.byId(c.id).status,'pending_verification');
 });

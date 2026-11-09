@@ -13,7 +13,7 @@ import InfoHint from '../../shared/ui/InfoHint.vue';
 import ChannelValidationReport from './ChannelValidationReport.vue';
 import { channelApi, ChannelValidationFailure, type ChannelValidation } from './channel-validation';
 import { directoryStatusLabel } from '../directory/types';
-import type { DirectoryConnection, DirectoryProvider } from '../directory/types';
+import type { DirectoryConnection, DirectoryProvider, DirectoryIdentityEvidence } from '../directory/types';
 const props = defineProps<{ base: string; canManage: boolean; disabled?: boolean }>();
 const emit = defineEmits<{ busyChanged: [value: boolean]; sessionExpired: []; changed: [];rebound:[];dirtyChanged:[boolean] }>();
 const sharingBusy=ref(false),sharingDirty=ref(false);
@@ -71,6 +71,10 @@ async function read(signal: AbortSignal) {
   });
   if (!signal.aborted) runtimeSnapshot.value = snapshot;
 }
+function mergeIdentityEvidence(evidence: DirectoryIdentityEvidence) {
+  const current = connections.value.find(item => item.sourceId === evidence.sourceId && item.authRevision === evidence.authRevision && item.provider === 'wecom');
+  if (current) current.memberSearchVerifiedUserIds = [...new Set([...(current.memberSearchVerifiedUserIds ?? []), evidence.userId])];
+}
 async function load() { await run(read); }
 async function mutate(action: 'connect' | 'revalidate' | 'settings') {
   if (!props.canManage || !loaded.value || channelLocked.value || policyDirty.value || sharingDirty.value || contextDirty.value || action === 'connect' && (!credentialsComplete.value || replacing.value&&!replaceSource.value)) return;
@@ -125,9 +129,9 @@ onUnmounted(() => { controller.abort(); clearSecrets();emit('dirtyChanged',false
           <p data-testid="transport-status">长连接：{{item.runtimeTransport?.error==='channel_ingress_standby'?'由另一平台进程维护连接':item.runtimeTransport?transportLabel(item.runtimeTransport.state):'状态未知'}}<InfoHint label="连接状态说明">连接状态与身份、目录和使用权限分别核验。无法获取状态时不能判断为离线。</InfoHint></p>
           <p v-if="item.provider==='wecom'" data-testid="wecom-credential-status">机器人凭据：{{item.runtimeTransport?.state==='connected'?'当前长连接已认证':item.runtimeTransport?.state==='failed'?'连接未通过，请查看连接错误':'等待当前长连接认证结果'}}</p>
           <p v-if="!item.runtimeTransport" role="status">暂时无法确认此连接的运行状态，请稍后刷新。</p>
-          <p v-if="item.runtimeTransport?.error && item.runtimeTransport.error!=='channel_ingress_standby'" role="status">连接错误：{{item.runtimeTransport.error}}</p><p v-if="item.lastError" role="status">{{item.lastError}}</p>
+          <p v-if="item.runtimeTransport?.error && item.runtimeTransport.error!=='channel_ingress_standby'" role="status">连接错误：{{item.runtimeTransport.error}}</p><p v-if="item.lastError" role="status">{{item.lastError==='channel_identity_revalidation_required'?'机器人身份规则已更新，请先核对未完成任务，再重新验证此钉钉连接。':item.lastError}}</p>
           <details class="connection-diagnostics"><summary>连接诊断</summary><p v-if="item.observedAt">运行状态观测时间：{{formatTime(item.observedAt)}}</p><template v-if="item.runtimeTransport"><p>状态更新时间：{{formatTime(item.runtimeTransport.changedAt)}}</p><p v-if="item.runtimeTransport.lastConnectedAt">最近连接：{{formatTime(item.runtimeTransport.lastConnectedAt)}}</p><p v-if="item.runtimeTransport.lastDisconnectedAt">最近断线：{{formatTime(item.runtimeTransport.lastDisconnectedAt)}}</p><p v-if="item.runtimeTransport.error==='channel_ingress_standby'">当前平台进程处于待命状态，不代表渠道已停用或全局连接离线；此处不推断另一进程的在线状态。</p></template>
-            <p>{{item.provider==='wecom'?'BotID':item.provider==='feishu'?'应用 App ID':'应用'}} {{item.appId}} · 版本 {{item.revision}}</p><p>身份证据：{{evidenceLabel(item.identityEvidence)}}</p><p>{{item.provider==='feishu'?'入站确认记录':'首条消息'}}：{{item.inboundVerified?'已确认':item.provider==='feishu'?'尚无确认记录':'尚未确认'}}</p><p v-if="item.botId">{{item.provider==='feishu'?'机器人 open_id':item.status==='verified'?'已验证机器人':'配置机器人（待验证）'}} {{item.botId}}</p><p>身份依据：{{item.tenantIdNamespace}} · {{item.tenantId}}</p><p v-if="item.tenantIdNamespace==='app_scoped'||item.tenantIdNamespace==='app_id'">{{item.provider==='feishu'?'租户 tenant_key 尚未确认，应用 App ID 不能代替租户身份。':'仅证明应用身份，不代表企业 corpId 已验证。'}}</p>
+            <p>{{item.provider==='wecom'?'BotID':item.provider==='feishu'?'应用 App ID':'应用'}} {{item.appId}} · 版本 {{item.revision}}</p><p>身份证据：{{evidenceLabel(item.identityEvidence)}}</p><p>{{item.provider==='feishu'?'入站确认记录':'首条消息'}}：{{item.inboundVerified?'已确认':item.provider==='feishu'?'尚无确认记录':'尚未确认'}}</p><p v-if="item.botId">{{item.provider==='feishu'?'机器人 open_id':item.provider==='dingtalk'?'机器人 robotCode':item.status==='verified'?'已验证机器人':'配置机器人（待验证）'}} {{item.botId}}</p><p>身份依据：{{item.tenantIdNamespace}} · {{item.tenantId}}</p><p v-if="item.tenantIdNamespace==='app_scoped'||item.tenantIdNamespace==='app_id'">{{item.provider==='feishu'?'租户 tenant_key 尚未确认，应用 App ID 不能代替租户身份。':'仅证明应用身份，不代表企业 corpId 已验证。'}}</p>
           </details>
         </section>
         <ChannelCapabilities v-if="connection" :capabilities="connection.capabilities" :provider="provider" @session-expired="emit('sessionExpired')"/>
@@ -152,7 +156,7 @@ onUnmounted(() => { controller.abort(); clearSecrets();emit('dirtyChanged',false
         <template v-else>尚未取得可信的机器人 open_id，不能自动确认身份。请先在飞书应用中启用机器人能力，再重新验证已存凭据；应用 App ID 或消息中的 @ 不能替代机器人身份。</template>
       </NAlert>
       <NAlert v-if="provider !== 'feishu' && connection?.status === 'pending_verification'" type="info">凭据已保存。长连接在线后，给机器人发一条普通私聊或群定向消息，系统会自动确认身份；同一条消息仍按现有使用范围鉴权，首发者不会自动获得使用权。</NAlert>
-    <ChannelAccessSettings v-if="canManage && selectedConnection && connection" ref="policyEditor" :base="base" :connection="connection" :can-manage="canManage" :disabled="!!disabled||busy||directoryBusy||sharingBusy" @busy-changed="v=>policyBusy=v" @dirty-changed="v=>policyDirty=v" @changed="emit('changed')" @session-expired="emit('sessionExpired')" />
+    <ChannelAccessSettings v-if="canManage && selectedConnection && connection" ref="policyEditor" :base="base" :connection="connection" :can-manage="canManage" :disabled="!!disabled||busy||directoryBusy||sharingBusy" @busy-changed="v=>policyBusy=v" @dirty-changed="v=>policyDirty=v" @identity-verified="mergeIdentityEvidence" @changed="emit('changed')" @session-expired="emit('sessionExpired')" />
       <NCard v-if="connection && provider!=='wecom' && (connection.capabilities?.recentGroupContext.supported || connection.capabilities?.keywordTriggers.supported)" title="群聊触发与上下文" size="small">
         <p class="field-note">普通群消息：{{ connection.groupListeningStatus?.permission === 'granted' ? '已授权' : connection.groupListeningStatus?.permission === 'denied' ? '未授权' : '未核验' }}<InfoHint label="关于群消息接收">上下文开关只控制近期群消息保留，不控制 SDK 接收或关键词触发。群消息接收权限与连接状态分别核验。最近窗口缓存 {{ connection.groupListeningStatus?.cachedMessages ?? 0 }} 条；没有缓存不表示已获权限。</InfoHint></p>
         <p class="field-note">当前保存的触发方式：{{connection.context?.groupTriggerKeywords?.length ? '@ 或关键词（关键词须有普通群消息权限）' : '仅 @'}}；均须通过使用授权。</p>

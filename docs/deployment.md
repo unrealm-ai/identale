@@ -81,6 +81,12 @@
 
 部署名称仍复用 `identity-*` 服务和上述路径。同机已有旧 Identity 部署时，安装脚本可能进入更新 / 停止现有服务的流程，而不是创建完全独立的 Identale 实例；部署前先核对现有服务、数据、凭据和备份，不把目录改名当作隔离。
 
+## OAuth 回调与代理日志
+
+随部署生成的 Nginx 配置使用专用访问日志 `/var/log/nginx/identity-access.log`，只记录客户端 IP、时间、请求方法、无查询参数的路径、协议、状态及响应字节数；HTTPS 服务及 HTTP / 443 重定向均不记录查询字符串或 Referer。飞书个人 OAuth 回调 `/api/business-resources/feishu/callback` 额外关闭访问日志，并将该位置的错误日志丢弃，避免上游连接失败时错误日志保存完整含 `code` / `state` 的请求 URL。代价是该回调没有 Nginx 请求级诊断，排查时使用应用返回的无凭据状态，不开启原始 URL 日志。
+
+已有服务器需要重新部署配置后才生效，本次源码变更不会清理历史日志。自行配置的外层代理、CDN、Nginx 全局调试 / 请求解析错误日志和监控采集不在上述路由保护范围，部署者仍需确认它们不采集授权参数与 Referer，并按自身日志策略保留、轮转和处理旧记录。不要将真实 OAuth URL 放入工单或公开日志。
+
 ## HTTP 请求体限制
 
 [Nginx 模板](../scripts/deploy/templates/nginx.conf.template)默认仍限制为 16 KiB，仅对后端明确接受更大 JSON 的路径设置例外：

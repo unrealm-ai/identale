@@ -55,10 +55,10 @@ export class ChannelIngressSupervisor {
   const target=ingressReplyTarget(live.session,envelope,hints),bindingVersion=this.connections.currentBindingVersion(r.id),text=ingressMessageText(r.provider,envelope);
   let fingerprint:string;try{fingerprint=JSON.stringify(envelope);}catch{fingerprint=randomUUID();}
   const traceId=createHash('sha256').update(JSON.stringify(target&&bindingVersion?[r.workspaceId,r.entityId,r.id,bindingVersion,target.conversation.tenantId,target.conversation.externalId,target.messageId,'initial']:[r.id,fingerprint])).digest('hex');
-  const correlation={traceId,messageId:traceId};
+  const correlation={traceId,messageId:traceId},memberControl=r.provider==='wecom'&&this.connections.memberVerification.isControl(r,envelope);
   // Feishu retains redacted message diagnostics; DingTalk failures log only
   // fixed identity comparisons, never the pre-parsed message or callback.
-  let payload:{json?:unknown;text?:string}=r.provider==='dingtalk'?{}:{...(text!==undefined?{text}:{})};
+  let payload:{json?:unknown;text?:string}=r.provider==='dingtalk'||memberControl?{}:{...(text!==undefined?{text}:{})};
   if(r.provider==='feishu')try{payload=redactMessageJson({json:envelope,...payload}) as typeof payload;}catch{/* Invalid JSON cannot break the existing rejection/ACK path. */}
   this.diagnostics.event({stage:'ingress.received',phase:'point',...correlation,status:'received',receivedAt:this.now(),...payload,...(r.provider==='feishu'&&payload.json!==undefined?{messageKind:'receive' as const}:{})});
   let normalized:ReturnType<typeof normalizeChannelIngressEvent>;
@@ -66,9 +66,39 @@ export class ChannelIngressSupervisor {
   catch(error){
    const ingressIdentity=dingtalkIdentityDiagnostic(live.session,envelope,hints,error);
    this.diagnostics.event({stage:'ingress.received',phase:'point',...correlation,outcome:'failure',status:'failed',reason:'identity_invalid',...diagnosticFailure(error),...(ingressIdentity?{ingressIdentity}:{})});
-   if(r.status==='verified'&&target&&bindingVersion)await this.loop.rejectAuthenticatedEvent({workspaceId:r.workspaceId,entityId:r.entityId,connectionId:r.id,bindingVersion,appId:r.appId,...target},'identity',write=>this.commit(live,write));
+   if(!memberControl&&r.status==='verified'&&target&&bindingVersion)await this.loop.rejectAuthenticatedEvent({workspaceId:r.workspaceId,entityId:r.entityId,connectionId:r.id,bindingVersion,appId:r.appId,...target},'identity',write=>this.commit(live,write));
    else this.diagnostics.event({stage:'outbox.send',phase:'point',...correlation,outcome:'failure',status:'failed',reason:'reply_target_unavailable'});
    throw error;
+  }
+  if(memberControl){
+   const body=(envelope as {body?:Record<string,unknown>}).body;
+   // Only unquoted plain private messages can enter member verification.
+   if(normalized.kind==='message'&&r.status==='verified'&&normalized.event.origin==='live'&&normalized.event.message.conversationKind==='private'&&normalized.event.message.author.kind==='human'&&normalized.event.message.author.identityEvidence==='channel_verified'&&normalized.event.message.author.externalId&&body?.msgtype==='text'&&['quote','mixed','image','file','voice'].every(key=>body[key]===undefined)){
+    const {event}=normalized;
+    // Known control events are durably marked before any send. Replays and
+    // unknown send outcomes cannot trigger another response.
+    const result=this.commit(live,()=>this.connections.memberVerification.accept(r,{text:normalized.verificationText,callbackUserId:event.message.author.externalId!,eventId:event.eventId,messageId:event.message.id,privateMessage:true}));
+    if(result==='ordinary')return this.applyNormalized(live,normalized);
+    if(result!=='ignored'&&live.port.send){
+     const persisted=result==='verified'?await this.connections.memberVerificationPersisted(r.id,event.message.author.externalId!).catch(()=>false):false;
+     const reply=result==='verified'?(persisted?'身份验证成功':'验证结果正在同步，请稍后查看页面状态。'):result==='used'?'验证码已使用，请勿重复发送。':result==='expired'?'验证码已过期，请联系管理员获取新验证码。':result==='revoked'?'验证码已作废，请联系管理员获取新验证码。':'身份验证未完成，请联系管理员获取新验证码。';
+     const guard=()=>{
+      this.assert(live);const current=this.connections.repository.byId(r.id)!;
+      if(current.sourceId!==r.sourceId||current.status!=='verified'||current.inboundVerified!==true||!bindingVersion||this.connections.currentBindingVersion(r.id)!==bindingVersion||this.status(r.id).state!=='connected')throw new ChannelError('forbidden','channel_send_binding_expired');
+     };
+     try{
+      guard();
+      // Use the exact authenticated callback's runner and message ID. Never
+      // switch to a replacement socket, proactive send or business outbox.
+      await live.port.send({conversation:event.message.conversation,replyToMessageId:event.message.id,text:reply,operationId:'member-verification-'+createHash('sha256').update(JSON.stringify([r.id,r.sourceId,r.authRevision,event.eventId,event.message.id])).digest('hex'),beforeSend:async()=>guard(),assertSendAllowed:guard});
+     }catch(error){
+      // A timeout may mean delivery succeeded. The durable reservation remains
+      // consumed, so neither replay nor reconnect can retry this response.
+      this.diagnostics.event({stage:'outbox.send',phase:'point',...correlation,outcome:'failure',status:'failed',reason:'send_failed',...diagnosticFailure(error)});
+     }
+    }
+   }
+   return this.commit(live,()=> 'accepted');
   }
   return this.applyNormalized(live,normalized);
  }

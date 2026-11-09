@@ -1,3 +1,4 @@
+import {DingTalkBotConversationAdapter} from '../dist/adapters/channels/dingtalk.js';
 import {TaskArtifacts} from '../dist/task-artifacts.js';
 import {HumanConfirmation} from '../dist/human-confirmation.js';
 import {EmployeeChannelRepository} from '../dist/employee-channels/repository.js';
@@ -219,6 +220,49 @@ for(const memory of [false,true])test(`permission quick reply is fixed, deduplic
  await f.receive(e);await f.receive(e);await f.drain();
  assert.deepEqual(f.sent.map(r=>r.text),['抱歉，您没有使用权限，请联系管理员']);assert.equal(f.sent[0].conversation.externalId,'group');assert.equal(f.sent[0].replyToMessageId,e.message.id);
  assert.equal(f.models.length,0);assert.equal(f.commands.length,0);assert.equal(f.store.one('SELECT count(*) n FROM interaction_turns').n,0);
+});
+// Existing local fixture and synthetic provider transport only: no channel network calls.
+for(const memory of [false,true])for(const conversationKind of ['group','private'])for(const replyKind of ['identity','permission','service'])test(`DingTalk ${conversationKind} ${replyKind} quick reply uses unchanged OpenAPI target once (memory=${memory})`,async t=>{
+ const f=await fixture(t,{channel:'dingtalk',memory,unconfigured:replyKind==='service'}),posts=[],requests=[];
+ const incoming=event('dingtalk-'+replyKind,'alice',conversationKind==='group'?'original-group':'original-dm',conversationKind==='group',conversationKind);
+ incoming.message.conversation.provider='dingtalk';incoming.message.author.idNamespace='user_id';
+ if(replyKind==='identity')incoming.message.author.identityEvidence='unknown';
+ f.binding.policy.entityMentionId='fixture-robot';f.binding.policy.ownSenderIds=[];incoming.message.mentions=conversationKind==='group'?['fixture-robot']:[];
+ if(replyKind==='permission')f.denied.add('alice');
+ const adapter=new DingTalkBotConversationAdapter(f.binding.connection,{appId:'app',robotCode:'fixture-robot',streamIngress:true,mentionEventsGranted:true,privateMessageEventsGranted:true,proactiveSendGranted:true,resolveCredential:async()=> 'SYNTHETIC_CHANNEL_TOKEN',fetch:async(url,init={})=>{
+  assert.equal(init.method,'POST');assert.equal(new URL(url).pathname,conversationKind==='group'?'/v1.0/robot/groupMessages/send':'/v1.0/robot/oToMessages/batchSend');
+  posts.push(JSON.parse(init.body));return Response.json({processQueryKey:'synthetic-request'});
+ }});
+ const send=adapter.sendMessage.bind(adapter);adapter.sendMessage=async request=>{requests.push(request);return send(request);};f.binding.conversation=adapter;
+ const receive=async()=>{if(replyKind==='identity')await f.loop.rejectAuthenticatedEvent({workspaceId:'w',entityId:'e',connectionId:'connection',bindingVersion:'1',appId:'app',conversation:incoming.message.conversation,messageId:incoming.message.id,eventId:incoming.eventId},'identity');else await f.receive(incoming);};
+ await receive();await f.drain();
+ incoming.eventId='replayed-envelope';await receive();await f.drain();
+ assert.equal(posts.length,1);assert.equal(requests.length,1);
+ assert.deepEqual(requests[0].conversation,incoming.message.conversation);assert.equal(requests[0].replyToMessageId,undefined);assert.equal(requests[0].threadId,undefined);
+ assert.equal(JSON.parse(posts[0].msgParam).content,{identity:'抱歉，无法验证身份',permission:'抱歉，您没有使用权限，请联系管理员',service:'抱歉，我暂时无法提供服务'}[replyKind]);
+ assert.equal(posts[0].robotCode,'fixture-robot');assert.equal(posts[0].openConversationId,conversationKind==='group'?'original-group':undefined);assert.deepEqual(posts[0].userIds,conversationKind==='private'?['alice']:undefined);
+ assert.equal(f.models.length,0);assert.equal(f.commands.length,0);
+ const receipt=f.store.one("SELECT status,provider_request_id FROM channel_message_receipts WHERE kind='outbox'");assert.equal(receipt.status,'unknown');assert.equal(receipt.provider_request_id,'synthetic-request');
+});
+for(const channel of ['dingtalk','feishu'])for(const conversationKind of ['group','private'])test(`${channel} quick reply never drops a real ${conversationKind} thread when quoting is unavailable`,async t=>{
+ const f=await fixture(t,{channel,memory:true}),incoming=event('thread-quick','alice','unchanged-target',true,conversationKind);incoming.message.conversation.provider=channel;
+ const inspect=f.binding.conversation.inspectCapabilities;f.binding.conversation.inspectCapabilities=async()=>({...await inspect(),replyToMessage:{supported:false,availability:'unsupported'}});
+ await f.loop.rejectAuthenticatedEvent({workspaceId:'w',entityId:'e',connectionId:'connection',bindingVersion:'1',appId:'app',conversation:incoming.message.conversation,messageId:incoming.message.id,eventId:incoming.eventId,threadId:'real-thread'},'service');await f.drain();
+ assert.equal(f.sent.length,0);assert.equal(f.store.one("SELECT status FROM channel_message_receipts WHERE kind='outbox'").status,'failed');
+});
+for(const revoked of ['send-capability','binding-version','connection'])test(`DingTalk quick reply honors ${revoked} revocation before dispatch`,async t=>{
+ const f=await fixture(t,{channel:'dingtalk'}),incoming=event('revoked-quick');incoming.message.conversation.provider='dingtalk';
+ const inspect=f.binding.conversation.inspectCapabilities;f.binding.conversation.inspectCapabilities=async()=>({...await inspect(),replyToMessage:{supported:false,availability:'unsupported'},proactiveSend:{supported:true,availability:revoked==='send-capability'?'authorization_required':'available'}});
+ await f.loop.rejectAuthenticatedEvent({workspaceId:'w',entityId:'e',connectionId:'connection',bindingVersion:'1',appId:'app',conversation:incoming.message.conversation,messageId:incoming.message.id,eventId:incoming.eventId},'permission');
+ if(revoked==='binding-version')f.setVersion('2');if(revoked==='connection')f.setAvailable(false);await f.drain();
+ assert.equal(f.sent.length,0);assert.equal(f.store.one("SELECT status FROM channel_message_receipts WHERE kind='outbox'").status,'failed');
+});
+test('DingTalk binding replacement during credential resolution fences quick reply before provider POST',async t=>{
+ const f=await fixture(t,{channel:'dingtalk',memory:true});let posts=0;
+ f.binding.conversation=new DingTalkBotConversationAdapter(f.binding.connection,{appId:'app',robotCode:'fixture-robot',proactiveSendGranted:true,resolveCredential:async()=>{f.setVersion('2');return 'SYNTHETIC_CHANNEL_TOKEN';},fetch:async()=>{posts++;return Response.json({processQueryKey:'must-not-send'});}});
+ const incoming=event('credential-fence');incoming.message.conversation.provider='dingtalk';
+ await f.loop.rejectAuthenticatedEvent({workspaceId:'w',entityId:'e',connectionId:'connection',bindingVersion:'1',appId:'app',conversation:incoming.message.conversation,messageId:incoming.message.id,eventId:incoming.eventId},'identity');await f.drain();
+ assert.equal(posts,0);assert.equal(f.store.one("SELECT status FROM channel_message_receipts WHERE kind='outbox'").status,'failed');
 });
 test('Feishu other robots, own, unmentioned and historical messages remain silent',async t=>{
  const f=await fixture(t,{memory:true});const bot=event('other-robot','other-bot');bot.message.author.kind='bot';

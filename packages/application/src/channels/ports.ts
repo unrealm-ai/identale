@@ -151,12 +151,24 @@ export interface ChannelSendReceipt {
   /** false means a timeout must not be automatically retried as exactly-once. */
   idempotent: boolean;
 }
+/** Query an already accepted send. This can never dispatch or retry a message. */
+export interface ChannelSendStatusQuery {
+  conversation: ChannelResourceRef;
+  providerRequestId: string;
+  /** Final host binding/lease guard after credential resolution. */
+  assertQueryAllowed?: () => void;
+}
+export interface ChannelSendStatusReceipt {
+  status: 'sent' | 'processing' | 'recalled' | 'unknown';
+}
 export interface ConversationPort {
   readonly connection: ChannelConnection;
   inspectCapabilities(resource?: ChannelResourceRef): Promise<ConversationCapabilities>;
   getConversation(ref: ChannelResourceRef): Promise<ChannelConversation>;
   listMessages(ref: ChannelResourceRef, query: ChannelQuery): Promise<ChannelPage<ChannelMessage>>;
   sendMessage(request: SendChannelMessage): Promise<ChannelSendReceipt>;
+  /** Read-only reconciliation for a durable provider request ID; not an outbound retry. */
+  queryMessageStatus?(request: ChannelSendStatusQuery): Promise<ChannelSendStatusReceipt>;
   /** Optional configuration catalog; not conversation history or a read grant. */
   listJoinedGroups?(query:{cursor?:string}):Promise<{items:readonly {id:string;name?:string}[];nextCursor?:string}>;
   /** Host-only check for the current token's own bot; never a user-selected identity. */

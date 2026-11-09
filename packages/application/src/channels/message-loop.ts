@@ -44,6 +44,10 @@ export interface MessageLoopConnections {
 export interface ChannelSpeakerProfile {displayName?:string;departmentNames?:readonly string[];jobTitle?:string}
 export interface ChannelInboxRow {id:string;lane:string;connectionId:string;bindingVersion:string;scopeJson:string;eventJson:string;status:string;conversationId:string|null;turnId:string|null;leaseToken:string|null;createdAt:number;employeeUseAdmitted?:boolean;sourceKey?:string;payloadHash?:string;inputText?:string;historyBatchId?:string}
 export interface ChannelDeliveryRow {id:string;scopeJson:string;targetJson:string;text:string;status:string;taskDeliveryId:string|null;leaseToken:string|null;correlation?:DiagnosticContext}
+export interface ChannelDeliveryQueryRow extends ChannelDeliveryRow {providerRequestId:string}
+export interface ChannelDeliveryQueryResult {
+ status:'sent'|'processing'|'recalled'|'unknown';error?:string;retryAfterMs?:number;stop?:boolean;
+}
 export interface MessageLoopRepository {
  /** Returns original task scope only after checking persisted task/delivery provenance. */
  originatingTaskScope?(row:ChannelDeliveryRow):TaskScope|undefined;
@@ -61,6 +65,9 @@ export interface MessageLoopRepository {
  advanceEventCursor?(id:string,cursor:string):void;
  deferDelivery?(id:string,token:string,options:{safeToRetry:boolean;retryAfterMs?:number}):void;
  reconcileDelivery?(id:string,status:'sent'|'failed',messageId?:string):void;
+ claimDeliveryQuery?(now:number,token:string):ChannelDeliveryQueryRow|undefined;
+ ownsDeliveryQuery?(id:string,token:string):boolean;
+ finishDeliveryQuery?(id:string,token:string,result:ChannelDeliveryQueryResult):void;
  close?():void;
  /** Durable conversation-local numbering, including collection before the first RT turn. */
  speakerAlias(conversation:string|TaskScope,actorKey:string):string;
@@ -75,7 +82,7 @@ export interface MessageLoopRepository {
  enqueueDelivery(row:ChannelDeliveryRow,at:number):'created'|'duplicate'|void;
  replyCorrelation?(turnId:string):DiagnosticContext|undefined;
  claimDelivery(now:number,leaseUntil:number,token:string):ChannelDeliveryRow|undefined;
- finishDelivery(id:string,token:string,status:string,error?:string,messageId?:string,providerRequestId?:string):void;
+ finishDelivery(id:string,token:string,status:string,error?:string,messageId?:string,providerRequestId?:string,queryable?:boolean):void;
  taskDeliveries():{id:string;taskId:string;text:string;sourceJson:string;workspaceId:string;entityId:string;userId:string|null;conversationId?:string}[];
  refreshDeliveryAuthorization?(row:ChannelDeliveryRow):Promise<void>;
  assertDeliveryAuthorization?(row:ChannelDeliveryRow):void;
@@ -103,7 +110,7 @@ export function channelMessageText(event:ChannelMessageEvent,profile:ChannelSpea
 }
 export class ChannelMessageLoop {
  private busy=false;private stopping=false;private scheduled=false;private pendingWake=false;private reconcileRequested=true;private nextReconcile=0;private lateReconcile=false;private unsubscribe:(()=>void)|undefined;
- private readonly incoming=new Set<Promise<void>>();private readonly outgoing=new Set<Promise<void>>();private readonly controller=new ChannelInteractionController();
+ private readonly incoming=new Set<Promise<void>>();private readonly outgoing=new Set<Promise<void>>();private readonly querying=new Set<Promise<void>>();private readonly controller=new ChannelInteractionController();
  constructor(private readonly repository:MessageLoopRepository,private readonly connections:MessageLoopConnections,private readonly interaction:InteractionService,_tasks:TaskService,private readonly now:()=>number,private readonly diagnostics:DiagnosticPort=nullDiagnostics,private readonly groups?:GroupContextPort){
   this.repository.onWork?.(()=>this.requestTick());this.unsubscribe=this.interaction.onWork?.(()=>{this.reconcileRequested=true;this.lateReconcile=true;this.requestTick();});
  }
@@ -264,9 +271,11 @@ export class ChannelMessageLoop {
    await this.rejectAuthenticatedEvent({workspaceId:s.workspaceId,entityId:s.entityId,connectionId:row.connectionId,bindingVersion:row.bindingVersion,appId:source.applicationId,conversation:event.message.conversation,messageId:event.message.id,eventId:event.eventId,lane:row.lane,...(event.message.threadId?{threadId:event.message.threadId}:{})},kind,write=>{if(!this.repository.ownsInbox(row.id,token))throw new ChannelError('forbidden','delivery_lease_lost');return write();});
   }catch(error){this.diagnostics.event({stage:'outbox.send',phase:'point',outcome:'failure',status:'failed',reason:'reply_target_unavailable',...diagnosticFailure(error)});}
  }
- private async confirmedSend(row:ChannelDeliveryRow,token:string,send:()=>Promise<ChannelSendReceipt>):Promise<ChannelSendReceipt|undefined>{
+ private async confirmedSend(row:ChannelDeliveryRow,token:string,send:()=>Promise<ChannelSendReceipt>,queryable=false):Promise<ChannelSendReceipt|undefined>{
   let expired=false;let timer:ReturnType<typeof setTimeout>|undefined;const pending=send();
-  void pending.then(receipt=>{if(expired&&receipt.status==='sent')this.repository.reconcileDelivery?.(row.id,'sent',receipt.messageId);},()=>{});
+  // A late receipt may arrive after shutdown/storage failure. Do not let this detached
+  // observer crash the process, or convert a failed reconciliation into a resend.
+  void pending.then(receipt=>{if(!expired)return;if(receipt.status==='sent')this.repository.reconcileDelivery?.(row.id,'sent',receipt.messageId);else if(receipt.status==='accepted')this.repository.finishDelivery(row.id,token,'accepted',undefined,undefined,receipt.providerRequestId,queryable);},()=>{}).catch(()=>{});
   const result=await Promise.race([pending,new Promise<undefined>(resolve=>{timer=setTimeout(()=>{expired=true;this.repository.finishDelivery(row.id,token,'unknown','send_confirmation_timeout');this.diagnostics.event({stage:'outbox.send',phase:'point',status:'unknown',outcome:'unknown',reason:'delivery_unknown',messageId:row.id});resolve(undefined);},30000);})]).finally(()=>{if(timer)clearTimeout(timer);});return result;
  }
  private async sendQuickReply(row:ChannelDeliveryRow,token:string){
@@ -276,12 +285,15 @@ export class ChannelMessageLoop {
   let attempted=false;
   try{
    if(row.taskDeliveryId!==null||row.text!==channelQuickReplies[replyKind])throw new ChannelError('forbidden','invalid_quick_reply');
-   const b=await guard(),caps=await b.conversation.inspectCapabilities(route.conversation),reply=repliesInPlace(route.conversation,route.threadId);
+   const b=await guard(),caps=await b.conversation.inspectCapabilities(route.conversation);
+   // Match ordinary delivery: WeCom keeps its callback; other channels may send
+   // a new message to the unchanged conversation when quoting is unavailable.
+   const reply=repliesInPlace(route.conversation,route.threadId)&&(b.provider==='wecom'||caps.replyToMessage.supported&&caps.replyToMessage.availability==='available');
    if(route.threadId&&!reply)throw new ChannelError('unsupported','thread_reply_target_unavailable');
    requireChannelCapability(reply?caps.replyToMessage:caps.proactiveSend);
    attempted=true;
-   const receipt=await this.confirmedSend(row,token,()=>b.conversation.sendMessage({conversation:route.conversation,text:row.text,operationId:hash(row.id).slice(0,40),...(reply?{replyToMessageId:route.messageId}:{}),...(route.threadId?{threadId:route.threadId}:{}),beforeSend:async()=>{await guard();},assertSendAllowed:()=>{if(b.provider==='feishu'&&route.conversation.conversationKind==='group'&&this.groups&&!this.groups.canSend(b.connectionId,route.conversation.externalId))throw new ChannelError('forbidden','bot_left_group');if(!this.repository.ownsDelivery(row.id,token)||this.connections.currentBindingVersion(route.connectionId)!==route.bindingVersion)throw new ChannelError('forbidden','channel_binding_changed');}}));if(!receipt)return;
-   this.repository.finishDelivery(row.id,token,receipt.status,undefined,receipt.messageId,receipt.providerRequestId);
+   const receipt=await this.confirmedSend(row,token,()=>b.conversation.sendMessage({conversation:route.conversation,text:row.text,operationId:hash(row.id).slice(0,40),...(reply?{replyToMessageId:route.messageId}:{}),...(route.threadId?{threadId:route.threadId}:{}),beforeSend:async()=>{await guard();},assertSendAllowed:()=>{if(b.provider==='feishu'&&route.conversation.conversationKind==='group'&&this.groups&&!this.groups.canSend(b.connectionId,route.conversation.externalId))throw new ChannelError('forbidden','bot_left_group');if(!this.repository.ownsDelivery(row.id,token)||this.connections.currentBindingVersion(route.connectionId)!==route.bindingVersion)throw new ChannelError('forbidden','channel_binding_changed');}}),!!b.conversation.queryMessageStatus);if(!receipt)return;
+   this.repository.finishDelivery(row.id,token,receipt.status,undefined,receipt.messageId,receipt.providerRequestId,!!b.conversation.queryMessageStatus);
    this.diagnostics.event({stage:'outbox.send',phase:'point',outcome:receipt.status==='sent'?'success':'unknown',status:receipt.status,...(receipt.status==='unknown'?{reason:'delivery_unknown'}:{}),text:row.text});
   }catch(error){const status=!attempted||error instanceof ChannelError&&['forbidden','unauthenticated','invalid_request','unsupported'].includes(error.code)?'failed':'unknown';
    this.diagnostics.event({stage:'outbox.send',phase:'point',outcome:status==='unknown'?'unknown':'failure',status,reason:status==='unknown'?'delivery_unknown':'send_failed',text:row.text,...diagnosticFailure(error)});
@@ -311,10 +323,38 @@ export class ChannelMessageLoop {
    requireChannelCapability(reply?caps.replyToMessage:caps.proactiveSend);
    const attachment='artifact'in target?await this.connections.readAttachment?.(row):undefined;if('artifact'in target&&!attachment)throw new ChannelError('unsupported','artifact_reader_missing');
    attempted=true;
-   const receipt=await this.confirmedSend(row,token,()=>b.conversation.sendMessage({conversation:target.conversation,text:row.text,...(attachment?{attachment}:{}),operationId:hash(row.id).slice(0,40),...(originalTask?{originatingTaskScope:()=>{if(!this.repository.ownsDelivery(row.id,token))throw new ChannelError('forbidden','delivery_lease_lost');this.repository.assertDeliveryAuthorization?.(row);const current=this.repository.originatingTaskScope?.(row);if(!current)throw new ChannelError('forbidden','task_delivery_origin_changed');return current;}}:{}),assertSendAllowed:()=>{try{if(b.provider==='feishu'&&target.conversation.conversationKind==='group'&&this.groups&&!this.groups.canSend(b.connectionId,target.conversation.externalId))throw new ChannelError('forbidden','bot_left_group');this.repository.assertDeliveryAuthorization?.(row);if(this.connections.currentBindingVersion(scope.source!.connectionId)!==scope.source!.bindingVersion||!this.repository.ownsDelivery(row.id,token))throw new Error();}catch{attempted=false;throw new ChannelError('forbidden','delivery_authorization_changed');}},beforeSend:async()=>{try{await resolve();if(!this.repository.ownsDelivery(row.id,token))throw new ChannelError('forbidden','delivery_lease_lost');}catch(error){attempted=false;throw error;}},...(reply?{replyToMessageId:replyId}:{}),...(target.threadId?{threadId:target.threadId}:{})}));if(!receipt)return;
-   this.repository.finishDelivery(row.id,token,receipt.status,undefined,receipt.messageId,receipt.providerRequestId);
+   const receipt=await this.confirmedSend(row,token,()=>b.conversation.sendMessage({conversation:target.conversation,text:row.text,...(attachment?{attachment}:{}),operationId:hash(row.id).slice(0,40),...(originalTask?{originatingTaskScope:()=>{if(!this.repository.ownsDelivery(row.id,token))throw new ChannelError('forbidden','delivery_lease_lost');this.repository.assertDeliveryAuthorization?.(row);const current=this.repository.originatingTaskScope?.(row);if(!current)throw new ChannelError('forbidden','task_delivery_origin_changed');return current;}}:{}),assertSendAllowed:()=>{try{if(b.provider==='feishu'&&target.conversation.conversationKind==='group'&&this.groups&&!this.groups.canSend(b.connectionId,target.conversation.externalId))throw new ChannelError('forbidden','bot_left_group');this.repository.assertDeliveryAuthorization?.(row);if(this.connections.currentBindingVersion(scope.source!.connectionId)!==scope.source!.bindingVersion||!this.repository.ownsDelivery(row.id,token))throw new Error();}catch{attempted=false;throw new ChannelError('forbidden','delivery_authorization_changed');}},beforeSend:async()=>{try{await resolve();if(!this.repository.ownsDelivery(row.id,token))throw new ChannelError('forbidden','delivery_lease_lost');}catch(error){attempted=false;throw error;}},...(reply?{replyToMessageId:replyId}:{}),...(target.threadId?{threadId:target.threadId}:{})}),!!b.conversation.queryMessageStatus);if(!receipt)return;
+   this.repository.finishDelivery(row.id,token,receipt.status,undefined,receipt.messageId,receipt.providerRequestId,!!b.conversation.queryMessageStatus);
    this.diagnostics.event({stage:'outbox.send',phase:'point',outcome:receipt.status==='sent'?'success':'unknown',status:receipt.status,...(receipt.status==='unknown'?{reason:'delivery_unknown'}:{}),text:row.text});
   }catch(error){const status=!attempted?(error instanceof ChannelError&&error.code==='temporarily_unavailable'?'blocked':'failed'):error instanceof ChannelError&&['forbidden','unauthenticated','invalid_request','unsupported'].includes(error.code)?'failed':'unknown';this.diagnostics.event({stage:'outbox.send',phase:'point',outcome:status==='unknown'?'unknown':'failure',status,reason:status==='unknown'?'delivery_unknown':'send_failed',text:row.text,...diagnosticFailure(error)});if(!attempted&&error instanceof ChannelError&&error.code==='temporarily_unavailable')this.repository.finishDelivery(row.id,token,'blocked',safeError(error));else if(this.repository.deferDelivery&&(error instanceof ChannelError&&['rate_limited','temporarily_unavailable'].includes(error.code)||typeof error==='object'&&error!==null&&'details'in error&&[429,503].includes(Number((error as {details?:{httpStatus?:number}}).details?.httpStatus))))this.repository.deferDelivery(row.id,token,{safeToRetry:true,...(error instanceof ChannelError&&error.retryAfterMs!==undefined?{retryAfterMs:error.retryAfterMs}:{})});else this.repository.finishDelivery(row.id,token,status,safeError(error));}finally{clearInterval(renew);}
+ }
+ /** Existing send outcome only. Never loads attachments, re-runs a task, or calls sendMessage. */
+ private async queryDelivery(row:ChannelDeliveryQueryRow,token:string){
+  const complete=(result:ChannelDeliveryQueryResult)=>this.repository.finishDeliveryQuery?.(row.id,token,result);
+  let timer:ReturnType<typeof setTimeout>|undefined;
+  try{
+   const quick=quickReplyScope(row.scopeJson),automation=triggerResultScope(row.scopeJson)??humanNotificationScope(row.scopeJson)??workItemNotificationScope(row.scopeJson),scope=quick?undefined:automation??scopeFromJson(row.scopeJson);
+   const target=JSON.parse(row.targetJson) as {conversation:ChannelResourceRef;threadId?:string};
+   const source=scope?.source;
+   const connectionId=quick?.route.connectionId??source?.connectionId,version=quick?.route.bindingVersion??source?.bindingVersion;
+   const appId=quick?.route.appId??(automation?automation.source.appId:(scope as TaskScope|undefined)?.source?.applicationId);
+   if(!connectionId||!version)throw new ChannelError('forbidden','receipt_query_binding_changed');
+   const binding=await this.connections.resolveBinding(connectionId);
+   const guard=()=>{
+    if(!binding||!binding.enabled||binding.connectionId!==connectionId||binding.bindingVersion!==version||binding.appId!==appId||binding.workspaceId!==(quick?.route.workspaceId??scope?.workspaceId)||binding.entityId!==(quick?.route.entityId??scope?.entityId)||this.connections.currentBindingVersion(connectionId)!==version||!this.repository.ownsDeliveryQuery?.(row.id,token))throw new ChannelError('forbidden','receipt_query_binding_changed');
+    assertChannelResource(binding.connection,target.conversation);
+    const original=quick?.route.conversation;
+    if(target.conversation.provider!==(original?.provider??source?.channelType)||target.conversation.tenantId!==(original?.tenantId??source?.tenantId)||target.conversation.externalId!==(original?.externalId??source?.conversationId)||target.conversation.conversationKind!==(original?.conversationKind??source?.conversationKind)||target.threadId!==(quick?.route.threadId??source?.threadId))throw new ChannelError('forbidden','receipt_query_target_changed');
+   };
+   guard();
+   if(!binding!.conversation.queryMessageStatus)throw new ChannelError('unsupported','receipt_query_unavailable');
+   const result=await Promise.race([binding!.conversation.queryMessageStatus({conversation:target.conversation,providerRequestId:row.providerRequestId,assertQueryAllowed:guard}),new Promise<never>((_,reject)=>{timer=setTimeout(()=>reject(new ChannelError('temporarily_unavailable','receipt_query_timeout')),25000);})]);
+   guard();complete(result);
+   this.diagnostics.event({stage:'outbox.send',phase:'point',messageId:row.id,outcome:result.status==='sent'?'success':result.status==='recalled'?'failure':'unknown',status:result.status==='sent'?'sent':result.status==='recalled'?'failed':'unknown',...(result.status!=='sent'?{reason:result.status==='recalled'?'send_failed':'delivery_unknown'}:{})});
+  }catch(error){
+   const stop=error instanceof ChannelError&&['forbidden','unauthenticated','unsupported','invalid_request'].includes(error.code);
+   complete({status:'unknown',error:stop?'receipt_query_unavailable':'receipt_query_failed',stop,...(error instanceof ChannelError&&error.retryAfterMs!==undefined?{retryAfterMs:error.retryAfterMs}:{})});
+  }finally{if(timer)clearTimeout(timer);}
  }
  async tick(){
   if(this.busy||this.stopping)return;this.busy=true;
@@ -329,9 +369,10 @@ export class ChannelMessageLoop {
      this.diagnostics.run(correlation,()=>this.diagnostics.event({stage:'outbox.queued',phase:'point',outcome:'queued'}));
     }catch{/* Invalid persisted source cannot be routed or repaired with a guessed identity. */}
    }
+   while(this.querying.size<8&&!this.stopping){const token=randomUUID(),row=this.repository.claimDeliveryQuery?.(this.now(),token);if(!row)break;const work=this.queryDelivery(row,token).finally(()=>this.querying.delete(work));this.querying.add(work);void work.catch(()=>{});}
    while(this.outgoing.size<32&&!this.stopping){const token=randomUUID(),row=this.repository.claimDelivery(this.now(),this.now()+60_000,token);if(!row)break;const work=this.send(row,token).finally(()=>this.outgoing.delete(work));this.outgoing.add(work);void work.catch(()=>{});}
   }finally{this.busy=false;if(this.pendingWake){this.pendingWake=false;this.requestTick();}}
  }
- async waitForWork(){while(this.incoming.size||this.outgoing.size)await Promise.allSettled([...this.incoming,...this.outgoing]);}
+ async waitForWork(){while(this.incoming.size||this.outgoing.size||this.querying.size)await Promise.allSettled([...this.incoming,...this.outgoing,...this.querying]);}
  async stop(){this.stopping=true;this.unsubscribe?.();await this.waitForWork();this.repository.close?.();}
 }

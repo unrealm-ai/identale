@@ -14,13 +14,17 @@ import type {EmployeeChannelRecord,EmployeeChannelOptions,EmployeeChannelCredent
 import {validationOf,wecomBotValidation,type ChannelValidation} from './validation.js';
 import {resolveChannelConfigurationCapabilities} from './capabilities.js';
 import type {ChannelIngressCandidate} from '../adapters/channels/ingress/normalize.js';
+import {WeComMemberVerification,WeComMemberVerificationError} from './wecom-member-verification.js';
 import {WeComBotMemberSearch} from '../adapters/directory/wecom-bot-search.js';
-import {WeComBotContacts,usesWeComBotSearch,weComSearchIdentityVerified} from './wecom-bot-contacts.js';
+import {WeComBotContacts,usesWeComBotSearch,weComSearchIdentityVerified,weComCallbackUserId,weComSearchUserId,weComVerifiedUserIds} from './wecom-bot-contacts.js';
 export class EmployeeChannelError extends Error {constructor(readonly status:number,readonly code:string,readonly validation?:ChannelValidation){super(code);}get statusCode(){return this.status;}}
 const fail=(status:number,code:string):never=>{throw new EmployeeChannelError(status,code);};
 const safe=(e:unknown)=>e instanceof DirectoryError?e.code:'channel_connection_unavailable';
 const same=(a:EmployeeChannelRecord['identity'],b:EmployeeChannelRecord['identity'])=>a.appId===b.appId&&a.tenantId===b.tenantId&&a.tenantIdNamespace===b.tenantIdNamespace;
 const defaultContext=(provider:DirectoryProvider):NonNullable<EmployeeChannelRecord['context']>=>({historyEnabled:false,...(provider==='feishu'?{groupListenEnabled:true,listenGeneration:0}:{}),meetingRefs:[]});
+// Legacy callback-scoped DingTalk bot IDs cannot silently gain the new meaning.
+const canonicalBot=(r:EmployeeChannelRecord)=>r.provider!=='dingtalk'||!!r.robotCode&&r.botId===r.robotCode;
+const legacyDingtalkIdentity=(r:EmployeeChannelRecord)=>r.provider==='dingtalk'&&(r.botId!==undefined&&r.botId!==r.robotCode||r.status==='verified'&&!canonicalBot(r));
 const validId=(v:unknown):v is string=>typeof v==='string'&&v.length>0&&v.length<=256&&!/[\u0000-\u001f]/.test(v);
 export interface DirectoryEvaluation {deadline:number;remaining:number;users:Map<string,Promise<DirectoryPerson>>;departments:Map<string,Promise<DirectoryDepartment>>}
 export const channelSubject=(kind:'channel_user'|'department',id:string,namespace:string,appId:string)=>JSON.stringify([kind,namespace,appId,id]);
@@ -35,6 +39,13 @@ export function groupHistoryPermission(record:EmployeeChannelRecord):boolean{
 }
 export class EmployeeChannelService {
  readonly botContacts:WeComBotContacts;
+ readonly memberVerification:WeComMemberVerification;
+ private memberVerificationPersistence:((r:EmployeeChannelRecord,requestId:string,callbackUserId:string)=>Promise<boolean>)|undefined;
+ setMemberVerificationPersistence(check:(r:EmployeeChannelRecord,requestId:string,callbackUserId:string)=>Promise<boolean>){this.memberVerificationPersistence=check;}
+ async memberVerificationPersisted(id:string,callbackUserId:string){const r=this.repository.byId(id),mapping=r?.wecomContactMappings?.find(m=>m.callbackUserId===callbackUserId);if(!r||!mapping)return false;if(!this.memberVerificationPersistence)return true;let timer:ReturnType<typeof setTimeout>|undefined;try{return await Promise.race([this.memberVerificationPersistence(r,mapping.requestId,callbackUserId),new Promise<boolean>(resolve=>{timer=setTimeout(()=>resolve(false),2000);})]);}finally{if(timer)clearTimeout(timer);}}
+ private memberVerificationReceiver:((r:EmployeeChannelRecord,requestId:string)=>Promise<boolean>)|undefined;
+ setMemberVerificationReceiver(check:(r:EmployeeChannelRecord,requestId:string)=>Promise<boolean>){this.memberVerificationReceiver=check;}
+ memberVerificationReady(id:string,sourceId:string,authRevision:number,requestId:string,stateVersion:number){const r=this.repository.byId(id);return !!r&&r.sourceId===sourceId&&r.authRevision===authRevision&&r.stateVersion>=stateVersion&&this.memberVerification.ready(r,requestId)&&this.transportStatus?.(id).state==='connected';}
  private readonly botSearchClients=new Map<string,{key:string;client:WeComBotMemberSearch}>();
  private sessionSender:((connectionId:string,request:SendChannelMessage)=>Promise<ChannelSendReceipt>)|undefined;
  setSessionSender(sender:(connectionId:string,request:SendChannelMessage)=>Promise<ChannelSendReceipt>){this.sessionSender=sender;}
@@ -62,35 +73,35 @@ export class EmployeeChannelService {
  private resetSource(old:EmployeeChannelRecord,nextSourceId?:string){
   const store=this.repository.store;
   resetChannelSourceAccess(store,old.workspaceId,old.entityId,old.sourceId,nextSourceId);
-  this.botContacts.remove(old.id);
+  this.botContacts.remove(old.id);this.memberVerification.remove(old.id);
   if(store.one("SELECT name FROM sqlite_master WHERE type='table' AND name='employee_group_sharing_rules'")){
    const saved=store.one<{revision:number;rules_json:string}>('SELECT revision,rules_json FROM employee_group_sharing_rules WHERE workspace_id=? AND entity_id=?',old.workspaceId,old.entityId);
    if(saved){const rules=JSON.parse(saved.rules_json) as {sources:{connectionId:string}[];targets:{connectionId:string}[]}[];const retained=rules.filter(rule=>![...rule.sources,...rule.targets].some(ref=>ref.connectionId===old.id));if(retained.length!==rules.length)store.run('UPDATE employee_group_sharing_rules SET revision=revision+1,rules_json=? WHERE workspace_id=? AND entity_id=?',JSON.stringify(retained),old.workspaceId,old.entityId);}
   }
  }
  unbind(w:string,e:string,p:DirectoryProvider,actor:string,input:{expectedRevision:number}){const old=this.require(w,e,p);if(old.revision!==input.expectedRevision)fail(409,'channel_configuration_changed');this.repository.store.transaction(()=>{const current=this.require(w,e,p);if(current.stateVersion!==old.stateVersion||current.revision!==input.expectedRevision)fail(409,'channel_configuration_changed');this.repository.audit(current,actor,'connection_unbound',this.now());this.resetSource(current);if(!this.repository.remove(current))fail(409,'channel_configuration_changed');this.repository.store.run('DELETE FROM employee_channel_verification_events WHERE connection_id=?',current.id);});this.active.delete(old.id);this.botSearchClients.delete(old.id);this.changed(old.id);return{ok:true};}
- ingressConfiguration(id:string){const r=this.repository.byId(id);if(!r||!r.enabled||!['verified','pending_verification'].includes(r.status)||r.provider==='wecom'&&!usesWeComBotSearch(r))return undefined;return{record:r,credentials:r.provider==='wecom'?{botSecret:this.secret(r).appSecret}:{appSecret:this.secret(r).appSecret}};}
+ ingressConfiguration(id:string){const r=this.repository.byId(id);if(!r||!r.enabled||!['verified','pending_verification'].includes(r.status)||legacyDingtalkIdentity(r)||r.provider==='wecom'&&!usesWeComBotSearch(r))return undefined;return{record:r,credentials:r.provider==='wecom'?{botSecret:this.secret(r).appSecret}:{appSecret:this.secret(r).appSecret}};}
  private accessCheck:((scope:ChannelAccessScope,connection:ChannelConnection,kind:'private'|'group'|'meeting')=>Promise<boolean>)|undefined;
- constructor(readonly repository:EmployeeChannelRepository,private readonly options:EmployeeChannelOptions={}){this.vault=new DirectoryCredentialVault(options.masterKey);this.now=options.now??Date.now;this.botContacts=new WeComBotContacts(repository.store,this.now);}
+ constructor(readonly repository:EmployeeChannelRepository,private readonly options:EmployeeChannelOptions={}){this.vault=new DirectoryCredentialVault(options.masterKey);this.now=options.now??Date.now;this.botContacts=new WeComBotContacts(repository.store,this.now);this.memberVerification=new WeComMemberVerification(repository,this.now,{secret:r=>this.secret(r).appSecret,vault:this.vault,...(options.masterKey?{collisionKey:options.masterKey}:{})});}
  setAccessCheck(fn:NonNullable<EmployeeChannelService['accessCheck']>){this.accessCheck=fn;}
  private snapshots:DirectorySnapshotReader|undefined;
  setDirectorySnapshots(value:DirectorySnapshotReader){this.snapshots=value;}
  private directoryRules(r:EmployeeChannelRecord):DirectoryAccessRule[]{const policy=this.repository.store.one<{allow_json:string;deny_json:string;channel_policies_json:string}>('SELECT allow_json,deny_json,channel_policies_json FROM entity_directory_policies WHERE workspace_id=? AND entity_id=?',r.workspaceId,r.entityId),rules:DirectoryAccessRule[]=[...JSON.parse(policy?.allow_json??'[]'),...JSON.parse(policy?.deny_json??'[]'),...(JSON.parse(policy?.channel_policies_json??'[]') as {allow:DirectoryAccessRule[];deny:DirectoryAccessRule[]}[]).flatMap(p=>[...p.allow,...p.deny])];for(const row of this.repository.store.all<{config_json:string}>('SELECT config_json FROM capability_packages WHERE workspace_id=? AND entity_id=?',r.workspaceId,r.entityId)){const p=JSON.parse(row.config_json) as{enabled:boolean;directoryAccess?:{allow:DirectoryAccessRule[];deny:DirectoryAccessRule[];channelPolicies?:{allow:DirectoryAccessRule[];deny:DirectoryAccessRule[]}[]}};if(p.enabled&&p.directoryAccess)rules.push(...p.directoryAccess.allow,...p.directoryAccess.deny,...(p.directoryAccess.channelPolicies??[]).flatMap(policy=>[...policy.allow,...policy.deny]));}return rules.filter(rule=>rule.sourceId===r.sourceId);}
  directorySources():DirectorySyncSource[]{return this.repository.store.all<{record_json:string;name:string}>('SELECT c.record_json,e.name FROM employee_channel_connections c JOIN entities e ON e.id=c.entity_id AND e.workspace_id=c.workspace_id').flatMap(({record_json,name})=>{const r=JSON.parse(record_json)as EmployeeChannelRecord;return r.provider==='wecom'?[]:[this.directorySourceFor(r,name)];});}
  directorySource(connectionId:string):DirectorySyncSource|undefined{const r=this.repository.byId(connectionId);if(!r||r.provider==='wecom')return;const entity=this.repository.store.one<{name:string}>('SELECT name FROM entities WHERE workspace_id=? AND id=?',r.workspaceId,r.entityId);return entity?this.directorySourceFor(r,entity.name):undefined;}
- private directorySourceFor(r:EmployeeChannelRecord,name:string):DirectorySyncSource{return{workspaceId:r.workspaceId,entityId:r.entityId,entityName:name,connectionId:r.id,provider:r.provider,appId:r.appId,sourceId:r.sourceId,sourceVersion:JSON.stringify([r.sourceId,r.appId,r.identity.tenantId,r.identity.tenantIdNamespace,r.botId]),port:()=>this.clients(r).directory,rules:()=>this.directoryRules(r)};}
+ private directorySourceFor(r:EmployeeChannelRecord,name:string):DirectorySyncSource{return{workspaceId:r.workspaceId,entityId:r.entityId,entityName:name,connectionId:r.id,provider:r.provider,appId:r.appId,sourceId:r.sourceId,sourceVersion:JSON.stringify([r.sourceId,r.appId,r.identity.tenantId,r.identity.tenantIdNamespace,r.provider==='dingtalk'?undefined:r.botId]),port:()=>this.clients(r).directory,rules:()=>this.directoryRules(r)};}
 
  private entity(w:string,e:string){if(!this.repository.store.one('SELECT id FROM entities WHERE id=? AND workspace_id=?',e,w))fail(404,'entity_not_found');}
  private scope(r:EmployeeChannelRecord){return[r.workspaceId,r.entityId,r.id,r.appId,r.authRevision];}
  private secret(r:EmployeeChannelRecord):EmployeeChannelCredential{return JSON.parse(this.vault.open(r.credential,this.scope(r)));}
  private makeDirectory(p:DirectoryProvider,appId:string,secret:EmployeeChannelCredential){return this.options.adapterFactory?.(p,{appId,appSecret:secret.appSecret})??createDirectoryAdapter(p,{appId,appSecret:secret.appSecret,...(this.options.fetch?{fetch:this.options.fetch}:{}),...(this.options.now?{now:this.options.now}:{})});}
  private clients(r:EmployeeChannelRecord){const version=String(r.revision),old=this.active.get(r.id);if(old?.version===version)return old;if(r.provider==='wecom')throw new DirectoryError('unsupported');const secret=this.secret(r),value={version,directory:this.makeDirectory(r.provider,r.appId,secret),transport:new EmployeeApplicationTransport(r.provider,r.appId,secret,this.options)};this.active.set(r.id,value);return value;}
- dto(r:EmployeeChannelRecord,_includeManagement=false){const identity=r.provider==='dingtalk'&&r.inboundVerified&&r.eventTenantId?{tenantId:r.eventTenantId,tenantIdNamespace:'corp_id' as const}:r.identity;return{capabilities:resolveChannelConfigurationCapabilities(r),id:r.id,sourceId:r.sourceId,entityId:r.entityId,provider:r.provider,appId:r.appId,tenantId:identity.tenantId,tenantIdNamespace:identity.tenantIdNamespace,...(r.botId?{botId:r.botId}:{}),revision:r.revision,authRevision:r.authRevision,status:r.status,enabled:r.enabled,identityEvidence:r.identityEvidence??'app_credentials_only',inboundVerified:r.inboundVerified===true,directoryStatus:r.directoryStatus,...(usesWeComBotSearch(r)?{directoryMode:'member_search' as const,memberSearchIdentityVerified:weComSearchIdentityVerified(r)}:{}),...(r.validation?{validation:r.validation}:{}),lastError:r.lastError,groupListeningStatus:r.provider==='feishu'?{enabled:r.context?.groupListenEnabled===true,permission:groupMessagePermission(r),cachedMessages:this.repository.store.one("SELECT name FROM sqlite_master WHERE name='group_live_messages'")?this.repository.store.one<{n:number}>('SELECT count(*) n FROM group_live_messages WHERE connection_id=?',r.id)!.n:0}:undefined,context:r.context??{historyEnabled:false,meetingRefs:[]},transport:this.transportStatus?.(r.id)??{state:'stopped' as const,changedAt:this.now()}};}
+ dto(r:EmployeeChannelRecord,_includeManagement=false){const legacyDing=r.enabled&&legacyDingtalkIdentity(r);const identity=r.provider==='dingtalk'&&r.inboundVerified&&r.eventTenantId?{tenantId:r.eventTenantId,tenantIdNamespace:'corp_id' as const}:r.identity;return{capabilities:resolveChannelConfigurationCapabilities(legacyDing?{...r,status:'invalid'}:r),id:r.id,sourceId:r.sourceId,entityId:r.entityId,provider:r.provider,appId:r.appId,tenantId:identity.tenantId,tenantIdNamespace:identity.tenantIdNamespace,...(r.provider==='dingtalk'?(r.robotCode?{botId:r.robotCode}:{}):r.botId?{botId:r.botId}:{}),revision:r.revision,authRevision:r.authRevision,status:legacyDing?'invalid' as const:r.status,enabled:r.enabled,identityEvidence:r.identityEvidence??'app_credentials_only',inboundVerified:r.inboundVerified===true,directoryStatus:r.directoryStatus,...(usesWeComBotSearch(r)?{directoryMode:'member_search' as const,memberSearchIdentityVerified:weComSearchIdentityVerified(r),memberSearchVerifiedUserIds:weComVerifiedUserIds(r)}:{}),...(r.validation?{validation:r.validation}:{}),lastError:legacyDing?'channel_identity_revalidation_required':r.lastError,groupListeningStatus:r.provider==='feishu'?{enabled:r.context?.groupListenEnabled===true,permission:groupMessagePermission(r),cachedMessages:this.repository.store.one("SELECT name FROM sqlite_master WHERE name='group_live_messages'")?this.repository.store.one<{n:number}>('SELECT count(*) n FROM group_live_messages WHERE connection_id=?',r.id)!.n:0}:undefined,context:r.context??{historyEnabled:false,meetingRefs:[]},transport:this.transportStatus?.(r.id)??{state:'stopped' as const,changedAt:this.now()}};}
 
  list(w:string,e:string,includeCallbackPath=false){this.entity(w,e);return this.repository.list(w,e).map(r=>this.dto(r,includeCallbackPath));}
  subjects(w:string,e:string){return{sources:this.list(w,e),users:[],departments:[]};}
  private require(w:string,e:string,p:DirectoryProvider){this.entity(w,e);return this.repository.byProvider(w,e,p)??fail(404,'channel_connection_not_found');}
- private write(r:EmployeeChannelRecord,old:EmployeeChannelRecord|undefined,actor:string,action:string){try{this.repository.store.transaction(()=>{if(!this.repository.save(r,old))fail(409,'channel_configuration_changed');if(!old)initializeChannelSourceAccess(this.repository.store,r.workspaceId,r.entityId,r.sourceId);else if(old.sourceId!==r.sourceId)this.resetSource(old,r.sourceId);if(action==='verification_candidate_observed'&&r.verification?.candidate)this.repository.markVerificationEvent(r.id,r.verification.candidate.eventId,r.verification.candidate.messageId);this.repository.audit(r,actor,action,this.now());});this.active.delete(r.id);this.changed(r.id);}catch(error){if(error instanceof EmployeeChannelError)throw error;fail(409,'channel_connection_conflict');}}
+ private write(r:EmployeeChannelRecord,old:EmployeeChannelRecord|undefined,actor:string,action:string){try{this.repository.store.transaction(()=>{if(!this.repository.save(r,old))fail(409,'channel_configuration_changed');if(!old)initializeChannelSourceAccess(this.repository.store,r.workspaceId,r.entityId,r.sourceId);else if(old.sourceId!==r.sourceId)this.resetSource(old,r.sourceId);else if(usesWeComBotSearch(old)&&old.authRevision!==r.authRevision)this.botContacts.remove(old.id);if(action==='verification_candidate_observed'&&r.verification?.candidate)this.repository.markVerificationEvent(r.id,r.verification.candidate.eventId,r.verification.candidate.messageId);this.repository.audit(r,actor,action,this.now());});this.active.delete(r.id);this.changed(r.id);}catch(error){if(error instanceof EmployeeChannelError)throw error;fail(409,'channel_connection_conflict');}}
  async save(w:string,e:string,p:DirectoryProvider,actor:string,input:{appId:string;appSecret:string;expectedRevision?:number;replaceSource?:boolean}){
   if(input.replaceSource!==undefined&&typeof input.replaceSource!=='boolean')fail(400,'invalid_channel_request');
   if(p==='wecom')return this.saveWecom(w,e,actor,input);
@@ -113,7 +124,9 @@ export class EmployeeChannelService {
   if(preserve&&old.robotCode)r.robotCode=old.robotCode;
   if(p==='dingtalk'){
    r.status=enabled?'pending_verification':'disabled';
-   if(preserve&&old.botId)r.botId=old.botId;
+   // Revalidation keeps the application robot, not a private/group account alias.
+   delete r.botId;delete r.previousInstallation;
+   if(preserve&&old.robotCode){r.botId=old.robotCode;if(old.eventTenantId)r.previousInstallation={botId:old.robotCode,tenantId:old.eventTenantId};}
    if(preserve&&old.eventTenantId)r.eventTenantId=old.eventTenantId;
   }
   r.credential=this.vault.seal(JSON.stringify(secret),this.scope(r));this.write(r,old,actor,changed?'source_replaced':old?'credentials_revalidated':'connection_created');return this.dto(r,true);
@@ -123,14 +136,14 @@ export class EmployeeChannelService {
   if(p!=='wecom')return this.save(w,e,p,actor,{appId:r.appId,...this.secret(r),expectedRevision:r.revision});
   if(!usesWeComBotSearch(r))fail(409,'wecom_bot_reconfiguration_required');
   // Keep this bot source and its saved policy; fence the prior session evidence.
-  const secret=this.secret(r),{verification:_verification,wecomContactIdentityRevision:_contacts,...base}=r;
+  const secret=this.secret(r),{verification:_verification,wecomContactIdentityRevision:_contacts,wecomVerifiedContactIds:_contactIds,wecomContactMappings:_contactMappings,wecomMemberChallenges:_memberChallenges,...base}=r;
   const next:EmployeeChannelRecord={...base,revision:r.revision+1,authRevision:r.authRevision+1,status:r.enabled?'pending_verification':'disabled',inboundVerified:false,lastError:null,updatedBy:actor};
   next.credential=this.vault.seal(JSON.stringify(secret),this.scope(next));
   this.write(next,r,actor,'wecom_robot_revalidation_started');return this.dto(next,true);
  }
  settings(w:string,e:string,p:DirectoryProvider,actor:string,input:{enabled:boolean;expectedRevision:number;historyEnabled?:boolean;groupListenEnabled?:boolean;groupTriggerKeywords?:string[];meetingRefs?:{kind:'minutes';externalId:string}[]}){const old=this.require(w,e,p);if(input.expectedRevision!==old.revision)fail(409,'channel_configuration_changed');if(typeof input.enabled!=='boolean')fail(400,'invalid_channel_settings');if(input.groupListenEnabled!==undefined&&typeof input.groupListenEnabled!=='boolean'||input.historyEnabled!==undefined&&typeof input.historyEnabled!=='boolean'||input.meetingRefs!==undefined&&(!Array.isArray(input.meetingRefs)||input.meetingRefs.length>20||input.meetingRefs.some(ref=>!ref||ref.kind!=='minutes'||!validId(ref.externalId)||Object.keys(ref).some(k=>!['kind','externalId'].includes(k)))))fail(400,'invalid_channel_context_settings');if(p!=='feishu'&&(input.groupListenEnabled===true||input.historyEnabled===true||(input.meetingRefs?.length??0)>0))fail(400,'channel_context_unsupported');if(input.groupTriggerKeywords!==undefined&&(!Array.isArray(input.groupTriggerKeywords)||input.groupTriggerKeywords.length>20||input.groupTriggerKeywords.some(word=>typeof word!=='string'||!word.trim()||word.trim().length>80||/[\u0000-\u001f]/.test(word))))fail(400,'invalid_group_trigger_keywords');if(p!=='feishu'&&(input.groupTriggerKeywords?.length??0)>0)fail(400,'channel_keywords_unsupported');const context={historyEnabled:false,groupTriggerKeywords:input.groupTriggerKeywords===undefined?old.context?.groupTriggerKeywords??[]:[...new Map(input.groupTriggerKeywords.map(word=>[word.trim().toLowerCase(),word.trim()])).values()],groupListenEnabled:input.groupListenEnabled??old.context?.groupListenEnabled??false,listenGeneration:(old.context?.listenGeneration??0)+(input.groupListenEnabled!==undefined&&input.groupListenEnabled!==!!old.context?.groupListenEnabled?1:0),meetingRefs:input.meetingRefs??old.context?.meetingRefs??[]};const enabling=input.enabled&&!old.enabled;const r={...old,context,enabled:input.enabled,status:!input.enabled?'disabled' as const:enabling?'invalid' as const:old.status,revision:old.revision+1,lastError:enabling?'revalidation_required':old.lastError,updatedBy:actor};this.write(r,old,actor,input.enabled?'revalidation_required':'disabled');return this.dto(r,true);}
  private bindingVersion(r:EmployeeChannelRecord){return createHash('sha256').update(JSON.stringify([r.sourceId,r.provider,r.appId,r.botId,r.eventTenantId,...(r.provider==='wecom'?[r.authRevision]:[])])).digest('hex');}
- currentBindingVersion(id:string){const r=this.repository.byId(id);if(!r||!r.enabled||r.status!=='verified'||r.provider==='wecom'&&r.identity.tenantIdNamespace!=='app_id')return undefined;return this.bindingVersion(r);}
+ currentBindingVersion(id:string){const r=this.repository.byId(id);if(!r||!r.enabled||r.status!=='verified'||!canonicalBot(r)||r.provider==='wecom'&&r.identity.tenantIdNamespace!=='app_id')return undefined;return this.bindingVersion(r);}
  /** Called under the active ingress owner fence. Keep the configuration revision
   * unchanged so the same authenticated runner can admit this message and reply. */
  observeFirstInbound(id:string,candidate:ChannelIngressCandidate):void{
@@ -153,7 +166,7 @@ export class EmployeeChannelService {
       old.previousInstallation&&(old.previousInstallation.botId!==candidate.botId||old.previousInstallation.tenantId!==candidate.tenantId))
     fail(403,'channel_verification_identity_conflict');
   }else if(old.provider==='dingtalk'){
-   if(candidate.tenantNamespace!=='corp_id'||!validId(candidate.robotCode)||
+   if(candidate.tenantNamespace!=='corp_id'||!validId(candidate.robotCode)||candidate.botId!==candidate.robotCode||
       old.identity.tenantIdNamespace==='corp_id'&&old.identity.tenantId!==candidate.tenantId)
     fail(403,'channel_verification_invalid');
   }else if(candidate.botId!==old.appId||
@@ -171,9 +184,11 @@ export class EmployeeChannelService {
  }
  observeWeComContact(id:string,userId:string):void{
   const current=this.repository.byId(id);
-  if(!current||current.status!=='verified'||!usesWeComBotSearch(current)||weComSearchIdentityVerified(current)||
-     !this.botContacts.selectable(current,userId))return;
-  const next={...current,wecomContactIdentityRevision:current.authRevision};
+  if(!current||current.status!=='verified'||!usesWeComBotSearch(current)||weComSearchIdentityVerified(current,userId)||
+     !this.botContacts.selectable(current,userId)||weComSearchUserId(current,userId)!==undefined)return;
+  const verified=current.wecomContactIdentityRevision===current.authRevision?current.wecomVerifiedContactIds??[]:[];
+  if(weComVerifiedUserIds(current).length>=500)return;
+  const next={...current,wecomContactIdentityRevision:current.authRevision,wecomVerifiedContactIds:[...verified,userId]};
   if(!this.repository.save(next,current))fail(409,'channel_configuration_changed');
  }
  private botSearch(r:EmployeeChannelRecord){
@@ -207,7 +222,20 @@ export class EmployeeChannelService {
   });
   return {sourceId:r.sourceId,provider:r.provider,appId:r.appId,exhausted:true,limited:result.limited,
    items:result.members.map(member=>({kind:'channel_user' as const,subjectId:channelSubject('channel_user',member.id,'user_id',r.appId),
-    externalId:member.id,displayName:member.displayName,departmentPaths:member.departmentPaths}))};
+    externalId:member.id,displayName:member.displayName,departmentPaths:member.departmentPaths,identityVerified:weComSearchIdentityVerified(this.current(r),member.id)}))};
+ }
+ memberVerificationStatus(w:string,e:string,input:{userId?:unknown;sourceId?:unknown}){
+  const r=this.require(w,e,'wecom');this.current(r);
+  if(!validId(input.userId)||input.sourceId!==r.sourceId)fail(400,'invalid_member_verification_request');
+  return this.memberVerification.status(r,input.userId as string);
+ }
+ async startMemberVerification(w:string,e:string,actor:string,input:{userId?:unknown;sourceId?:unknown;requestId?:unknown;replace?:unknown}){
+  const r=this.require(w,e,'wecom');this.current(r);
+  if(input.replace!==undefined&&typeof input.replace!=='boolean'||!validId(input.userId)||input.sourceId!==r.sourceId||typeof input.requestId!=='string'||!/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(input.requestId))fail(400,'invalid_member_verification_request');
+  const userId=input.userId as string,requestId=input.requestId as string;
+  if(!this.botContacts.get(r,userId)&&!r.wecomMemberChallenges?.some(c=>c.requestId===requestId&&c.userId===userId))fail(400,'invalid_member_search_candidate');
+  try{const io={ready:async(record:EmployeeChannelRecord,id:string)=>this.memberVerificationReceiver?this.memberVerificationReceiver(record,id):this.memberVerificationReady(record.id,record.sourceId,record.authRevision,id,record.stateVersion)};return await this.memberVerification.start(r,userId,requestId,actor,io,input.replace===true);}
+  catch(error){if(error instanceof WeComMemberVerificationError)throw new EmployeeChannelError(error.status,error.code);throw error;}
  }
  async assertWeComPrivateRecipient(id:string,userId:string):Promise<void>{
   const r=this.repository.byId(id);
@@ -243,15 +271,20 @@ export class EmployeeChannelService {
    }
    return{sourceId:r.sourceId,kind:r.kind,subjectId:r.subjectId,...(r.kind==='department'?{includeDescendants:r.includeDescendants===true}:{}),conversationKinds:[...new Set(r.conversationKinds)] as ('private'|'group'|'meeting')[]};});}
  /** Instant local binding guard runs even on a permission-cache hit; no directory/policy read. */
- admissionGuard(scope:ChannelAccessScope,connection:ChannelConnection):string|undefined{const r=this.repository.byId(connection.connectionId);if(scope.groupContext&&(scope.conversationKind!=='group'||!r||!scope.groupContext.conversationId||scope.groupContext.bindingVersion!==this.currentBindingVersion(connection.connectionId)))return;if(!r||r.workspaceId!==scope.workspaceId||r.entityId!==scope.entityId||connection.workspaceId!==r.workspaceId||connection.provider!==r.provider||connection.tenantId!==r.eventTenantId||connection.identity.externalId!==r.botId||scope.requesterKind!=='channel_user'||scope.requesterIdentity?.applicationId!==r.appId||!scope.requesterIdentity?.idNamespace||scope.requesterIdentity.idNamespace==='unknown'||!r.enabled||r.status!=='verified'||r.provider==='wecom'&&!usesWeComBotSearch(r)||(usesWeComBotSearch(r)?scope.requesterIdentity.idNamespace!=='user_id':r.directoryStatus!=='available'))return;return JSON.stringify([r.sourceId,r.appId,r.eventTenantId,r.revision,r.authRevision,r.wecomContactIdentityRevision]);}
+ admissionGuard(scope:ChannelAccessScope,connection:ChannelConnection):string|undefined{const r=this.repository.byId(connection.connectionId);if(scope.groupContext&&(scope.conversationKind!=='group'||!r||!scope.groupContext.conversationId||scope.groupContext.bindingVersion!==this.currentBindingVersion(connection.connectionId)))return;if(!r||r.workspaceId!==scope.workspaceId||r.entityId!==scope.entityId||connection.workspaceId!==r.workspaceId||connection.provider!==r.provider||connection.tenantId!==r.eventTenantId||connection.identity.externalId!==r.botId||scope.requesterKind!=='channel_user'||scope.requesterIdentity?.applicationId!==r.appId||!scope.requesterIdentity?.idNamespace||scope.requesterIdentity.idNamespace==='unknown'||!r.enabled||r.status!=='verified'||r.provider==='wecom'&&!usesWeComBotSearch(r)||(usesWeComBotSearch(r)?scope.requesterIdentity.idNamespace!=='user_id':r.directoryStatus!=='available'))return;return JSON.stringify([r.sourceId,r.appId,r.eventTenantId,r.revision,r.authRevision,r.wecomContactIdentityRevision,r.wecomVerifiedContactIds,r.wecomContactMappings]);}
  async validateCachedAdmission(scope:ChannelAccessScope,connection:ChannelConnection):Promise<boolean>{return !!this.admissionGuard(scope,connection);}
  beginEvaluation():DirectoryEvaluation{return{deadline:this.now()+15000,remaining:64,users:new Map(),departments:new Map()};}
  private queried<T>(evaluation:DirectoryEvaluation,map:Map<string,Promise<T>>,key:string,query:()=>Promise<T>):Promise<T>{if(this.now()>evaluation.deadline)throw new DirectoryError('limit_exceeded');const previous=map.get(key);if(previous)return previous;if(evaluation.remaining--<=0)throw new DirectoryError('limit_exceeded');const result=query();map.set(key,result);return result;}
  async matches(w:string,rule:DirectoryAccessRule,scope:ChannelAccessScope,connection:ChannelConnection,kind:'private'|'group'|'meeting',evaluation:DirectoryEvaluation=this.beginEvaluation()):Promise<boolean|'unknown'>{
   if(!rule.conversationKinds.includes(kind))return false;const r=this.repository.byId(connection.connectionId);if(!r||r.sourceId!==rule.sourceId||r.workspaceId!==w||scope.workspaceId!==w||connection.workspaceId!==w||connection.provider!==r.provider||connection.identity.externalId!==r.botId||r.entityId!==scope.entityId)return false;
   if(usesWeComBotSearch(r)){
-   if(!this.admissionGuard(scope,connection)||!weComSearchIdentityVerified(r))return 'unknown';
-   return rule.kind==='channel_user'&&rule.subjectId===channelSubject('channel_user',scope.requesterId,'user_id',r.appId);
+   if(!this.admissionGuard(scope,connection))return 'unknown';
+   let target:unknown;try{target=JSON.parse(rule.subjectId);}catch{return 'unknown';}
+   if(rule.kind!=='channel_user'||!Array.isArray(target)||target.length!==4||target[0]!=='channel_user'||target[1]!=='user_id'||target[2]!==r.appId||typeof target[3]!=='string')return 'unknown';
+   // An observed member proves only their own ID. An unresolved deny target must
+   // stay unknown even when another member has established exact-ID evidence.
+   if(!weComSearchIdentityVerified(r,target[3]))return 'unknown';
+   return weComCallbackUserId(r,target[3])===scope.requesterId;
   }
   if(!r.enabled||r.status!=='verified'||r.directoryStatus!=='available'||scope.requesterKind!=='channel_user'||scope.requesterIdentity?.applicationId!==r.appId||connection.tenantId!==r.eventTenantId)return'unknown';
   const ns=scope.requesterIdentity?.idNamespace;if(!ns||ns==='unknown'||r.provider!=='feishu'&&ns!=='user_id')return'unknown';
@@ -275,7 +308,7 @@ export class EmployeeChannelService {
  /** Legacy server-only candidate handling. Feishu no longer accepts candidates. */
  recordVerifiedCandidate(id:string,expectedVersion:string,input:{appId:string;botId:string;tenantId:string;robotCode?:string;challengeText:string;eventId:string;messageId:string}){
   const old=this.repository.byId(id)??fail(404,'channel_connection_not_found');const v=old.verification;
-  if(old.provider==='feishu'||String(old.revision)!==expectedVersion||!old.enabled||old.status==='invalid'||old.status==='disabled'||!v||v.expiresAt<=this.now()||input.appId!==old.appId||input.challengeText!==v.challengeText||!validId(input.eventId)||!validId(input.messageId)||!validId(input.botId)||!validId(input.tenantId)||(old.botId!==undefined&&old.botId!==input.botId)||input.robotCode!==undefined&&!validId(input.robotCode))fail(403,'channel_verification_invalid');
+  if(old.provider==='feishu'||String(old.revision)!==expectedVersion||!old.enabled||old.status==='invalid'||old.status==='disabled'||!v||v.expiresAt<=this.now()||input.appId!==old.appId||input.challengeText!==v.challengeText||!validId(input.eventId)||!validId(input.messageId)||!validId(input.botId)||!validId(input.tenantId)||(old.botId!==undefined&&old.botId!==input.botId)||input.robotCode!==undefined&&!validId(input.robotCode)||old.provider==='dingtalk'&&(!validId(input.robotCode)||input.botId!==input.robotCode))fail(403,'channel_verification_invalid');
   if(v!.candidate){if(v!.candidate.botId!==input.botId||v!.candidate.tenantId!==input.tenantId||v!.candidate.robotCode!==input.robotCode)fail(409,'channel_verification_candidate_conflict');this.repository.markVerificationEvent(old.id,input.eventId,input.messageId);return;}
   const r={...old,verification:{...v!,candidate:{id:randomUUID(),eventId:input.eventId,messageId:input.messageId,appId:input.appId,botId:input.botId,tenantId:input.tenantId,...(input.robotCode?{robotCode:input.robotCode}:{})}}};this.write(r,old,'authenticated-ingress','verification_candidate_observed');
  }
@@ -301,15 +334,15 @@ export class EmployeeChannelService {
   const authorizationRevision=createHash('sha256').update(JSON.stringify([accountId,current.id,current.sourceId,current.authRevision,scope.bindingVersion])).digest('hex');
   return{accountId,authorizationRevision,expiresAt:this.now()+60000,accessToken};
  }
- assetRobotCode(scope:import('../assets/service.js').AssetSourceScope){this.assertAssetSource(scope);const r=this.repository.byId(scope.connectionId)!;return r.robotCode??r.appId;}
+ assetRobotCode(scope:import('../assets/service.js').AssetSourceScope){this.assertAssetSource(scope);const r=this.repository.byId(scope.connectionId)!;if(!r.robotCode)fail(403,'channel_robot_identity_unavailable');return r.robotCode!;}
  async assetAccessToken(scope:import('../assets/service.js').AssetSourceScope){this.assertAssetSource(scope);const r=this.repository.byId(scope.connectionId)!;const transport=this.clients(r).transport;if(!transport)fail(403,'channel_token_unsupported');const token=await transport!.accessToken();this.assertAssetSource(scope);return token;}
  async resolveBinding(id:string):Promise<ResolvedEmployeeChannelBinding|undefined>{return this.binding(id);}
  async resolveHistoryBinding(id:string):Promise<ResolvedEmployeeChannelBinding|undefined>{return this.binding(id,true);}
  private async binding(id:string,history=false):Promise<ResolvedEmployeeChannelBinding|undefined>{const r=this.repository.byId(id);if(!r||!r.enabled||!r.botId||r.status!=='verified'||!this.currentBindingVersion(id))return undefined;const transport=r.provider==='wecom'?undefined:this.clients(r).transport,connection:ChannelConnection={workspaceId:r.workspaceId,connectionId:r.id,provider:r.provider,tenantId:r.eventTenantId??r.identity.tenantId,identity:{kind:'bot',externalId:r.botId},credentialRef:`employee-channel:${r.id}:${r.authRevision}`};
   const resolveCredential=async(_c:ChannelConnection,purpose:'access_token'|'webhook_encrypt_key'|'webhook_verification_token'|'webhook_app_secret')=>{this.current(r);if(purpose==='access_token')return transport?transport.accessToken():fail(403,'channel_token_unsupported');return fail(403,'channel_http_ingress_disabled');};
   const options={resolveCredential,...(this.options.diagnostics?{diagnostics:this.options.diagnostics}:{}),...(this.options.fetch?{fetch:this.options.fetch}:{}),...(this.options.now?{now:this.options.now}:{})};
-  const conversation=r.provider==='wecom'?new WeComConversationAdapter(connection,{send:async (request:SendChannelMessage)=>{this.current(r);if(!this.sessionSender)fail(503,'channel_transport_not_ready');return this.sessionSender!(r.id,request);}}):r.provider==='feishu'?new FeishuConversationAdapter(connection,{...options,appId:r.appId,expectedTenantNamespace:r.eventTenantId?'tenant_key':r.identity.tenantIdNamespace,grants:{mentionEvents:true,ordinaryMessageEvents:groupMessagePermission(r)==='granted',privateMessageEvents:true,proactiveSend:true,replyToMessage:true,historyRead:history&&groupHistoryPermission(r)}}):new DingTalkBotConversationAdapter(connection,{...options,appId:r.appId,robotCode:r.robotCode??r.appId,mentionEventsGranted:true,privateMessageEventsGranted:true,proactiveSendGranted:true,streamIngress:true});
-  return{connectionId:r.id,workspaceId:r.workspaceId,entityId:r.entityId,provider:r.provider,appId:r.appId,bindingVersion:r.status==='verified'?this.bindingVersion(r):String(r.revision),enabled:true,identity:r.identity,connection,conversation,...(r.provider==='feishu'?{meetingArtifacts:new FeishuMinutesAdapter(connection,{...options,appId:r.appId,grants:{transcriptRead:(r.context?.meetingRefs.length??0)>0,officialSummaryRead:(r.context?.meetingRefs.length??0)>0}})}:{}),policy:{entityMentionId:r.botId,ownSenderIds:[r.botId],...(r.provider==='feishu'?{groupTriggerKeywords:r.context?.groupTriggerKeywords??[]}:{})},context:{historyEnabled:false,groupListenEnabled:r.context?.groupListenEnabled===true,listenGeneration:r.context?.listenGeneration??0,meetingRefs:(r.context?.meetingRefs??[]).map(ref=>({provider:r.provider,connectionId:r.id,tenantId:r.eventTenantId??r.identity.tenantId,kind:ref.kind,externalId:ref.externalId}))}};
+  const conversation=r.provider==='wecom'?new WeComConversationAdapter(connection,{send:async (request:SendChannelMessage)=>{this.current(r);if(!this.sessionSender)fail(503,'channel_transport_not_ready');return this.sessionSender!(r.id,request);}}):r.provider==='feishu'?new FeishuConversationAdapter(connection,{...options,appId:r.appId,expectedTenantNamespace:r.eventTenantId?'tenant_key':r.identity.tenantIdNamespace,grants:{mentionEvents:true,ordinaryMessageEvents:groupMessagePermission(r)==='granted',privateMessageEvents:true,proactiveSend:true,replyToMessage:true,historyRead:history&&groupHistoryPermission(r)}}):new DingTalkBotConversationAdapter(connection,{...options,appId:r.appId,robotCode:r.robotCode!,mentionEventsGranted:true,privateMessageEventsGranted:true,proactiveSendGranted:true,streamIngress:true});
+  return{connectionId:r.id,workspaceId:r.workspaceId,entityId:r.entityId,provider:r.provider,appId:r.appId,bindingVersion:r.status==='verified'?this.bindingVersion(r):String(r.revision),enabled:true,identity:r.identity,connection,conversation,...(r.provider==='feishu'?{meetingArtifacts:new FeishuMinutesAdapter(connection,{...options,appId:r.appId,grants:{transcriptRead:(r.context?.meetingRefs.length??0)>0,officialSummaryRead:(r.context?.meetingRefs.length??0)>0}})}:{}),policy:{entityMentionId:r.botId,ownSenderIds:r.provider==='dingtalk'?[]:[r.botId],...(r.provider==='feishu'?{groupTriggerKeywords:r.context?.groupTriggerKeywords??[]}:{})},context:{historyEnabled:false,groupListenEnabled:r.context?.groupListenEnabled===true,listenGeneration:r.context?.listenGeneration??0,meetingRefs:(r.context?.meetingRefs??[]).map(ref=>({provider:r.provider,connectionId:r.id,tenantId:r.eventTenantId??r.identity.tenantId,kind:ref.kind,externalId:ref.externalId}))}};
  }
  private async saveWecom(w:string,e:string,actor:string,input:{appId:string;appSecret:string;expectedRevision?:number;replaceSource?:boolean}){
   this.entity(w,e);if(!this.vault.available)fail(503,'channel_secret_key_unconfigured');if(!validId(input.appId)||typeof input.appSecret!=='string'||!input.appSecret.trim()||input.appSecret.length>8192||/[\r\n\0]/.test(input.appSecret))fail(400,'invalid_channel_credentials');
@@ -344,11 +377,11 @@ export class EmployeeChannelService {
  async describeActor(binding:ResolvedEmployeeChannelBinding,actor:ChannelActor):Promise<ChannelSpeakerProfile>{
   const r=this.repository.byId(binding.connectionId),ns=actor.idNamespace;
   if(r&&usesWeComBotSearch(r)){
-   if(!weComSearchIdentityVerified(r)||ns!=='user_id'||actor.applicationId!==r.appId||
+   if(!weComSearchUserId(r,actor.externalId??'')||ns!=='user_id'||actor.applicationId!==r.appId||
       actor.kind!=='human'||actor.identityEvidence!=='channel_verified'||!actor.externalId||
       binding.bindingVersion!==this.currentBindingVersion(r.id)||binding.workspaceId!==r.workspaceId||
       binding.entityId!==r.entityId||binding.connection.tenantId!==r.eventTenantId)return {};
-   const member=this.botContacts.get(r,actor.externalId);
+   const member=this.botContacts.get(r,weComSearchUserId(r,actor.externalId)!);
    return member?{displayName:member.display_name}:{};
   }
   if(!this.snapshots)return this.describeActorLegacy(binding,actor);if(!r||!ns||ns==='unknown'||!actor.externalId||actor.applicationId!==r.appId||r.workspaceId!==binding.workspaceId||r.entityId!==binding.entityId||r.provider!==binding.provider||binding.connection.tenantId!==r.eventTenantId||this.currentBindingVersion(r.id)!==binding.bindingVersion||actor.kind!=='human'||actor.identityEvidence!=='channel_verified')return{};

@@ -3,21 +3,28 @@ import {computed,onUnmounted,ref,watch} from 'vue';
 import {NAlert,NButton,NCard,NCheckbox,NForm,NRadio,NRadioGroup,NSpace} from 'naive-ui';
 import {api,ApiError,errorMessage} from '../../shared/api';
 import DirectoryRulePicker from '../directory/DirectoryRulePicker.vue';
-import {providerLabel,type ChannelAccessMode,type DirectoryAccess,type DirectoryAccessRule,type DirectoryConnection} from '../directory/types';
+import {providerLabel,type ChannelAccessMode,type DirectoryAccess,type DirectoryAccessRule,type DirectoryConnection,type DirectoryIdentityEvidence} from '../directory/types';
 const props=defineProps<{base:string;connection:DirectoryConnection;disabled?:boolean;canManage:boolean}>();
-const emit=defineEmits<{dirtyChanged:[boolean];busyChanged:[boolean];changed:[];sessionExpired:[]}>();
+const emit=defineEmits<{dirtyChanged:[boolean];busyChanged:[boolean];changed:[];identityVerified:[evidence:DirectoryIdentityEvidence];sessionExpired:[]}>();
 const rules=ref<DirectoryAccessRule[]>([]),denied=ref<DirectoryAccessRule[]>([]),allowGroupMembers=ref(false),revision=ref(0),baseline=ref('');
 const loaded=ref(false),loading=ref(false),saving=ref(false),queries=ref({allow:false,deny:false}),unknown=ref(false),error=ref(''),notice=ref('');
 const mode=ref<ChannelAccessMode>('all');
 const wecom=computed(()=>props.connection.provider==='wecom');
 const memberSearch=computed(()=>props.connection.directoryMode==='member_search');
+const locallyVerified=ref<string[]>([]);
+const verifiedUserIds=computed(()=>[...new Set([...(props.connection.memberSearchVerifiedUserIds??[]),...locallyVerified.value])]);
+watch(()=>JSON.stringify([props.base,props.connection.id,props.connection.sourceId,props.connection.authRevision]),()=>{locallyVerified.value=[];},{flush:'sync'});
+function markIdentityVerified(evidence:DirectoryIdentityEvidence){if(evidence.sourceId!==props.connection.sourceId||evidence.authRevision!==props.connection.authRevision)return;if(!locallyVerified.value.includes(evidence.userId))locallyVerified.value.push(evidence.userId);emit('identityVerified',evidence);emit('changed');}
+const unresolvedPeople=computed(()=>[...(mode.value==='allowlist'?rules.value:[]),...denied.value].some(rule=>{
+  try{return !verifiedUserIds.value.includes(JSON.parse(rule.subjectId)[3]);}catch{return true;}
+}));
 const value=()=>({mode:mode.value,allow:rules.value,deny:denied.value,allowGroupMembers:allowGroupMembers.value});
 const dirty=computed(()=>loaded.value&&JSON.stringify(value())!==baseline.value),busy=computed(()=>saving.value||queries.value.allow||queries.value.deny);
 const locked=computed(()=>!!props.disabled||loading.value||busy.value||unknown.value||!props.canManage);
 const available=computed(()=>props.connection.enabled&&(memberSearch.value||props.connection.directoryStatus==='available'&&
   (props.connection.status==='verified'||props.connection.provider==='dingtalk'&&props.connection.status==='pending_verification')));
 const restricted=ref(false);
-const subjects=computed(()=>({sources:[props.connection],users:[] as never[],departments:[] as never[]}));
+const subjects=computed(()=>({sources:[{...props.connection,memberSearchVerifiedUserIds:verifiedUserIds.value}],users:[] as never[],departments:[] as never[]}));
 let controller=new AbortController(),generation=0;
 function apply(policy:DirectoryAccess,keep=false){
   const channel=policy.channelPolicies?.find(p=>p.sourceId===props.connection.sourceId);
@@ -46,7 +53,7 @@ async function save(){
   finally{if(current===generation)saving.value=false;}
 }
 watch(dirty,v=>emit('dirtyChanged',v),{flush:'sync'});watch(busy,v=>emit('busyChanged',v),{flush:'sync'});
-watch(()=>[props.base,props.connection.sourceId],()=>{generation++;controller.abort();controller=new AbortController();mode.value='all';rules.value=[];denied.value=[];allowGroupMembers.value=false;revision.value=0;baseline.value='';loaded.value=false;loading.value=false;saving.value=false;queries.value={allow:false,deny:false};unknown.value=false;error.value='';notice.value='';void load();},{immediate:true});
+watch(()=>JSON.stringify([props.base,props.connection.sourceId]),()=>{generation++;controller.abort();controller=new AbortController();mode.value='all';rules.value=[];denied.value=[];allowGroupMembers.value=false;revision.value=0;baseline.value='';loaded.value=false;loading.value=false;saving.value=false;queries.value={allow:false,deny:false};unknown.value=false;error.value='';notice.value='';void load();},{immediate:true});
 onUnmounted(()=>{generation++;controller.abort();emit('dirtyChanged',false);emit('busyChanged',false);});
 </script>
 <template>
@@ -55,15 +62,15 @@ onUnmounted(()=>{generation++;controller.abort();emit('dirtyChanged',false);emit
   <NAlert v-if="unknown" type="warning">保存结果尚未确认，请先读取服务器配置核对。</NAlert>
   <template v-if="loaded"><p class="field-note">{{ wecom?'本范围仅适用于能向本机器人发送有效消息的使用者，不代表公司全量员工，也不按内外部联系人身份排除。':'选择可在本渠道使用员工的人员和部门。' }}</p>
     <NAlert v-if="mode!=='allowlist'" type="info">允许全部有效消息使用者，黑名单除外；无需先搜索成员或匹配白名单。</NAlert>
-    <NAlert v-if="wecom && (mode==='allowlist' && rules.length>0 || denied.length>0) && !connection.memberSearchIdentityVerified" type="info">人员名单身份映射待核验。可先搜索并保存名单；名单模式需要通过真实消息核对成员身份后才生效。</NAlert>
+    <NAlert v-if="wecom && unresolvedPeople" type="info">名单中仍有人员身份待核验，请完成身份绑定。</NAlert>
     <NAlert v-if="!available" type="info">当前连接的目录不可用，暂不能新增人员或部门；已有规则保留，可移除。</NAlert><NAlert v-if="restricted" type="warning">已配置额外使用限制，仍会生效。本次保存不会改写已有会话范围。</NAlert>
     <NForm class="directory-access-form" @submit.prevent="save">
       <NRadioGroup :value="mode==='allowlist'?'allowlist':'denylist'" @update:value="v=>mode=v as ChannelAccessMode" :disabled="locked" :aria-label="providerLabel(connection.provider)+'使用范围模式'"><NSpace><NRadio value="allowlist">白名单</NRadio><NRadio value="denylist">全员 + 黑名单</NRadio></NSpace></NRadioGroup>
       <p class="field-note">新建默认空白名单。切换模式保留两份名单；白名单仅在白名单模式生效，黑名单始终优先。</p>
       <div class="group-use"><NCheckbox v-model:checked="allowGroupMembers" :disabled="locked" aria-label="允许群成员在群内使用">允许群成员在群内使用</NCheckbox><p class="field-note">新建默认打开。群成员可在机器人所在群内按本渠道支持的触发方式使用，不授予私聊或网页使用权；黑名单始终优先。此开关不控制群消息上下文或内容共享。</p></div>
-      <DirectoryRulePicker v-if="mode==='allowlist'" employee-scope fixed-source v-model:rules="rules" :subjects="subjects" hide-unavailable-notice :base="base" :label="memberSearch?'允许成员':'允许渠道用户或部门'" :disabled="locked" :readonly="!canManage" @busy-changed="v=>queries.allow=v" />
+      <DirectoryRulePicker v-if="mode==='allowlist'" employee-scope fixed-source v-model:rules="rules" :subjects="subjects" hide-unavailable-notice :base="base" :label="memberSearch?'允许成员':'允许渠道用户或部门'" :disabled="locked" :readonly="!canManage" @identity-verified="markIdentityVerified" @busy-changed="v=>queries.allow=v" />
       <h4>黑名单（始终优先）</h4>
-      <DirectoryRulePicker employee-scope fixed-source v-model:rules="denied" :subjects="subjects" hide-unavailable-notice :base="base" :label="memberSearch?'拒绝成员':'拒绝渠道用户或部门'" :disabled="locked" :readonly="!canManage" @busy-changed="v=>queries.deny=v" />
+      <DirectoryRulePicker employee-scope fixed-source v-model:rules="denied" :subjects="subjects" hide-unavailable-notice :base="base" :label="memberSearch?'拒绝成员':'拒绝渠道用户或部门'" :disabled="locked" :readonly="!canManage" @identity-verified="markIdentityVerified" @busy-changed="v=>queries.deny=v" />
       <NSpace v-if="canManage" class="policy-actions"><NButton type="primary" attr-type="submit" aria-label="保存渠道使用策略" :disabled="locked||!dirty" :loading="saving">保存使用范围</NButton><NButton aria-label="取消渠道范围修改" :disabled="locked||!dirty" @click="cancel">取消范围修改</NButton><NButton :disabled="loading||busy" @click="load">读取服务器配置并核对</NButton></NSpace>
     </NForm>
   </template><NButton v-else-if="!loading" @click="load">重新读取渠道范围</NButton>

@@ -39,3 +39,134 @@ test('stable source identity detects changed payload or trusted route and never 
 test('rejected input is a durable dedup fact outside normal inbox, later rights do not replay the rejected event',async t=>{const f=await fixture(t);const route={workspaceId:'w',entityId:'e',connectionId:'connection',bindingVersion:'binding',appId:'app',conversation:{provider:'feishu',connectionId:'connection',tenantId:'tenant',kind:'conversation',externalId:'a',conversationKind:'private'},messageId:'source',eventId:'event',sourceKey:'rejected-source',payloadHash:'body-hash'};f.repo.enqueueDelivery({...out('reject'),scopeJson:JSON.stringify({kind:'channel_quick_reply',route,replyKind:'permission',source:{connectionId:'connection'}}),correlation:{traceId:'input',messageId:'reject',causationId:'input'}},epoch);assert.equal(f.repo.checkDuplicate('input',{sourceKey:'rejected-source',payloadHash:'body-hash'}),true);assert.throws(()=>f.repo.checkDuplicate('input',{sourceKey:'rejected-source',payloadHash:'changed'}),{code:'conflict'});assert.equal(f.store.one('SELECT count(*) n FROM channel_inbox').n,0);assert.equal(f.repo.claimInbox(epoch,epoch+60000,'none'),undefined);});
 
 test('local paused connection checks cannot consume the network retry count or five minute retry budget',async t=>{const f=await fixture(t);f.repo.enqueueDelivery(out('paused'),f.now());for(let i=0;i<7;i++){const token='paused-'+i;assert.equal(f.repo.claimDelivery(f.now(),f.now()+60000,token).id,'paused');f.repo.finishDelivery('paused',token,'blocked','temporarily_unavailable');const r=f.store.one("SELECT attempts,first_attempt_at FROM channel_deliveries WHERE id='paused'");assert.equal(r.attempts,0);assert.equal(r.first_attempt_at,null);f.advance(60000);}assert.equal(f.repo.claimDelivery(f.now(),f.now()+60000,'network').id,'paused');f.repo.deferDelivery('paused','network',{safeToRetry:true,retryAfterMs:5000});const r=f.store.one("SELECT status,retry_at,attempts,first_attempt_at FROM channel_deliveries WHERE id='paused'");assert.equal(r.status,'pending');assert.equal(r.attempts,1);assert.equal(r.first_attempt_at,f.now());assert.equal(r.retry_at,f.now()+5000);});
+
+function acceptQueryable(f,id='query',repo=f.repo){
+ repo.enqueueDelivery(out(id),f.now());
+ assert.equal(repo.claimDelivery(f.now(),f.now()+60000,'send-'+id).id,id);
+ repo.finishDelivery(id,'send-'+id,'accepted',undefined,undefined,'process-'+id,true);
+}
+function queryFact(f,id='query'){return f.store.one('SELECT * FROM channel_deliveries WHERE id=?',id);}
+function queryReceipt(f,id='query'){return f.store.one("SELECT * FROM channel_message_receipts WHERE id=? AND kind='outbox'",id);}
+
+test('queryable acceptance atomically persists request key and schedule; sent query never fabricates a message id',async t=>{
+ const f=await fixture(t);acceptQueryable(f);
+ const accepted=queryFact(f);
+ assert.equal(accepted.status,'unknown');assert.equal(accepted.provider_request_id,'process-query');
+ assert.equal(accepted.message_id,null);assert.equal(accepted.receipt_query_state,'pending');
+ assert.equal(accepted.receipt_query_at,epoch+2000);assert.equal(accepted.receipt_query_deadline,epoch+300000);
+ assert.equal(queryReceipt(f).provider_request_id,'process-query');
+ f.advance(1999);assert.equal(f.repo.claimDeliveryQuery(f.now(),'early'),undefined);
+ f.advance(1);const row=f.repo.claimDeliveryQuery(f.now(),'query-token');
+ assert.equal(row.id,'query');assert.equal(row.providerRequestId,'process-query');assert.equal(row.scopeJson,out('query').scopeJson);assert.equal(row.targetJson,out('query').targetJson);
+ assert.equal(f.repo.ownsDeliveryQuery('query','query-token'),true);
+ assert.equal(queryFact(f).receipt_query_attempts,1);
+ f.repo.finishDeliveryQuery('query','query-token',{status:'sent'});
+ for(const fact of [queryFact(f),queryReceipt(f)]){assert.equal(fact.status,'sent');assert.equal(fact.message_id,null);assert.equal(fact.provider_request_id,'process-query');assert.equal(fact.error,null);}
+ assert.equal(queryFact(f).receipt_query_state,'done');assert.equal(f.repo.ownsDeliveryQuery('query','query-token'),false);
+ assert.equal(f.repo.claimDelivery(f.now(),f.now()+60000,'must-not-resend'),undefined);
+});
+
+test('receipt queries use 2/5/10/20/30 second delays and exhaust five queries without another send',async t=>{
+ const f=await fixture(t);acceptQueryable(f);
+ for(const [index,delay] of [2000,5000,10000,20000,30000].entries()){
+  f.advance(delay-1);assert.equal(f.repo.claimDeliveryQuery(f.now(),'early'),undefined);f.advance(1);
+  const token='query-'+index;assert.equal(f.repo.claimDeliveryQuery(f.now(),token).id,'query');
+  assert.equal(queryFact(f).receipt_query_attempts,index+1);
+  f.repo.finishDeliveryQuery('query',token,{status:index%2?'unknown':'processing'});
+  assert.equal(queryFact(f).attempts,1);assert.equal(f.repo.claimDelivery(f.now(),f.now()+60000,'never-send'),undefined);
+ }
+ assert.equal(queryFact(f).receipt_query_state,'done');
+ for(const fact of [queryFact(f),queryReceipt(f)]){assert.equal(fact.status,'unknown');assert.equal(fact.error,'receipt_query_exhausted');}
+ f.advance(day);assert.equal(f.repo.claimDeliveryQuery(f.now(),'sixth'),undefined);
+ assert.equal(f.repo.claimDelivery(f.now(),f.now()+60000,'never-resend'),undefined);
+});
+
+test('pending receipt query survives reopen and an in-flight query waits for its lease before fencing a stale token',async t=>{
+ const f=await fixture(t);acceptQueryable(f);f.repo.close();const reopened=f.make();
+ assert.equal(reopened.claimDeliveryQuery(f.now(),'early'),undefined);f.advance(2000);
+ assert.equal(reopened.claimDeliveryQuery(f.now(),'old-token').id,'query');
+ assert.equal(queryFact(f).receipt_query_lease_until,f.now()+30000);
+ reopened.close();const restarted=f.make();
+ assert.equal(restarted.claimDeliveryQuery(f.now(),'too-soon'),undefined);f.advance(29999);
+ assert.equal(restarted.claimDeliveryQuery(f.now(),'still-too-soon'),undefined);f.advance(1);
+ assert.equal(restarted.ownsDeliveryQuery('query','old-token'),false);
+ assert.equal(restarted.claimDeliveryQuery(f.now(),'new-token').id,'query');assert.equal(queryFact(f).receipt_query_attempts,2);
+ const before=queryFact(f);restarted.finishDeliveryQuery('query','old-token',{status:'recalled'});assert.deepEqual(queryFact(f),before);
+ restarted.finishDeliveryQuery('query','new-token',{status:'sent'});assert.equal(queryFact(f).status,'sent');
+ assert.equal(restarted.claimDelivery(f.now(),f.now()+60000,'never-send'),undefined);
+});
+
+test('crashed fifth query exhausts at lease expiry and its late successful result cannot change unknown',async t=>{
+ const f=await fixture(t);acceptQueryable(f);f.advance(2000);
+ for(let attempt=1;attempt<=5;attempt++){
+  assert.equal(f.repo.claimDeliveryQuery(f.now(),'crash-'+attempt).id,'query');
+  assert.equal(queryFact(f).receipt_query_attempts,attempt);f.advance(29999);
+  assert.equal(f.repo.claimDeliveryQuery(f.now(),'too-soon'),undefined);f.advance(1);
+ }
+ assert.equal(f.repo.claimDeliveryQuery(f.now(),'sixth'),undefined);
+ assert.equal(queryFact(f).receipt_query_state,'done');assert.equal(queryFact(f).error,'receipt_query_exhausted');
+ f.repo.finishDeliveryQuery('query','crash-5',{status:'sent'});
+ assert.equal(queryFact(f).status,'unknown');assert.equal(queryReceipt(f).status,'unknown');assert.equal(queryFact(f).attempts,1);
+});
+
+for(const inflight of [false,true])test(`acceptance-based five-minute query deadline survives restart (inflight=${inflight})`,async t=>{
+ const f=await fixture(t);f.repo.enqueueDelivery(out('query'),epoch);
+ f.repo.claimDelivery(f.now(),f.now()+60000,'send-query');f.advance(10000);
+ f.repo.finishDelivery('query','send-query','accepted',undefined,undefined,'process-query',true);
+ assert.equal(queryFact(f).receipt_query_deadline,epoch+310000);
+ f.advance(299000);if(inflight)assert.equal(f.repo.claimDeliveryQuery(f.now(),'last-token').id,'query');
+ f.repo.close();const reopened=f.make();f.advance(1000);
+ assert.equal(reopened.ownsDeliveryQuery('query','last-token'),false);
+ assert.equal(reopened.claimDeliveryQuery(f.now(),'deadline'),undefined);
+ reopened.finishDeliveryQuery('query','last-token',{status:'sent'});
+ assert.equal(queryFact(f).status,'unknown');assert.equal(queryFact(f).error,'receipt_query_exhausted');assert.equal(queryReceipt(f).error,'receipt_query_exhausted');
+ assert.equal(reopened.claimDelivery(f.now(),f.now()+60000,'never-send'),undefined);
+});
+
+test('receipt Retry-After extends query delay but never extends acceptance deadline',async t=>{
+ const f=await fixture(t);acceptQueryable(f);f.advance(2000);f.repo.claimDeliveryQuery(f.now(),'first');
+ f.repo.finishDeliveryQuery('query','first',{status:'unknown',error:'rate_limited',retryAfterMs:60000});
+ assert.equal(queryFact(f).receipt_query_at,f.now()+60000);assert.equal(queryReceipt(f).error,'rate_limited');
+ f.advance(59999);assert.equal(f.repo.claimDeliveryQuery(f.now(),'early'),undefined);f.advance(1);
+ assert.equal(f.repo.claimDeliveryQuery(f.now(),'second').id,'query');
+ f.repo.finishDeliveryQuery('query','second',{status:'processing',retryAfterMs:300000});
+ assert.equal(queryFact(f).receipt_query_deadline,epoch+300000);assert.equal(queryFact(f).receipt_query_state,'done');
+ assert.equal(queryFact(f).error,'receipt_query_exhausted');assert.equal(queryFact(f).attempts,1);
+});
+
+for(const result of [{status:'recalled'},{status:'unknown',error:'identity_changed',stop:true}])test(`terminal receipt query synchronizes receipt without resend (${result.status})`,async t=>{
+ const f=await fixture(t);acceptQueryable(f);f.advance(2000);f.repo.claimDeliveryQuery(f.now(),'terminal');
+ f.repo.finishDeliveryQuery('query','terminal',result);
+ for(const fact of [queryFact(f),queryReceipt(f)]){
+  assert.equal(fact.status,result.status==='recalled'?'failed':'unknown');
+  assert.equal(fact.error,result.status==='recalled'?'provider_message_recalled':'identity_changed');assert.equal(fact.message_id,null);
+ }
+ assert.equal(queryFact(f).receipt_query_state,'done');assert.equal(queryFact(f).blocking,0);
+ f.repo.enqueueDelivery(out('later-output'),f.now());assert.equal(f.repo.claimDelivery(f.now(),f.now()+60000,'later-output').id,'later-output');f.repo.finishDelivery('later-output','later-output','sent');f.advance(day);
+ assert.equal(f.repo.claimDeliveryQuery(f.now(),'later'),undefined);assert.equal(f.repo.claimDelivery(f.now(),f.now()+60000,'resend'),undefined);
+});
+
+test('old unknown rows and non-queryable accepted sends are never adopted into receipt queries',async t=>{
+ const f=await fixture(t);
+ for(const [id,queryable,key] of [['legacy',false,'old-process'],['missing-key',true,undefined],['unsafe',false,undefined]]){
+  f.repo.enqueueDelivery(out(id,id),epoch);f.repo.claimDelivery(f.now(),f.now()+60000,id);
+  f.repo.finishDelivery(id,id,id==='unsafe'?'unknown':'accepted',undefined,undefined,key,queryable);
+ }
+ f.repo.close();const reopened=f.make();f.advance(day);
+ assert.equal(reopened.claimDeliveryQuery(f.now(),'never-query-old'),undefined);
+ assert.equal(reopened.claimDelivery(f.now(),f.now()+60000,'never-resend-old'),undefined);
+ for(const id of ['legacy','missing-key','unsafe']){assert.equal(queryFact(f,id).receipt_query_state,null);assert.equal(queryFact(f,id).receipt_query_attempts,0);assert.equal(queryFact(f,id).status,'unknown');}
+ acceptQueryable(f,'fresh',reopened);f.advance(2000);assert.equal(reopened.claimDeliveryQuery(f.now(),'fresh-query').id,'fresh');
+});
+
+test('receipt query scheduling and acceptance roll back together if persistence fails',async t=>{
+ const f=await fixture(t);f.repo.enqueueDelivery(out('query'),epoch);
+ f.repo.claimDelivery(f.now(),f.now()+60000,'send-query');
+ const before=queryFact(f),receiptBefore=queryReceipt(f);
+ f.store.db.exec("CREATE TRIGGER synthetic_query_persistence_failure BEFORE UPDATE OF receipt_query_state ON channel_deliveries WHEN NEW.receipt_query_state='pending' BEGIN SELECT RAISE(ABORT,'synthetic query persistence failure'); END");
+ assert.throws(()=>f.repo.finishDelivery('query','send-query','accepted',undefined,undefined,'process-query',true),/synthetic query persistence failure/);
+ assert.deepEqual(queryFact(f),before);assert.deepEqual(queryReceipt(f),receiptBefore);
+ f.store.db.exec('DROP TRIGGER synthetic_query_persistence_failure');
+ f.repo.finishDelivery('query','send-query','accepted',undefined,undefined,'process-query',true);
+ assert.equal(queryFact(f).status,'unknown');assert.equal(queryFact(f).provider_request_id,'process-query');assert.equal(queryFact(f).receipt_query_state,'pending');
+});

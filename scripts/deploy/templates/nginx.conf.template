@@ -1,4 +1,6 @@
 # Modified for Identale; see the root NOTICE.
+# Never log query strings or Referer headers: OAuth redirects carry credentials.
+log_format identity_safe '$remote_addr - [$time_local] "$request_method $uri $server_protocol" $status $body_bytes_sent';
 {{REDIRECTS}}
 server {
     listen {{PORT}} ssl;
@@ -8,6 +10,7 @@ server {
     ssl_protocols TLSv1.2 TLSv1.3;
     root /srv/identity/web;
     index index.html;
+    access_log /var/log/nginx/identity-access.log identity_safe;
     client_max_body_size 16k;
 
     location /api/ {
@@ -18,6 +21,14 @@ server {
         proxy_set_header X-Forwarded-For $remote_addr;
         proxy_set_header X-Forwarded-Proto https;
         proxy_read_timeout 300s;
+
+        # Nginx error logs cannot redact the upstream request URI. Suppress both
+        # logs for the OAuth callback, including failed upstream connections.
+        location = /api/business-resources/feishu/callback {
+            access_log off;
+            error_log /dev/null;
+            proxy_pass http://127.0.0.1:18300;
+        }
 
         # Keep the hidden-path guard ahead of the API exceptions below.
         location ~ /\. { return 404; }

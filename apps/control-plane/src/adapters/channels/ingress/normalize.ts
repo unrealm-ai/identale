@@ -3,6 +3,7 @@ import {ChannelError, type ChannelIngressSession, type ChannelMessageEvent, type
 
 /** Host-resolved installation facts. Never populate these from an event or HTTP input. */
 export interface ChannelIngressIdentityHints {
+  /** Stable provider bot identity; DingTalk uses robotCode, never chatbotUserId. */
   botId?: string;
   tenantId?: string;
   tenantNamespace?: 'tenant_key' | 'display_id' | 'app_id' | 'corp_id';
@@ -125,8 +126,10 @@ function dingtalk(session: ChannelIngressSession, raw: Record<string,unknown>, h
   const headers = object(raw.headers);
   if (headers.topic !== '/v1.0/im/bot/messages/get') return invalid('unsupported_dingtalk_topic');
   const eventId = id(headers.messageId), row = parse(raw.data);
-  const tenantId = id(row.chatbotCorpId), botId = id(row.chatbotUserId), robotCode = id(row.robotCode);
-  if (hints.botId) match(botId,hints.botId,'ingress_bot_mismatch');
+  // chatbotUserId is callback-local (it may differ between private and group
+  // conversations). Only robotCode identifies this application robot.
+  const tenantId = id(row.chatbotCorpId), callbackBotUserId = id(row.chatbotUserId), robotCode = id(row.robotCode), botId = robotCode;
+  if (hints.botId) match(robotCode,hints.botId,'ingress_robot_mismatch');
   if (hints.robotCode) match(robotCode,hints.robotCode,'ingress_robot_mismatch');
   if (hints.tenantNamespace && hints.tenantNamespace !== 'corp_id' && hints.tenantNamespace !== 'app_id') mismatch('ingress_tenant_namespace_mismatch');
   if (hints.tenantId && hints.tenantNamespace !== 'app_id') match(tenantId,hints.tenantId,'ingress_tenant_mismatch');
@@ -139,7 +142,9 @@ function dingtalk(session: ChannelIngressSession, raw: Record<string,unknown>, h
   match(row.senderCorpId,tenantId,'ingress_sender_tenant_mismatch');
   if (row.senderStaffId === undefined || row.senderStaffId === '') throw new ChannelError('unauthenticated','ingress_sender_identity_invalid');
   const senderId = id(row.senderStaffId);
-  if (senderId === botId || row.senderId === botId) return {kind:'ignored',reason:'self_message'};
+  // senderId and chatbotUserId are callback account IDs; senderStaffId is a
+  // directory user ID. Never compare a staff ID with robotCode or chatbotUserId.
+  if (row.senderId !== undefined && id(row.senderId) === callbackBotUserId) return {kind:'ignored',reason:'self_message'};
   if (row.isInAtList !== undefined && typeof row.isInAtList !== 'boolean') return invalid('invalid_ingress_mentions');
   const conversationKind = row.conversationType === '1' ? 'private' : 'group';
   const event: ChannelMessageEvent = {schemaVersion:1,eventId,connectionId:session.connectionId,tenantId,receivedAt,origin:'live',message:{
@@ -211,12 +216,13 @@ export function ingressReplyTarget(session:ChannelIngressSession,envelope:unknow
    if(row.thread_id!==undefined)threadId=id(row.thread_id);
   }else if(session.provider==='dingtalk'){
    const headers=object(raw.headers),row=object(JSON.parse(String(raw.data)));
-   if(raw.type!=='CALLBACK'||headers.topic!=='/v1.0/im/bot/messages/get'||row.chatbotCorpId!==hints.tenantId||row.chatbotUserId!==hints.botId||row.robotCode!==hints.robotCode||row.msgtype!=='text')return;
+   if(raw.type!=='CALLBACK'||headers.topic!=='/v1.0/im/bot/messages/get'||hints.tenantNamespace!=='corp_id'||row.chatbotCorpId!==hints.tenantId||!hints.robotCode||hints.botId!==hints.robotCode||row.robotCode!==hints.robotCode||row.msgtype!=='text')return;
    for(const key of ['appId','appKey'])if(row[key]!==undefined&&row[key]!==session.appId)return;
-   if(row.senderStaffId===hints.botId||row.senderId===hints.botId)return;
+   const callbackBotUserId=id(row.chatbotUserId);
+   if(row.senderId!==undefined&&id(row.senderId)===callbackBotUserId)return;
    if(row.conversationType!=='1'&&row.conversationType!=='2')return;
    kind=row.conversationType==='1'?'private':'group';if(kind==='group'&&row.isInAtList!==true)return;
-   if(kind==='private')recipient=id(row.senderStaffId);
+   if(kind==='private'){if(row.senderCorpId!==hints.tenantId)return;recipient=id(row.senderStaffId);}
    chatId=id(row.conversationId);messageId=id(row.msgId);eventId=id(headers.messageId);tenantId=hints.tenantId;
   }else{
    const row=object(raw.body);if(raw.cmd!=='aibot_msg_callback'||row.aibotid!==session.appId||row.aibotid!==hints.botId||(hints.tenantNamespace!=='app_id'||hints.tenantId!==session.appId)||row.msgtype!=='text')return;

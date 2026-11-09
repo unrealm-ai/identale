@@ -19,8 +19,9 @@ export interface DirectoryConnection {
   directoryStatus: 'available' | 'unavailable'; lastError?: string | null; enabled: boolean;
   directoryMode?:'member_search';
   memberSearchIdentityVerified?:boolean;
+  memberSearchVerifiedUserIds?:string[];
 }
-export interface DirectoryItem { externalId: string; subjectId: string; displayName: string; kind: 'channel_user' | 'department'; departmentPaths?:string[] }
+export interface DirectoryItem { identityVerified?: boolean; externalId: string; subjectId: string; displayName: string; kind: 'channel_user' | 'department'; departmentPaths?:string[] }
 export interface DirectoryPage { sourceId: string; provider: DirectoryProvider; appId: string; items: DirectoryItem[]; nextCursor?: string; exhausted: boolean; limited?:boolean }
 export interface DirectorySubjects { sources: DirectoryConnection[]; users: never[]; departments: never[] }
 export interface DirectoryAccessRule {
@@ -37,3 +38,5 @@ export const directoryStatusLabel = (connection: DirectoryConnection): string =>
 
 export interface PackageChannelPolicy { sourceId: string; legacyAllowCheck?: true; mode: 'inherit' | 'allowlist' | 'denylist'; allow: DirectoryAccessRule[]; deny: DirectoryAccessRule[] }
 export interface PackageDirectoryAccess { allow: DirectoryAccessRule[]; deny: DirectoryAccessRule[]; channelPolicies?: PackageChannelPolicy[] }
+
+export interface DirectoryIdentityEvidence { sourceId: string; authRevision: number; userId: string }

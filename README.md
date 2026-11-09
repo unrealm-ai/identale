@@ -114,7 +114,7 @@ sudo bash scripts/start.sh --host your-domain-or-ip --port 15173
 | **本地免 Key 试用** | `bash scripts/start.sh --mock` | 启动本地合成模型（Mock Model）与测试 MCP，用于无 API Key 场景下的交互与执行闭环验证。 |
 | **服务器一键部署** | `sudo bash scripts/start.sh --host <IP_OR_DOMAIN>` | 在 Debian / Ubuntu 环境下一键完成 `systemd` 服务与 Nginx HTTPS 部署，自动降权至 `identity` 账号。 |
 | **快速重新启动** | `bash scripts/start.sh --no-install --no-build` | 复用现有依赖和 `dist/` 构建产物快速拉起服务，跳过依赖安装与前端编译。 |
-| **快速单元测试** | `npm run test:fast` | 执行轻量定向单元测试集（其他测试子集与验证命令见 [DEVELOPMENT.md](DEVELOPMENT.md)）。 |
+| **领域单元测试** | `npm run test:domain` | 执行领域规则测试（其他测试子集与验证命令见 [DEVELOPMENT.md](DEVELOPMENT.md)）。 |
 
 #### 3. 运行互斥与环境隔离
 - **代码目录互斥锁**：同一代码目录下，普通用户本地启动与 `sudo` 服务器部署由 `.identale-mode/` 文件锁互斥保护。禁止在同一检出目录下并发运行本地与服务器两种模式。

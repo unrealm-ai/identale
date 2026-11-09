@@ -3,7 +3,7 @@ import { createHmac, timingSafeEqual } from 'node:crypto';
 import {
   ChannelError, assertChannelResource, requireChannelCapability,
   type ChannelConnection, type ChannelResourceRef, type ChannelConversation, type ChannelMessage,
-  type ChannelQuery, type ChannelPage, type ChannelSendReceipt, type SendChannelMessage,
+  type ChannelQuery, type ChannelPage, type ChannelSendReceipt, type SendChannelMessage, type ChannelSendStatusQuery, type ChannelSendStatusReceipt,
   type ConversationPort, type ConversationCapabilities,
   type ChannelWebhookPort, type ChannelWebhookRequest, type ChannelWebhookResult,
 } from '@dentity/application';
@@ -69,13 +69,14 @@ export async function verifyDingTalkBindingCandidate(request: ChannelWebhookRequ
   const bounded = (value: unknown): value is string => typeof value === 'string' && value.trim().length > 0 && value.length <= 256 && !/[\r\n]/.test(value);
   if (!bounded(options.appId) || !bounded(options.challengeText)) throw new ChannelError('invalid_request','invalid_binding_challenge');
   const row = await authenticatedCallback(request,options);
+  for(const key of ['appId','appKey'])if(row[key]!==undefined&&row[key]!==options.appId)throw new ChannelError('forbidden','binding_candidate_identity_invalid');
   if (!bounded(row.msgId) || !bounded(row.chatbotCorpId) || !bounded(row.chatbotUserId) || !bounded(row.robotCode) || !bounded(row.senderStaffId) || row.senderCorpId !== row.chatbotCorpId) throw new ChannelError('forbidden','binding_candidate_identity_invalid');
-  if (row.senderId === row.chatbotUserId || row.senderStaffId === row.chatbotUserId) throw new ChannelError('forbidden','binding_candidate_sender_invalid');
+  if (row.senderId === row.chatbotUserId) throw new ChannelError('forbidden','binding_candidate_sender_invalid');
   if (row.msgtype !== 'text' || (row.conversationType !== '1' && !(row.conversationType === '2' && row.isInAtList === true))) throw new ChannelError('invalid_request','binding_candidate_message_required');
   const text = typeof row.text === 'object' && row.text !== null && !Array.isArray(row.text) ? (row.text as Record<string,unknown>).content : undefined;
   if (typeof text !== 'string' || text.trim() !== options.challengeText) throw new ChannelError('forbidden','binding_challenge_mismatch');
   // Never accept application identity, verification status or a destination URL from JSON.
-  return Object.freeze({eventId:row.msgId,messageId:row.msgId,appId:options.appId,botId:row.chatbotUserId,tenantId:row.chatbotCorpId,robotCode:row.robotCode,challengeText:text.trim()});
+  return Object.freeze({eventId:row.msgId,messageId:row.msgId,appId:options.appId,botId:row.robotCode,tenantId:row.chatbotCorpId,robotCode:row.robotCode,challengeText:text.trim()});
 }
 /** Official app-bot HTTP callback and send API; production Stream ingress is provided separately. */
 export class DingTalkBotConversationAdapter implements ConversationPort, ChannelWebhookPort {
@@ -137,17 +138,45 @@ export class DingTalkBotConversationAdapter implements ConversationPort, Channel
     if (data.errcode!==undefined&&data.errcode!==0)throw new ChannelError('delivery_unknown','provider_send_rejected');
     if (isPrivate) {
       for (const field of ['invalidStaffIdList','flowControlledStaffIdList']) {
-        if (data[field] !== undefined && !Array.isArray(data[field])) throw new ChannelError('delivery_unknown','provider_response_shape_invalid');
-        if (Array.isArray(data[field]) && (data[field] as unknown[]).length) throw new ChannelError(field === 'invalidStaffIdList' ? 'invalid_request' : 'rate_limited','private_recipient_rejected');
+        const rejected=data[field];
+        // Each operation has exactly one recipient. Unrelated/malformed lists cannot prove rejection.
+        if(rejected!==undefined&&(!Array.isArray(rejected)||rejected.some(id=>id!==recipient)))throw new ChannelError('delivery_unknown','provider_response_shape_invalid');
       }
+      if(Array.isArray(data.invalidStaffIdList)&&data.invalidStaffIdList.length)throw new ChannelError('invalid_request','private_recipient_rejected');
+      if(Array.isArray(data.flowControlledStaffIdList)&&data.flowControlledStaffIdList.length)throw new ChannelError('rate_limited','private_recipient_rejected');
     }
     // processQueryKey identifies the async send request, NOT a delivered channel message.
-    if (typeof data.processQueryKey !== 'string' || !data.processQueryKey) throw new ChannelError('delivery_unknown','provider_request_id_missing');
+    if (typeof data.processQueryKey !== 'string' || !data.processQueryKey || data.processQueryKey.length>2048 || /[\x00-\x20\x7f]/.test(data.processQueryKey)) throw new ChannelError('delivery_unknown','provider_request_id_missing');
     return {status:'accepted',providerRequestId:data.processQueryKey,idempotent:false};
+  }
+  async queryMessageStatus(request:ChannelSendStatusQuery):Promise<ChannelSendStatusReceipt> {
+    this.resource(request.conversation);
+    if(!['private','group'].includes(request.conversation.conversationKind??''))throw new ChannelError('invalid_request','send_status_target_kind_required');
+    if(typeof request.providerRequestId!=='string'||!request.providerRequestId||request.providerRequestId.length>2048||/[\x00-\x20\x7f]/.test(request.providerRequestId))throw new ChannelError('invalid_request','invalid_provider_request_id');
+    requireChannelCapability((await this.inspectCapabilities(request.conversation)).proactiveSend);
+    const query={robotCode:this.options.robotCode,processQueryKey:request.providerRequestId};
+    const isPrivate=request.conversation.conversationKind==='private';
+    let response:unknown;
+    try{response=await this.http.request(isPrivate?'/v1.0/robot/oToMessages/readStatus?'+new URLSearchParams(query):'/v1.0/robot/groupMessages/query',isPrivate?'GET':'POST',isPrivate?undefined:{...query,openConversationId:request.conversation.externalId,maxResults:1},'json',request.assertQueryAllowed);}
+    catch(error){
+      // The group API uses POST, but it only queries. A transport error cannot mean a new send.
+      if(error instanceof ChannelError&&error.code==='delivery_unknown')throw new ChannelError('temporarily_unavailable','provider_send_status_unavailable');
+      throw error;
+    }
+    const data=object(response);
+    if(data.errcode!==undefined&&data.errcode!==0||data.code!==undefined&&data.code!==0)throw new ChannelError('temporarily_unavailable','provider_send_status_unavailable');
+    // Read receipts are neither required nor interpreted. SUCCESS confirms sending, never reading.
+    if(data.sendStatus==='SUCCESS')return{status:'sent'};
+    if(data.sendStatus==='PROCESSING')return{status:'processing'};
+    if(data.sendStatus==='RECALLED')return{status:'recalled'};
+    return{status:'unknown'};
   }
   async receiveWebhook(request: ChannelWebhookRequest): Promise<ChannelWebhookResult> {
     const row = await authenticatedCallback(request,{resolveAppSecret:()=>this.http.credential('webhook_app_secret'),trustedHttpsBoundary:this.options.trustedHttpsBoundary === true,now:this.http.now});
-    if (row.chatbotCorpId !== this.connection.tenantId || row.robotCode !== this.options.robotCode || row.chatbotUserId !== this.connection.identity.externalId) throw new ChannelError('forbidden','webhook_installation_mismatch');
+    if (row.chatbotCorpId !== this.connection.tenantId || row.robotCode !== this.options.robotCode) throw new ChannelError('forbidden','webhook_installation_mismatch');
+    for(const key of ['appId','appKey'])if(this.options.appId&&row[key]!==undefined&&row[key]!==this.options.appId)throw new ChannelError('forbidden','webhook_installation_mismatch');
+    const callbackBotUserId=optionalString(row.chatbotUserId);
+    if(!callbackBotUserId||callbackBotUserId.length>256||/[\x00-\x20\x7f]/.test(callbackBotUserId))throw new ChannelError('forbidden','webhook_installation_mismatch');
     const isPrivate = row.conversationType === '1';
     if ((!isPrivate && row.conversationType !== '2') || row.msgtype !== 'text' || (!isPrivate && row.isInAtList !== true)) return {kind:'ignored'};
     const caps = await this.inspectCapabilities();
@@ -155,13 +184,13 @@ export class DingTalkBotConversationAdapter implements ConversationPort, Channel
     if (row.senderCorpId !== this.connection.tenantId) throw new ChannelError('forbidden','external_corporation_sender_not_supported');
     // Published internal app bots provide staffId. Do not guess it from senderId/nickname.
     const senderId = optionalString(row.senderStaffId);
-    if (isPrivate && !senderId) return {kind:'ignored'};
-    if (senderId === this.connection.identity.externalId || row.senderId === this.connection.identity.externalId) return {kind:'ignored'};
+    if (!senderId||senderId.length>256||/[\x00-\x20\x7f]/.test(senderId))throw new ChannelError('unauthenticated','webhook_sender_identity_invalid');
+    if (row.senderId === callbackBotUserId) return {kind:'ignored'};
     const conversationKind = isPrivate ? 'private' : 'group';
     const conversation: ChannelResourceRef = {provider:'dingtalk',connectionId:this.connection.connectionId,tenantId:this.connection.tenantId,kind:'conversation',externalId:string(row.conversationId),conversationKind,...(isPrivate?{privateRecipientId:senderId!}:{})};
     const message: ChannelMessage = {id:string(row.msgId),conversation,conversationKind,occurredAt:timestamp(row.createAt),
       author:{...(senderId?{externalId:senderId,idNamespace:'user_id' as const,...(this.options.appId?{applicationId:this.options.appId}:{})}:{}),...(optionalString(row.senderNick)?{displayName:string(row.senderNick)}:{}),kind:'human',identityEvidence:senderId?'channel_verified':'unknown'},
-      text:string(object(row.text).content),mentions:isPrivate?[]:[this.connection.identity.externalId]};
+      text:string(object(row.text).content),mentions:isPrivate?[]:[this.options.robotCode]};
     return {kind:'message',event:{schemaVersion:1,eventId:message.id,connectionId:this.connection.connectionId,tenantId:this.connection.tenantId,receivedAt:this.http.now(),origin:'live',message}};
   }
 

@@ -26,7 +26,7 @@ function setup(t){
  service.setAccessCheck((...args)=>capabilities.authorizeChannel(...args));
  t.after(()=>{capabilities.close();store.close();rmSync(dir,{recursive:true,force:true});});return{store,state,options,repository,service,capabilities};
 }
-async function ready(f,provider='feishu',entity='e',appId='app'){const c=await f.service.save('w',entity,provider,'u',{appId,appSecret:'test-only-secret',expectedRevision:0});if(provider==='dingtalk')f.service.observeFirstInbound(c.id,{appId,botId:'bot-'+appId,tenantId:'tenant',tenantNamespace:'corp_id',robotCode:appId});return c;}
+async function ready(f,provider='feishu',entity='e',appId='app'){const c=await f.service.save('w',entity,provider,'u',{appId,appSecret:'test-only-secret',expectedRevision:0});if(provider==='dingtalk')f.service.observeFirstInbound(c.id,{appId,botId:appId,tenantId:'tenant',tenantNamespace:'corp_id',robotCode:appId});return c;}
 function rule(c,kind='department',subject='root',includeDescendants=true){return{sourceId:c.sourceId,kind,subjectId:channelSubject(kind,subject,kind==='department'?(c.provider==='feishu'?'open_department_id':'department_id'):(c.provider==='feishu'?'open_id':'user_id'),c.appId),...(kind==='department'?{includeDescendants}:{}),conversationKinds:['private','group']};}
 function scope(c,user='person'){return{workspaceId:'w',entityId:'e',requesterId:user,requesterKind:'channel_user',requesterIdentity:{idNamespace:c.provider==='feishu'?'open_id':'user_id',applicationId:c.appId},conversationKind:'group'};}
 function connection(c){return{workspaceId:'w',connectionId:c.id,provider:c.provider,tenantId:'tenant',identity:{kind:'bot',externalId:c.botId},credentialRef:'server-only'};}

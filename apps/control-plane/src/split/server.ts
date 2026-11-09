@@ -44,6 +44,15 @@ export function createPlatformServer(options:PlatformServerOptions){
    else throw new TaskError(400,'invalid_directory_request');return{accepted:true};
   });
   registerChannelObservationApi(app,{token:options.configurationToken,channels:c.channels,store:c.store});
+  c.channels.setMemberVerificationReceiver(async(record,requestId)=>{
+   const deadline=Date.now()+12000;
+   do{
+    try{const response=await transport(runtimeUrl+'/internal/control/wecom-member-verification-ready',{method:'POST',headers:{authorization:'Bearer '+options.runtimeService.token,'content-type':'application/json'},body:JSON.stringify({connectionId:record.id,sourceId:record.sourceId,authRevision:record.authRevision,stateVersion:record.stateVersion,requestId}),redirect:'error',signal:AbortSignal.timeout(2000)});if(response.ok&&(await response.json()as{ready?:unknown}).ready===true)return true;}catch{/* Bounded read-only readiness probe; no send before the receiver confirms. */}
+    if(Date.now()<deadline)await new Promise(resolve=>setTimeout(resolve,250));
+   }while(Date.now()<deadline);
+   return false;
+  });
+
   const relay=async(request:FastifyRequest,path=request.url)=>{
    const user=c.auth(request),workspace=/^\/api\/workspaces\/([^/?]+)/.exec(path);if(workspace){const role=c.workspaces.get(user.id,decodeURIComponent(workspace[1]!)).role;if(/^\/api\/workspaces\/[^/]+\/task-management(?:\/|$)/.test(path)&&!['owner','admin'].includes(role))throw new TaskError(403,'role_forbidden');}
    const response=await transport(runtimeUrl+path,{method:request.method,headers:{authorization:'Bearer '+options.runtimeService.token,'x-dentity-actor':user.id,origin:options.origin??'http://127.0.0.1:15173',...(request.body===undefined?{}:{'content-type':'application/json'})},...(request.body===undefined?{}:{body:JSON.stringify(request.body)}),redirect:'error',signal:AbortSignal.timeout(30000)});
@@ -104,6 +113,13 @@ export function createRuntimeServer(options:RuntimeServerOptions){
  server.register(async app=>bootstrap(app,{...base(options,defaultDatabasePath('runtime')),modelProfiles:{...options.modelProfiles,masterKey:deriveRuntimeConfigurationKey(options.platformConfig.token)},employeeChannels:{...options.employeeChannels,masterKey:deriveRuntimeConfigurationKey(options.platformConfig.token)},split:{role:'runtime',notificationKey:options.platformConfig.token,authenticate,hasConfiguration:()=>!!poller?.status.epoch,whenConfigured(work){if(poller?.status.epoch)work();else configurationWaiters.add(work);},assertNewAdmission(){if(!poller?.ready)throw new TaskError(503,'configuration_unavailable');},
 
   async initialize(c){composition=c;
+   app.post('/internal/control/wecom-member-verification-ready',request=>{
+    authorizeService(request.headers.authorization,options.serviceToken);
+    const b=request.body as{connectionId?:unknown;sourceId?:unknown;authRevision?:unknown;stateVersion?:unknown;requestId?:unknown};
+    if(!b||typeof b!=='object'||Array.isArray(b)||Object.keys(b).some(k=>!['connectionId','sourceId','authRevision','stateVersion','requestId'].includes(k))||typeof b.connectionId!=='string'||typeof b.sourceId!=='string'||typeof b.requestId!=='string'||!Number.isSafeInteger(b.authRevision)||!Number.isSafeInteger(b.stateVersion))throw new TaskError(400,'invalid_member_verification_request');
+    return{ready:poller?.ready===true&&c.channels.memberVerificationReady(b.connectionId,b.sourceId,b.authRevision as number,b.requestId,b.stateVersion as number)};
+   });
+
    const demand=new Map<string,number>();
    const requestDirectory=(connectionId:string,kind:'user'|'department',id:unknown)=>{const key=JSON.stringify([connectionId,kind,id]),now=(options.now??Date.now)();if((demand.get(key)??0)>now)return;if(demand.size>=1000)demand.delete(demand.keys().next().value!);demand.set(key,now+60000);void serviceJson(transport,options.platformConfig.url+'/internal/config/directory-demand',options.platformConfig.token,{connectionId,kind,id}).catch(()=>{demand.delete(key);});};
    const requestUser=c.snapshots.requestUser.bind(c.snapshots),requestDepartment=c.snapshots.requestDepartment.bind(c.snapshots);
@@ -112,6 +128,7 @@ export function createRuntimeServer(options:RuntimeServerOptions){
    const before=new Map<string,string>();
    lifecycle=new EmployeeLifecycleController({store:c.store,now:options.now??Date.now,onFenceChanged(w,e){for(const r of c.channels.repository.list(w,e))c.channels.notifyCommitted(r.id);}});
    observations=installChannelObservationReporter(c.store,c.channels.repository,{url:options.platformConfig.url,token:options.platformConfig.token,fetch:transport,now:options.now??Date.now});
+   c.channels.setMemberVerificationPersistence(async(r,requestId,callbackUserId)=>{await observations!.flush();const result=await serviceJson(transport,options.platformConfig.url+'/internal/config/wecom-member-confirmed',options.platformConfig.token,{connectionId:r.id,sourceId:r.sourceId,authRevision:r.authRevision,requestId,callbackUserId}) as {confirmed?:boolean};return result.confirmed===true;});
    app.addHook('preClose',()=>observations!.close());
    poller=new ConfigurationPoller({store:c.store,baseUrl:options.platformConfig.url,token:options.platformConfig.token,...(options.platformConfig.pollMs?{pollMs:options.platformConfig.pollMs}:{}),...(options.platformConfig.maxAgeMs?{maxAgeMs:options.platformConfig.maxAgeMs}:{}),fetch:transport,now:options.now??Date.now,onApplied(change){
     queueMicrotask(()=>{if(poller?.status.epoch){for(const work of configurationWaiters)work();configurationWaiters.clear();}});

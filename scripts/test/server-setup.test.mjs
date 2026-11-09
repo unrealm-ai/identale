@@ -76,7 +76,9 @@ test('rendered Nginx configurations pass the real parser with an isolated certif
     execFileSync('openssl', ['req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-days', '1', '-keyout', `${temporary}/server.key`, '-out', `${temporary}/server.crt`, '-subj', '/CN=192.0.2.10', '-addext', 'subjectAltName=IP:192.0.2.10'], { stdio: 'ignore' });
     const source = await fs.readFile(new URL('../deploy/templates/nginx.conf.template', import.meta.url), 'utf8');
     for (const port of [443, 15173]) {
-      const site = renderNginx(source, '192.0.2.10', port).replaceAll('/etc/identity/tls/', `${temporary}/`);
+      const site = renderNginx(source, '192.0.2.10', port)
+        .replaceAll('/etc/identity/tls/', `${temporary}/`)
+        .replaceAll('/var/log/nginx/identity-access.log', `${temporary}/access.log`);
       await fs.writeFile(`${temporary}/nginx.conf`, `pid ${temporary}/nginx.pid;\nerror_log stderr;\nevents {}\nhttp { ${site} }\n`);
       execFileSync('nginx', ['-t', '-c', `${temporary}/nginx.conf`], { stdio: 'pipe' });
     }

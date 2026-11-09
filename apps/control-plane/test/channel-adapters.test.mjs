@@ -145,7 +145,8 @@ test('DingTalk HTTP callback requires trusted HTTPS, authenticates headers and b
   const result=await adapter.receiveWebhook(request());
   assert.equal(result.event.message.conversationKind,'group');assert.equal(result.event.message.author.externalId,'staff1');assert.equal(result.event.message.author.idNamespace,'user_id');assert.equal(result.event.message.author.applicationId,'app1');assert.equal(result.event.receivedAt,now);
   assert.equal(result.event.message.author.identityEvidence,'channel_verified');
-  const forgedApp = await adapter.receiveWebhook(request({...body,appId:'forged',applicationId:'forged',conversationKind:'private'}));
+  await assert.rejects(adapter.receiveWebhook(request({...body,appId:'forged'})),{code:'forbidden'});
+  const forgedApp = await adapter.receiveWebhook(request({...body,applicationId:'forged',conversationKind:'private'}));
   assert.equal(forgedApp.event.message.author.applicationId,'app1');assert.equal(forgedApp.event.message.conversationKind,'group');
   const {appId: omittedAppId,...noAppConfig}=config;
   const withoutApp=await new DingTalkBotConversationAdapter(conn,noAppConfig).receiveWebhook(request({...body,appId:'forged'}));
@@ -158,8 +159,7 @@ test('DingTalk HTTP callback requires trusted HTTPS, authenticates headers and b
   await assert.rejects(adapter.receiveWebhook(request({...body,senderCorpId:'external'})),{code:'forbidden'});
   assert.equal((await adapter.receiveWebhook(request({...body,conversationType:'1'}))).event.message.conversationKind,'private');
   assert.equal((await adapter.receiveWebhook(request({...body,isInAtList:false}))).kind,'ignored');
-  const unknown=await adapter.receiveWebhook(request({...body,senderStaffId:undefined}));
-  assert.equal(unknown.event.message.author.identityEvidence,'unknown');assert.equal(unknown.event.message.author.externalId,undefined);
+  await assert.rejects(adapter.receiveWebhook(request({...body,senderStaffId:undefined})),{code:'unauthenticated'});
 });
 
 test('all ambiguous outbound provider responses stay delivery_unknown and are never retried',async t=>{
@@ -223,7 +223,7 @@ test('DingTalk private callback fixes the recipient and ignores callback URL and
   await assert.rejects(adapter.sendMessage({...send,conversation:{...send.conversation,privateRecipientId:undefined}}),{code:'invalid_request'});
   rejected=true;await assert.rejects(adapter.sendMessage(send),{code:'invalid_request'});
   assert.equal(f.calls.length,2);
-  assert.equal((await adapter.receiveWebhook(request({...body,senderStaffId:undefined}))).kind,'ignored');
+  await assert.rejects(adapter.receiveWebhook(request({...body,senderStaffId:undefined})),{code:'unauthenticated'});
   assert.equal((await adapter.receiveWebhook(request({...body,senderId:'ou_bot'}))).kind,'ignored');
   await assert.rejects(adapter.receiveWebhook(request({...body,chatbotCorpId:'other'})),{code:'forbidden'});
   await assert.rejects(new DingTalkBotConversationAdapter({...connection,provider:'dingtalk'},{...config,privateMessageEventsGranted:false}).receiveWebhook(request(body)),{code:'forbidden'});
@@ -244,11 +244,11 @@ test('Feishu display-id pending installation discovers only a signed same-app ac
 
 
 test('DingTalk pending binding yields only a challenge-bound candidate, not a business event',async()=>{
-  const body={msgId:'verify-msg',chatbotCorpId:'corp-candidate',chatbotUserId:'bot-candidate',robotCode:'robot-not-app-key',senderStaffId:'staff',senderCorpId:'corp-candidate',conversationType:'1',msgtype:'text',text:{content:'  identity-verify-test  '},appId:'forged'};
+  const body={msgId:'verify-msg',chatbotCorpId:'corp-candidate',chatbotUserId:'bot-candidate',robotCode:'robot-not-app-key',senderStaffId:'staff',senderCorpId:'corp-candidate',conversationType:'1',msgtype:'text',text:{content:'  identity-verify-test  '},appId:'trusted-app'};
   const options={appId:'trusted-app',resolveAppSecret:async()=> 'fixture-secret',challengeText:'identity-verify-test',expiresAt:now+600000,now:()=>now,trustedHttpsBoundary:true};
   const request=(value=body,time=String(now))=>({rawBody:JSON.stringify(value),receivedAt:0,headers:{timestamp:time,sign:createHmac('sha256','fixture-secret').update(`${time}\nfixture-secret`).digest('base64')}});
   const result=await verifyDingTalkBindingCandidate(request(),options);
-  assert.deepEqual(result,{eventId:'verify-msg',messageId:'verify-msg',appId:'trusted-app',botId:'bot-candidate',tenantId:'corp-candidate',robotCode:'robot-not-app-key',challengeText:'identity-verify-test'});
+  assert.deepEqual(result,{eventId:'verify-msg',messageId:'verify-msg',appId:'trusted-app',botId:'robot-not-app-key',tenantId:'corp-candidate',robotCode:'robot-not-app-key',challengeText:'identity-verify-test'});
   assert.equal('event' in result,false);assert.equal('identityEvidence' in result,false);
   await assert.rejects(verifyDingTalkBindingCandidate({...request(),headers:{...request().headers,sign:'A'.repeat(43)+'='}},options),{code:'unauthenticated'});
   await assert.rejects(verifyDingTalkBindingCandidate(request(body,String(now-3600001)),options),{code:'unauthenticated'});
@@ -377,4 +377,91 @@ test('Feishu current membership query uses this bot tenant token and rejects unk
  assert.equal(await adapter.isBotInGroup({...ref,conversationKind:'group'}),true);assert.equal(calls.length,1);assert.equal(calls[0].url,'https://open.feishu.cn/open-apis/im/v1/chats/oc_group/members/is_in_chat');assert.equal(calls[0].headers.authorization,'Bearer test-token');
  data={is_in_chat:false};assert.equal(await adapter.isBotInGroup({...ref,conversationKind:'group'}),false);data={};await assert.rejects(adapter.isBotInGroup({...ref,conversationKind:'group'}),/membership_response_invalid/);
  const before=calls.length;await assert.rejects(adapter.isBotInGroup({...ref,tenantId:'other',conversationKind:'group'}),{code:'forbidden'});await assert.rejects(adapter.isBotInGroup({...ref,conversationKind:'private'}),{code:'invalid_request'});assert.equal(calls.length,before);
+});
+
+const dingStatusConnection={...connection,provider:'dingtalk'};
+const dingStatusTarget={...ref,provider:'dingtalk',conversationKind:'group'};
+const dingStatusOptions={...options,robotCode:'robot1',proactiveSendGranted:true};
+
+test('DingTalk status query uses exact private GET and group POST contracts with encoded identifiers',async t=>{
+  const f=await fixture((_req,res)=>res.end(JSON.stringify({sendStatus:'SUCCESS',readStatus:'UNREAD'})));t.after(f.close);
+  const robotCode='robot/+?&=中文',providerRequestId='query/+?&=中文',adapter=new DingTalkBotConversationAdapter(dingStatusConnection,{...dingStatusOptions,robotCode,fetch:f.fetch});
+  for(const conversationKind of ['private','group'])assert.deepEqual(await adapter.queryMessageStatus({conversation:{...dingStatusTarget,conversationKind},providerRequestId}),{status:'sent'});
+  const [privateCall,groupCall]=f.calls,url=new URL(privateCall.url,'http://fixture');
+  assert.equal(privateCall.method,'GET');assert.equal(url.pathname,'/v1.0/robot/oToMessages/readStatus');assert.deepEqual([...url.searchParams],[['robotCode',robotCode],['processQueryKey',providerRequestId]]);assert.equal(privateCall.body,'');
+  assert.equal(groupCall.method,'POST');assert.equal(groupCall.url,'/v1.0/robot/groupMessages/query');assert.deepEqual(JSON.parse(groupCall.body),{robotCode,processQueryKey:providerRequestId,openConversationId:'oc_group',maxResults:1});
+  assert.ok(f.calls.every(c=>c.headers['x-acs-dingtalk-access-token']==='test-token'));assert.equal(groupCall.headers['content-type'],'application/json');assert.equal(f.calls.length,2);
+});
+
+test('DingTalk status query trusts only exact sendStatus values, never read receipts or nested hints',async t=>{
+  let response;const f=await fixture((_req,res)=>res.end(JSON.stringify(response)));t.after(f.close);
+  const adapter=new DingTalkBotConversationAdapter(dingStatusConnection,{...dingStatusOptions,fetch:f.fetch});
+  const cases=[
+    [{sendStatus:'SUCCESS',readStatus:'UNREAD'},'sent'],[{sendStatus:'PROCESSING',readStatus:'READ'},'processing'],[{sendStatus:'RECALLED',readStatus:'READ'},'recalled'],
+    [{readStatus:'READ'},'unknown'],[{sendStatus:'FAILED'},'unknown'],[{sendStatus:'success'},'unknown'],[{sendStatus:1},'unknown'],[{sendStatus:null},'unknown'],[{sendStatus:['SUCCESS']},'unknown'],[{},'unknown'],[{data:{sendStatus:'SUCCESS'}},'unknown'],[{readUserIds:['staff1'],unReadUserIds:[]},'unknown'],
+  ];
+  for(const conversationKind of ['private','group'])for(const [value,status] of cases){response=value;assert.deepEqual(await adapter.queryMessageStatus({conversation:{...dingStatusTarget,conversationKind},providerRequestId:'query-key'}),{status},JSON.stringify(value));}
+  assert.equal(f.calls.length,cases.length*2);assert.ok(f.calls.every(c=>!c.url.includes('/send')&&!c.url.includes('/batchSend')));
+});
+
+test('DingTalk status query rejects cross-namespace targets, invalid keys and missing capability before credentials or HTTP',async t=>{
+  let credentials=0;const f=await fixture((_req,res)=>res.end('{}'));t.after(f.close);
+  const config={...dingStatusOptions,fetch:f.fetch,resolveCredential:async()=>{credentials++;return'test-token';}},adapter=new DingTalkBotConversationAdapter(dingStatusConnection,config),request={conversation:dingStatusTarget,providerRequestId:'query-key'};
+  for(const patch of [{provider:'feishu'},{connectionId:'other'},{tenantId:'other'}])await assert.rejects(adapter.queryMessageStatus({...request,conversation:{...dingStatusTarget,...patch}}),{code:'forbidden'});
+  for(const patch of [{kind:'minutes'},{conversationKind:undefined}])await assert.rejects(adapter.queryMessageStatus({...request,conversation:{...dingStatusTarget,...patch}}),{code:'invalid_request'});
+  for(const providerRequestId of [undefined,null,0,'',' ','key\n','key\x00','key\x7f','x'.repeat(2049)])await assert.rejects(adapter.queryMessageStatus({...request,providerRequestId}),{code:'invalid_request'});
+  await assert.rejects(new DingTalkBotConversationAdapter(dingStatusConnection,{...config,proactiveSendGranted:false}).queryMessageStatus(request),{code:'forbidden'});
+  assert.equal(credentials,0);assert.equal(f.calls.length,0);
+});
+
+test('DingTalk status query rechecks synchronous host authorization after awaited credential resolution',async t=>{
+  const f=await fixture((_req,res)=>res.end('{}'));t.after(f.close);
+  for(const conversationKind of ['private','group']){
+    let allowed=true,checks=0,credentials=0;const revoked=Error('known-query-revocation');
+    const adapter=new DingTalkBotConversationAdapter(dingStatusConnection,{...dingStatusOptions,fetch:f.fetch,resolveCredential:async()=>{credentials++;await Promise.resolve();allowed=false;return'test-token';}});
+    await assert.rejects(adapter.queryMessageStatus({conversation:{...dingStatusTarget,conversationKind},providerRequestId:'query-key',assertQueryAllowed:()=>{checks++;if(!allowed)throw revoked;}}),error=>error===revoked);
+    assert.equal(checks,1);assert.equal(credentials,1);
+  }
+  assert.equal(f.calls.length,0);
+});
+
+for(const conversationKind of ['private','group'])test(`DingTalk ${conversationKind} status query preserves HTTP denials and treats failed queries as retryable reads without sending`,async t=>{
+  let mode=403;const f=await fixture((req,res)=>{if(mode==='network'){req.socket.destroy();return;}if(mode==='invalid-json'){res.end('not JSON test-token');return;}res.statusCode=mode;res.setHeader('retry-after','2');res.end(JSON.stringify({message:'PRIVATE_PROVIDER_DETAIL test-token'}));});t.after(f.close);
+  const adapter=new DingTalkBotConversationAdapter(dingStatusConnection,{...dingStatusOptions,fetch:f.fetch}),request={conversation:{...dingStatusTarget,conversationKind},providerRequestId:'query-key'};
+  for(const [status,code] of [[401,'unauthenticated'],[403,'forbidden'],[404,'not_found'],[429,'rate_limited'],[503,'temporarily_unavailable'],['invalid-json','temporarily_unavailable'],['network','temporarily_unavailable']]){
+    mode=status;const before=f.calls.length;await assert.rejects(adapter.queryMessageStatus(request),error=>{assert.equal(error.code,code);assert.ok(!error.message.includes('test-token')&&!error.message.includes('PRIVATE_PROVIDER_DETAIL'));if(status===429)assert.equal(error.retryAfterMs,2000);return true;});assert.equal(f.calls.length,before+1);
+  }
+  assert.ok(f.calls.every(c=>!c.url.includes('/send')&&!c.url.includes('/batchSend')));
+});
+
+test('DingTalk status query rejects malformed envelopes and business failures without claiming sent',async t=>{
+  let response;const f=await fixture((_req,res)=>res.end(JSON.stringify(response)));t.after(f.close);
+  const adapter=new DingTalkBotConversationAdapter(dingStatusConnection,{...dingStatusOptions,fetch:f.fetch});
+  for(const conversationKind of ['private','group'])for(const value of [null,[],42,'SUCCESS',{errcode:1,sendStatus:'SUCCESS'},{code:'denied',sendStatus:'SUCCESS'}]){
+    response=value;await assert.rejects(adapter.queryMessageStatus({conversation:{...dingStatusTarget,conversationKind},providerRequestId:'query-key'}),{code:'temporarily_unavailable'});
+  }
+  assert.equal(f.calls.length,12);assert.ok(f.calls.every(c=>!c.url.includes('/send')&&!c.url.includes('/batchSend')));
+});
+
+test('DingTalk private single-recipient batch rejection requires both lists to be trustworthy and never retries',async t=>{
+  let response;const f=await fixture((_req,res)=>res.end(JSON.stringify(response)));t.after(f.close);
+  const adapter=new DingTalkBotConversationAdapter(dingStatusConnection,{...dingStatusOptions,fetch:f.fetch}),request={conversation:{...dingStatusTarget,conversationKind:'private',privateRecipientId:'staff1'},text:'synthetic message',operationId:'batch-check'};
+  const cases=[
+    [{invalidStaffIdList:['staff1']},'invalid_request'],[{flowControlledStaffIdList:['staff1']},'rate_limited'],
+    [{invalidStaffIdList:['other']},'delivery_unknown'],[{flowControlledStaffIdList:['other']},'delivery_unknown'],
+    [{invalidStaffIdList:'staff1'},'delivery_unknown'],[{flowControlledStaffIdList:null},'delivery_unknown'],
+    [{invalidStaffIdList:['staff1','other']},'delivery_unknown'],[{flowControlledStaffIdList:[1]},'delivery_unknown'],
+    [{invalidStaffIdList:['staff1'],flowControlledStaffIdList:'invalid'},'delivery_unknown'],[{invalidStaffIdList:{},flowControlledStaffIdList:['staff1']},'delivery_unknown'],
+  ];
+  for(const [fields,code] of cases){response={processQueryKey:'request-key',...fields};const before=f.calls.length;await assert.rejects(adapter.sendMessage(request),{code});assert.equal(f.calls.length,before+1);}
+  for(const fields of [{},{invalidStaffIdList:[],flowControlledStaffIdList:[]}]){response={processQueryKey:'request-key',...fields};assert.deepEqual(await adapter.sendMessage(request),{status:'accepted',providerRequestId:'request-key',idempotent:false});}
+  assert.equal(f.calls.length,cases.length+2);assert.ok(f.calls.every(c=>c.method==='POST'&&c.url==='/v1.0/robot/oToMessages/batchSend'&&JSON.stringify(JSON.parse(c.body).userIds)==='["staff1"]'));
+});
+
+test('DingTalk send never fabricates acceptance when processQueryKey is missing or invalid',async t=>{
+  let response;const f=await fixture((_req,res)=>res.end(JSON.stringify(response)));t.after(f.close);
+  const adapter=new DingTalkBotConversationAdapter(dingStatusConnection,{...dingStatusOptions,fetch:f.fetch});
+  const keys=[undefined,null,0,'',' ','key\n','key\x00','key\x7f','x'.repeat(2049)];
+  for(const conversationKind of ['private','group'])for(const processQueryKey of keys){response={processQueryKey};const before=f.calls.length;await assert.rejects(adapter.sendMessage({conversation:{...dingStatusTarget,conversationKind,...(conversationKind==='private'?{privateRecipientId:'staff1'}:{})},text:'synthetic message',operationId:'bad-receipt'}),{code:'delivery_unknown'});assert.equal(f.calls.length,before+1);}
+  assert.equal(f.calls.length,keys.length*2);
 });

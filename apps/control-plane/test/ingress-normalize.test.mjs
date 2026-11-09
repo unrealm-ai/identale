@@ -44,7 +44,7 @@ test('Ding CALLBACK retains distinct event and message IDs, actual bot/corp/robo
  assert.equal(result.candidate.robotCode,'not-app-key'); assert.equal(result.candidate.appId,'app');
  assert.equal(result.event.message.author.externalId,'staff'); assert.equal(result.event.message.author.idNamespace,'user_id');
  assert.equal(result.event.message.text,' nonce '); assert.equal(result.verificationText,'nonce');
- assert.deepEqual(result.event.message.mentions,['bot']);
+ assert.equal(result.candidate.botId,'not-app-key'); assert.deepEqual(result.event.message.mentions,['not-app-key']);
 });
 test('Ding private targets staffId; non-mention group stays non-triggering',()=>{
  const direct=normalize(session('dingtalk'),ding({conversationType:'1',isInAtList:false}));
@@ -92,3 +92,24 @@ test('plain root/parent reply is not a thread and supported rich events preserve
 test('five Feishu message types share parser across private/group/thread and trusted mentions remain independent from body',()=>{for(const chat of ['p2p','group'])for(const thread of [undefined,'real-thread'])for(const[type,content]of[['text',{text:'@机器人 [微笑]'}],['post',{title:'',content_v2:[[{tag:'text',text:'**heading**'},{tag:'img',image_key:'key'}]]}],['image',{image_key:'key'}],['file',{file_key:'key',file_name:'资料.md'}],['video_chat',{topic:'会议',meet_number:'123',start_time:'100',end_time:'200'}]]){const raw=feishu();raw.event.message.chat_type=chat;raw.event.message.message_type=type;raw.event.message.content=JSON.stringify(content);raw.event.message.mentions=[];if(thread)raw.event.message.thread_id=thread;const result=normalize(session('feishu'),raw,fsHints);assert.equal(result.kind,'message');assert.equal(result.event.message.content.kind,type);assert.deepEqual(result.event.message.mentions,[]);assert.equal(result.event.message.author.externalId,'person');assert.equal(result.event.message.threadId,thread);}});
 
 test('Feishu disband event retains trusted event identity and optional name',()=>{const raw={schema:'2.0',header:{event_type:'im.chat.disbanded_v1',event_id:'disband',app_id:'app',tenant_key:'tenant',create_time:'1800000000000'},event:{chat_id:'chat',name:'Synthetic group'}};assert.deepEqual(normalize(session('feishu'),raw,fsHints),{kind:'membership',chatId:'chat',present:false,occurredAt:1800000000000,eventId:'disband',name:'Synthetic group',disbanded:true});raw.header.tenant_key='other';assert.throws(()=>normalize(session('feishu'),raw,fsHints));});
+
+test('DingTalk callback bot accounts vary by conversation without changing stable identity or sender namespace',()=>{
+ const hints={botId:'not-app-key',robotCode:'not-app-key',tenantId:'corp',tenantNamespace:'corp_id'};
+ for(const chatbotUserId of ['private-bot','group-one-bot','group-two-bot']){
+  const result=normalize(session('dingtalk'),ding({chatbotUserId}),hints);
+  assert.equal(result.candidate.botId,'not-app-key');assert.deepEqual(result.event.message.mentions,['not-app-key']);
+  assert.equal(result.event.message.author.externalId,'staff');
+  assert.equal(normalize(session('dingtalk'),ding({chatbotUserId,senderId:chatbotUserId}),hints).kind,'ignored');
+  for(const senderStaffId of [chatbotUserId,'not-app-key'])assert.equal(normalize(session('dingtalk'),ding({chatbotUserId,senderStaffId}),hints).kind,'message','staff IDs do not inhabit bot account or robot code namespaces');
+ }
+});
+
+test('DingTalk fixed error routes recover only authenticated original destinations, never inferred private recipients',()=>{
+ const hints={botId:'not-app-key',robotCode:'not-app-key',tenantId:'corp',tenantNamespace:'corp_id'};
+ const recover=patch=>ingressReplyTarget(session('dingtalk'),ding(patch),hints);
+ const group=recover({chatbotUserId:'group-specific',senderStaffId:undefined,text:{content:{invalid:true}}});
+ assert.equal(group.conversation.externalId,'chat');assert.equal(group.conversation.conversationKind,'group');assert.equal(group.conversation.privateRecipientId,undefined);
+ assert.equal(recover({conversationType:'1',chatbotUserId:'private-specific'}).conversation.privateRecipientId,'staff');
+ for(const patch of [{robotCode:'other'},{chatbotCorpId:'foreign'},{appId:'other'},{appKey:'other'},{chatbotUserId:undefined},{conversationId:undefined},{msgId:undefined},{isInAtList:false},{isInAtList:'true'},{senderId:'bot'},{conversationType:'1',senderStaffId:undefined},{conversationType:'1',senderCorpId:'foreign'}])assert.equal(recover(patch),undefined,JSON.stringify(patch));
+ assert.equal(ingressReplyTarget(session('dingtalk'),ding(),{...hints,tenantNamespace:'app_id'}),undefined);
+});

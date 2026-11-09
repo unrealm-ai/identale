@@ -27,6 +27,17 @@ README contain none either. The inspected [upstream source](https://github.com/0
 has no LICENSE file and its package.json still says 0.1.7. It cannot be treated
 as exact-version copyright evidence for 0.1.8.
 
+A read-only recheck on 2026-11-09 found no corrective upstream release:
+[npm metadata](https://registry.npmjs.org/vdirs) still lists 0.1.8 as latest and
+records `gitHead: a437193b3399502247732fc448bf2ddaa39916d7`. The official
+repository could not resolve that commit's package metadata (HTTP 404) or tree
+(HTTP 422), and its [LICENSE history](https://api.github.com/repos/07akioni/vdirs/commits?path=LICENSE)
+was empty. The latest [Naive UI package metadata](https://registry.npmjs.org/naive-ui/latest)
+at that check was 2.45.3 and still depended on `vdirs: ^0.1.8`; merely upgrading
+Naive UI would not remove this dependency. No replacement has been adopted or
+represented as legally equivalent. A replacement would need independently
+verified rights and UI compatibility tests.
+
 `vdirs-0.1.8-MIT-terms.txt` preserves all operative terms of the
 [SPDX MIT template](https://github.com/spdx/license-list-data/blob/main/text/MIT.txt),
 retrieved 2026-11-07, Git blob `d817195dad53ec992418c28ffca5fbd1cd86502a`.

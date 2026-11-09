@@ -3,9 +3,9 @@ import type {FastifyInstance} from 'fastify';
 import type {Store} from '../store.js';
 import type {EmployeeChannelService} from '../employee-channels/service.js';
 import type {EmployeeChannelRepository} from '../employee-channels/repository.js';
-import type {EmployeeChannelRecord} from '../employee-channels/types.js';
+import type {EmployeeChannelRecord,WeComMemberChallenge} from '../employee-channels/types.js';
 
-const fields=['identity','status','inboundVerified','identityEvidence','eventTenantId','botId','robotCode','previousInstallation','verification','validation','directoryStatus','lastError','wecomContactIdentityRevision'] as const;
+const fields=['identity','status','inboundVerified','identityEvidence','eventTenantId','botId','robotCode','previousInstallation','verification','validation','directoryStatus','lastError','wecomContactIdentityRevision','wecomVerifiedContactIds','wecomContactMappings','wecomMemberChallenges'] as const;
 type Observation=Record<typeof fields[number],unknown>;
 interface Report {reportId:string;connectionId:string;expected:{revision:number;authRevision:number;stateVersion:number};revisionDelta:0|1;observation:Observation|null;verificationEvents:string[]}
 const object=(v:unknown):v is Record<string,unknown>=>!!v&&typeof v==='object'&&!Array.isArray(v);
@@ -16,9 +16,15 @@ function observation(r:EmployeeChannelRecord):Observation{return Object.fromEntr
 function matches(r:EmployeeChannelRecord,expected:Report['expected']){return r.revision===expected.revision&&r.authRevision===expected.authRevision&&r.stateVersion===expected.stateVersion;}
 function valid(value:unknown):value is Report{
  if(!object(value)||Object.keys(value).some(k=>!['reportId','connectionId','expected','revisionDelta','observation','verificationEvents'].includes(k))||!id(value['reportId'])||!id(value['connectionId'])||!object(value['expected'])||Object.keys(value['expected']).sort().join()!=='authRevision,revision,stateVersion'||!Object.values(value['expected']).every(version)||![0,1].includes(value['revisionDelta'] as number)||!Array.isArray(value['verificationEvents'])||value['verificationEvents'].length>100||value['verificationEvents'].some(v=>!id(v)||!/^event:|^message:/.test(v)))return false;
+ const authRevision=value['expected']['authRevision'];
  const o=value['observation'];if(o===null)return value['revisionDelta']===0;
- if(!object(o)||fields.some(k=>k!=='wecomContactIdentityRevision'&&!(k in o))||Object.keys(o).some(k=>!(fields as readonly string[]).includes(k)))return false;
- if(o['wecomContactIdentityRevision']!=null&&(!version(o['wecomContactIdentityRevision'])||o['wecomContactIdentityRevision']!==value['expected']['authRevision']))return false;
+ if(!object(o)||fields.some(k=>!['wecomContactIdentityRevision','wecomVerifiedContactIds','wecomContactMappings','wecomMemberChallenges'].includes(k)&&!(k in o))||Object.keys(o).some(k=>!(fields as readonly string[]).includes(k)))return false;
+ if(o['wecomContactIdentityRevision']!=null&&(!version(o['wecomContactIdentityRevision'])||o['wecomContactIdentityRevision']!==authRevision))return false;
+ if(o['wecomVerifiedContactIds']!=null&&(!Array.isArray(o['wecomVerifiedContactIds'])||o['wecomVerifiedContactIds'].length>500||o['wecomVerifiedContactIds'].some(v=>!id(v)||v.length>256)||new Set(o['wecomVerifiedContactIds']).size!==o['wecomVerifiedContactIds'].length||o['wecomContactIdentityRevision']!==authRevision))return false;
+ const maps=o['wecomContactMappings'];
+ if(maps!=null&&(!Array.isArray(maps)||maps.length>500||maps.some(m=>!object(m)||Object.keys(m).sort().join()!=='callbackUserId,method,requestId,userId,verifiedAt'||!id(m['userId'])||m['userId'].length>256||!id(m['callbackUserId'])||m['callbackUserId'].length>256||!id(m['requestId'])||!version(m['verifiedAt'])||m['method']!=='administrator_relay')||new Set(maps.map(m=>m['userId'])).size!==maps.length||new Set(maps.map(m=>m['callbackUserId'])).size!==maps.length||o['wecomContactIdentityRevision']!==authRevision))return false;
+ const challenges=o['wecomMemberChallenges'];
+ if(challenges!=null&&(!Array.isArray(challenges)||challenges.length>100||challenges.some(c=>!object(c)||Object.keys(c).some(k=>!['requestId','userId','authRevision','phraseHash','createdAt','expiresAt','status','issuedAt','completedAt','method','createdBy'].includes(k))||!id(c['requestId'])||!id(c['userId'])||String(c['userId']).length>256||c['authRevision']!==authRevision||typeof c['phraseHash']!=='string'||!/^[0-9a-f]{64}$/.test(c['phraseHash'])||!version(c['createdAt'])||!version(c['expiresAt'])||c['expiresAt']!==Number(c['createdAt'])+86400000||!['pending','verified','failed'].includes(String(c['status']))||!version(c['issuedAt'])||c['method']!=='administrator_relay'||!id(c['createdBy'])||c['completedAt']!==undefined&&!version(c['completedAt']))||new Set(challenges.map(c=>c['requestId'])).size!==challenges.length))return false;
  if(!object(o['identity'])||Object.keys(o['identity']).sort().join()!=='appId,tenantId,tenantIdNamespace'||!id(o['identity']['appId'])||!id(o['identity']['tenantId'])||!['tenant_key','display_id','corp_id','app_id'].includes(String(o['identity']['tenantIdNamespace']))||!['verified','pending_verification','invalid','disabled'].includes(String(o['status']))||![null,true,false].includes(o['inboundVerified'] as null|boolean)||!['available','unavailable'].includes(String(o['directoryStatus'])))return false;
  for(const k of ['eventTenantId','botId','robotCode','lastError'] as const)if(o[k]!==null&&!id(o[k]))return false;
  if(o['identityEvidence']!==null&&!['provider_api','authenticated_event_confirmed','authenticated_first_message','app_credentials_only','admin_asserted'].includes(String(o['identityEvidence'])))return false;
@@ -36,10 +42,48 @@ function apply(old:EmployeeChannelRecord,report:Report):EmployeeChannelRecord{
  if(!old.enabled&&next.status!=='disabled')throw Error('channel_observation_invalid');
  return next;
 }
+/** Merge only monotonic WeCom identity facts after a same-configuration CAS race.
+ * Challenge issuance stays platform-owned; no source, credential, lifecycle or ordinary
+ * observation can be rebased by this path. A verified reply must name the exact issued nonce. */
+function mergeWeComIdentity(old:EmployeeChannelRecord,report:Report,retains:(c:WeComMemberChallenge)=>boolean):EmployeeChannelRecord|undefined{
+ if(old.provider!=='wecom'||old.status!=='verified'||!old.enabled||old.revision!==report.expected.revision||old.authRevision!==report.expected.authRevision||report.revisionDelta!==0)return;
+ if(!report.observation)return old;
+ const incoming=apply(old,report),identityFields=new Set(['wecomContactIdentityRevision','wecomVerifiedContactIds','wecomContactMappings','wecomMemberChallenges']);
+ for(const field of fields)if(!identityFields.has(field)&&JSON.stringify(incoming[field]??null)!==JSON.stringify(old[field]??null))return;
+ const challenges=[...(old.wecomMemberChallenges??[])];
+ for(const fact of incoming.wecomMemberChallenges??[]){
+  const index=challenges.findIndex(c=>c.requestId===fact.requestId),issued=challenges[index];
+  // Issuance may prune expired history while this runtime still has the prior
+  // snapshot. Ignore only out-of-window facts; they cannot authorize any new
+  // mapping below. An unknown active/protected challenge remains a conflict.
+  if(!issued){if(!retains(fact))continue;return;}
+  if(JSON.stringify(fact)===JSON.stringify(issued))continue;
+  for(const field of ['requestId','userId','authRevision','phraseHash','createdAt','expiresAt','issuedAt','method','createdBy'] as const)if(fact[field]!==issued[field])return;
+  if(fact.status==='verified'||fact.status==='failed'){
+   if(fact.completedAt===undefined||issued.issuedAt===undefined||fact.completedAt<issued.issuedAt||fact.completedAt>issued.expiresAt)return;
+   if(issued.status==='failed'&&fact.status==='verified')return;
+   if(issued.status!=='verified'&&issued.status!=='failed')challenges[index]=fact;
+  }
+ }
+ const pairs=new Map<string,string>(),reverse=new Map<string,string>();
+ const add=(user:string,callback:string)=>{if(pairs.has(user)&&pairs.get(user)!==callback||reverse.has(callback)&&reverse.get(callback)!==user)return false;pairs.set(user,callback);reverse.set(callback,user);return true;};
+ const exact=[...new Set([...(old.wecomVerifiedContactIds??[]),...(incoming.wecomVerifiedContactIds??[])])],maps=[...(old.wecomContactMappings??[])];
+ for(const userId of exact)if(!add(userId,userId))return;
+ for(const mapping of maps)if(!add(mapping.userId,mapping.callbackUserId))return;
+ for(const mapping of incoming.wecomContactMappings??[]){
+  const existing=maps.find(m=>m.userId===mapping.userId);if(existing){if(JSON.stringify(existing)!==JSON.stringify(mapping))return;continue;}
+  const challenge=challenges.find(c=>c.requestId===mapping.requestId&&c.userId===mapping.userId&&c.status==='verified'&&c.completedAt===mapping.verifiedAt&&c.authRevision===old.authRevision);
+  if(!challenge||!add(mapping.userId,mapping.callbackUserId))return;
+  maps.push(mapping);
+ }
+ if(pairs.size>500)return;
+ return{...old,...(pairs.size?{wecomContactIdentityRevision:old.authRevision}:{}),wecomVerifiedContactIds:exact,wecomContactMappings:maps,wecomMemberChallenges:challenges};
+}
 function auth(header:string|undefined,token:string){const a=Buffer.from(header??''),b=Buffer.from('Bearer '+token);return !!token&&a.length===b.length&&timingSafeEqual(a,b);}
 export function registerChannelObservationApi(server:FastifyInstance,options:{token:string;channels:EmployeeChannelService;store:Store}):void{
  options.store.db.exec('CREATE TABLE IF NOT EXISTS channel_observation_receipts(id TEXT PRIMARY KEY,body_digest TEXT NOT NULL,response_json TEXT NOT NULL)');
- server.post('/internal/config/channel-observation',{bodyLimit:131072},(request,reply)=>{
+ server.post('/internal/config/wecom-member-confirmed',(request,reply)=>{reply.header('cache-control','no-store');if(!auth(request.headers.authorization,options.token))return reply.code(401).send({error:'configuration_unauthorized'});const b=request.body;if(!object(b)||Object.keys(b).sort().join()!=='authRevision,callbackUserId,connectionId,requestId,sourceId'||!['callbackUserId','connectionId','requestId','sourceId'].every(k=>id(b[k]))||!version(b['authRevision']))return reply.code(400).send({error:'invalid_member_verification_request'});const r=options.channels.repository.byId(b['connectionId'] as string);return{confirmed:!!r&&r.enabled&&r.status==='verified'&&r.sourceId===b['sourceId']&&r.authRevision===b['authRevision']&&r.wecomContactIdentityRevision===r.authRevision&&!!r.wecomContactMappings?.some(m=>m.requestId===b['requestId']&&m.callbackUserId===b['callbackUserId'])};});
+ server.post('/internal/config/channel-observation',{bodyLimit:524288},(request,reply)=>{
   reply.header('cache-control','no-store');
   if(!auth(request.headers.authorization,options.token))return reply.code(401).send({error:'configuration_unauthorized'});
   if(!valid(request.body))return reply.code(400).send({error:'channel_observation_invalid'});
@@ -47,8 +91,8 @@ export function registerChannelObservationApi(server:FastifyInstance,options:{to
   try{return options.store.transaction(()=>{
    const receipt=options.store.one<{body_digest:string;response_json:string}>('SELECT body_digest,response_json FROM channel_observation_receipts WHERE id=?',report.reportId),hash=digest(report);
    if(receipt){if(receipt.body_digest!==hash)throw Error('channel_observation_conflict');return JSON.parse(receipt.response_json) as unknown;}
-   const old=options.channels.repository.byId(report.connectionId);if(!old||!matches(old,report.expected))throw Error('channel_observation_conflict');
-   const next=apply(old,report);
+   const old=options.channels.repository.byId(report.connectionId);if(!old)throw Error('channel_observation_conflict');
+   const next=matches(old,report.expected)?apply(old,report):mergeWeComIdentity(old,report,c=>options.channels.memberVerification.retains(c));if(!next)throw Error('channel_observation_conflict');
    if(report.observation&&!options.channels.repository.save(next,old))throw Error('channel_observation_conflict');
    for(const key of report.verificationEvents)options.store.run('INSERT OR IGNORE INTO employee_channel_verification_events(connection_id,event_id) VALUES(?,?)',old.id,key);
    const result={accepted:true,reportId:report.reportId,revision:next.revision,authRevision:next.authRevision,stateVersion:next.stateVersion};

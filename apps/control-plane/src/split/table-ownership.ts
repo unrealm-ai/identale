@@ -10,7 +10,7 @@ export const PLATFORM_TABLES = [
   'skill_resource_state', 'workspace_mcp_versions', 'workspace_mcp_state',
   'employee_channel_connections', 'employee_channel_verification_events',
   'employee_channel_audit', 'employee_channel_directory_credentials',
-  'wecom_bot_contacts',
+  'wecom_bot_contacts', 'wecom_member_verification_requests',
   'channel_observation_receipts',
   'directory_sync_tasks', 'directory_snapshot_users', 'directory_snapshot_aliases',
   'directory_alias_projection_meta', 'directory_snapshot_departments',
@@ -19,6 +19,8 @@ export const PLATFORM_TABLES = [
 ] as const;
 
 export const RUNTIME_TABLES = [
+  // Legacy guess-budget tables remain owned for safe upgrades, but are unused.
+  'wecom_member_verification_attempts','wecom_member_verification_notices',
   'business_resource_run_context','business_resource_authorizations','business_resource_cache_authorizations',
   'business_account_bindings','business_oauth_states','business_oauth_tokens',
   'source_material_transfers','work_item_resource_transfers',

@@ -2,10 +2,11 @@
 import { computed, onUnmounted, ref, watch } from 'vue';
 import { NAlert, NButton, NCheckbox, NCheckboxGroup, NInput, NSelect, NSpace, NTag } from 'naive-ui';
 import { api, errorMessage } from '../../shared/api';
-import type { DirectoryAccessRule, DirectorySubjects, ConversationKind, DirectoryItem, DirectoryPage } from './types';
+import type { DirectoryAccessRule, DirectorySubjects, ConversationKind, DirectoryItem, DirectoryPage, DirectoryIdentityEvidence } from './types';
 import { providerLabel } from './types';
+import WecomMemberVerification from './WecomMemberVerification.vue';
 const props = defineProps<{ base: string; rules: DirectoryAccessRule[]; subjects: DirectorySubjects; label: string; disabled?: boolean; readonly?: boolean; draft?: boolean; directoryBase?: string;hideUnavailableNotice?:boolean;defaultConversationKinds?:ConversationKind[];employeeScope?:boolean;fixedSource?:boolean;selectPeopleOnly?:boolean }>();
-const emit = defineEmits<{ 'update:rules': [rules: DirectoryAccessRule[]]; busyChanged: [value: boolean] }>();
+const emit = defineEmits<{ 'update:rules': [rules: DirectoryAccessRule[]]; busyChanged: [value: boolean]; identityVerified: [evidence: DirectoryIdentityEvidence] }>();
 const sourceId = ref<string | null>(null), kind = ref<'departments' | 'users'>('departments');
 class PickerError extends Error {}
 const trail = ref<{ externalId: string; subjectId: string; displayName: string }[]>([]), items = ref<DirectoryItem[]>([]), cursor = ref<string | undefined>(), exhausted = ref(true), busy = ref(false), error = ref('');
@@ -22,8 +23,9 @@ const memberSearch=computed(()=>source.value?.provider==='wecom');
 const searchText=ref(''),searched=ref(false),limited=ref(false);
 const keywords=computed(()=>[...new Set(searchText.value.split(/[,，\n]/).map(value=>value.trim()).filter(Boolean))]);
 const kinds: { value: ConversationKind; label: string }[] = [{ value: 'private', label: '私聊' }, { value: 'group', label: '群聊' }, { value: 'meeting', label: '会议' }];
+const verifiedMembers = ref<Record<string, boolean>>({});
 function reset() { controller.abort(); controller = new AbortController(); busy.value = false; items.value = []; cursor.value = undefined; exhausted.value = true; error.value = ''; searched.value=false;limited.value=false;seenCursors.clear(); }
-watch(() => [props.base, props.subjects.sources], () => { reset(); labels.value = {}; trail.value = []; if (!sources.value.some(item => item.sourceId === sourceId.value)) sourceId.value = sources.value[0]?.sourceId ?? null; }, { immediate: true });
+watch(() => JSON.stringify([props.base, props.directoryBase, props.draft, props.subjects.sources.map(value => [value.id, value.sourceId, value.provider, value.appId, value.authRevision, value.enabled, value.directoryStatus])]), () => { reset(); labels.value = {}; verifiedMembers.value = {}; trail.value = []; if (!sources.value.some(item => item.sourceId === sourceId.value)) sourceId.value = sources.value[0]?.sourceId ?? null; }, { immediate: true });
 watch(sourceId, () => { reset(); trail.value = []; searchText.value=''; });
 watch(kind, reset);
 async function load(more = false) {
@@ -49,6 +51,20 @@ async function load(more = false) {
   finally { if (!signal.aborted) busy.value = false; }
 }
 function select(item: DirectoryItem) { if (!source.value || props.disabled || props.readonly || props.rules.some(rule => key(rule) === key({ ...item, sourceId: source.value!.sourceId }))) return; emit('update:rules', [...props.rules, { sourceId: source.value.sourceId, kind: item.kind, subjectId: item.subjectId, ...(item.kind === 'department' ? { includeDescendants: false } : {}), conversationKinds: [...(props.employeeScope?['private','group'] as ConversationKind[]:props.defaultConversationKinds??['private'])] }]); }
+function ruleMember(rule: DirectoryAccessRule) {
+  const connection = props.subjects.sources.find(value => value.sourceId === rule.sourceId && value.provider === 'wecom');
+  if (!connection || rule.kind !== 'channel_user') return;
+  try { const parts = JSON.parse(rule.subjectId); if (Array.isArray(parts) && typeof parts[3] === 'string') return { connection, userId: parts[3] as string }; } catch { /* Unavailable legacy reference stays removable. */ }
+}
+function identityVerified(rule: DirectoryAccessRule) { const member = ruleMember(rule); return !!member && (verifiedMembers.value[key(rule)] === true || member.connection.memberSearchVerifiedUserIds?.includes(member.userId) === true || (sourceId.value === rule.sourceId && items.value.some(item => item.subjectId === rule.subjectId && item.identityVerified))); }
+function markVerified(rule: DirectoryAccessRule, evidence: DirectoryIdentityEvidence) {
+  const member = ruleMember(rule);
+  if (!member || member.connection.sourceId !== evidence.sourceId || member.connection.authRevision !== evidence.authRevision || member.userId !== evidence.userId) return;
+  verifiedMembers.value[key(rule)] = true;
+  if (sourceId.value === evidence.sourceId) for (const item of items.value) if (item.externalId === evidence.userId) item.identityVerified = true;
+  emit('identityVerified', evidence);
+}
+function itemVerified(item: DirectoryItem) { return item.identityVerified === true || !!source.value && (source.value.memberSearchVerifiedUserIds?.includes(item.externalId) === true || verifiedMembers.value[key({ ...item, sourceId: source.value.sourceId })] === true); }
 function remove(index: number) { if (!props.disabled && !props.readonly) emit('update:rules', props.rules.filter((_, current) => current !== index)); }
 function updateRule(index: number, patch: Partial<DirectoryAccessRule>) { if (!props.disabled && !props.readonly) emit('update:rules', props.rules.map((rule, current) => current === index ? { ...rule, ...patch } : rule)); }
 function enter(item: DirectoryItem) { trail.value.push(item); void load(); }
@@ -72,12 +88,13 @@ onUnmounted(() => { controller.abort(); emit('busyChanged', false); });
       </template>
       <NAlert v-if="!sources.length&&!hideUnavailableNotice" type="info">没有可用的员工渠道目录。请先在此员工的渠道连接中验证应用及通讯录权限；已有引用不会自动替换。</NAlert>
       <NAlert v-if="error" type="error" role="alert">{{ error }}</NAlert>
-      <div v-for="item in items" :key="`${item.kind}:${item.subjectId}`" class="directory-option"><div>{{ item.displayName }}<p v-if="item.departmentPaths?.length" class="field-note">{{item.departmentPaths.join(' · ')}}</p></div><NSpace><NButton v-if="!selectPeopleOnly||item.kind==='channel_user'" size="small" :disabled="disabled || busy || rules.some(rule => rule.sourceId === sourceId && rule.subjectId === item.subjectId && rule.kind === item.kind)" @click="select(item)">选择{{ item.kind === 'department' ? '部门' : '人员' }}</NButton><NButton v-if="item.kind === 'department'" size="small" :disabled="disabled || busy" @click="enter(item)">进入部门</NButton></NSpace></div>
+      <div v-for="item in items" :key="`${item.kind}:${item.subjectId}`" class="directory-option"><div>{{ item.displayName }}<NTag v-if="memberSearch && itemVerified(item)" size="small" type="success">身份已核验</NTag><p v-if="item.departmentPaths?.length" class="field-note">{{item.departmentPaths.join(' · ')}}</p></div><NSpace><NButton v-if="!selectPeopleOnly||item.kind==='channel_user'" size="small" :disabled="disabled || busy || rules.some(rule => rule.sourceId === sourceId && rule.subjectId === item.subjectId && rule.kind === item.kind)" @click="select(item)">选择{{ item.kind === 'department' ? '部门' : '人员' }}</NButton><NButton v-if="item.kind === 'department'" size="small" :disabled="disabled || busy" @click="enter(item)">进入部门</NButton></NSpace></div>
       <NButton v-if="!exhausted" :disabled="disabled || busy" @click="load(true)">加载下一页</NButton>
     </template>
     <p v-if="!rules.length" class="field-note">尚未选择规则。</p>
     <div v-for="(rule, index) in rules" :key="key(rule)" class="directory-rule-detail">
       <NTag size="small">{{ displayLabel(rule) }}</NTag>
+      <WecomMemberVerification v-if="!draft && ruleMember(rule)" :key="`${key(rule)}:${ruleMember(rule)!.connection.authRevision}`" :base="base" :source-id="rule.sourceId" :user-id="ruleMember(rule)!.userId" :auth-revision="ruleMember(rule)!.connection.authRevision" :label="labels[key(rule)] ?? ruleMember(rule)!.userId" :identity-verified="identityVerified(rule)" :disabled="disabled" :readonly="readonly" @verified="evidence => markVerified(rule, evidence)" />
       <template v-if="readonly&&!employeeScope"><p>{{ rule.conversationKinds.map(kind => kinds.find(item => item.value === kind)?.label).join('、') || '不适用任何会话' }}<template v-if="rule.kind === 'department'"> · {{ rule.includeDescendants ? '包含子部门' : '仅直接部门成员' }}</template></p></template>
       <template v-else-if="!readonly"><NSpace vertical><NCheckbox v-if="rule.kind === 'department'" :checked="rule.includeDescendants === true" :disabled="disabled" @update:checked="value => updateRule(index, { includeDescendants: value })">包含子部门（默认不包含）</NCheckbox><NCheckboxGroup v-if="!employeeScope" :value="rule.conversationKinds" :disabled="disabled" @update:value="value => updateRule(index, { conversationKinds: value as ConversationKind[] })"><NSpace><NCheckbox v-for="kind in kinds" :key="kind.value" :value="kind.value" :disabled="kind.value === 'meeting' && subjects.sources.some(item => item.sourceId === rule.sourceId && item.provider === 'wecom')">{{ kind.label }}{{ kind.value === 'meeting' && subjects.sources.some(item => item.sourceId === rule.sourceId && item.provider === 'wecom') ? '（企微暂不支持）' : '' }}</NCheckbox></NSpace></NCheckboxGroup><NButton size="small" :disabled="disabled" @click="remove(index)">移除此规则</NButton><span v-if="!employeeScope&&!rule.conversationKinds.length" class="field-note">至少选择一种适用会话后才能保存。</span></NSpace></template>
     </div>

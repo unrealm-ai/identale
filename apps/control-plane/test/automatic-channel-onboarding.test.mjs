@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import {createHash} from 'node:crypto';
+import {createHash,randomUUID} from 'node:crypto';
 import {createServer} from 'node:http';
 import {mkdtemp,rm} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
@@ -25,7 +25,7 @@ const person=id=>({userid:id,name:'Fixture Member',departments:[id==='member'?'E
 async function setup(t){
  const dir=await mkdtemp(join(tmpdir(),'automatic-channel-')),store=new Store(join(dir,'test.sqlite'));
  let now=1800000000000;
- const state={feishuTenantKey:true,directoryDenied:false,searchDenied:false,searchTimeout:false,wrongSchema:false,removed:false,calls:[]};
+ const state={feishuTenantKey:true,directoryDenied:false,searchDenied:false,searchTimeout:false,wrongSchema:false,removed:false,sessionRows:[{chat_id:'member',chat_type:'single',chat_name:'Fixture Member',last_msg_time:1800000000},{chat_id:'other',chat_type:'single',chat_name:'Fixture Member',last_msg_time:1800000000}],sendFailure:false,onVerificationSend:undefined,diagnostics:[],calls:[]};
  const http=createServer(async(req,res)=>{
   let body='';
   for await(const chunk of req)body+=chunk;
@@ -47,12 +47,17 @@ async function setup(t){
    const signature=createHash('sha256').update('fixture-secret'+input.bot_id+input.time+input.nonce).digest('hex');
    response=input.signature===signature&&input.bind_source===1?{errcode:0,token:'bot-only-token'}:{errcode:40001};
   }else if(route==='/cli/service/discovery'){
-   response=wrap({base_url:state.wrongSchema?'https://untrusted.invalid/cli':'https://qyapi.weixin.qq.com/cli',resources:{users:{methods:{search:{path:'/contact/users/search',http_method:'POST'}}}}});
+   const {service}=JSON.parse(input.payload);
+   response=service==='message'?wrap({base_url:'https://qyapi.weixin.qq.com/cli',resources:{aibot:{methods:{send:{path:'/message/aibot/send',http_method:'POST'}},resources:{sessions:{methods:{list:{path:'/message/aibot/sessions/list',http_method:'POST'}}}}}}}):wrap({base_url:state.wrongSchema?'https://untrusted.invalid/cli':'https://qyapi.weixin.qq.com/cli',resources:{users:{methods:{search:{path:'/contact/users/search',http_method:'POST'}}}}});
   }else if(route==='/cli/contact/users/search'){
    if(state.searchTimeout)return;
    const {keywords}=JSON.parse(input.payload);
    const members=keywords.includes('none')||state.removed?[]:keywords.includes('other')?[person('member'),person('other'),person('member')]:[person('member')];
    response=state.searchDenied?{errcode:48002}:wrap({users:members,users_count:members.length,...(keywords.includes('other')?{hint:'partial'}:{})});
+  }else if(route==='/cli/message/aibot/sessions/list')response=wrap({sessions:state.sessionRows,sessions_count:state.sessionRows.length});
+  else if(route==='/cli/message/aibot/send'){
+   if(state.onVerificationSend)await state.onVerificationSend(JSON.parse(input.payload));
+   response=state.sendFailure?{errcode:853004}:wrap({success:true});
   }else if(route.startsWith('/v1.0/robot/'))response={processQueryKey:'provider-receipt'};
   else response={errcode:40004};
   res.setHeader('content-type','application/json');res.end(JSON.stringify(response));
@@ -62,7 +67,7 @@ async function setup(t){
  store.run("INSERT INTO workspaces VALUES('w','Fixture','u','active'),('other','Other','u','active')");
  store.run("INSERT INTO members VALUES('m','w','u','owner','active'),('om','other','u','owner','active')");
  store.run("INSERT INTO entities(id,workspace_id,name,owner_member_id,created_by_member_id,own_web_use,web_use_user_id,interaction_runtime) VALUES('e','w','Employee','m','m',1,'u','builtin-interaction'),('e2','w','Second','m','m',1,'u','builtin-interaction'),('oe','other','Other','om','om',1,'u','builtin-interaction')");
- const options={masterKey:Buffer.alloc(32,7),now:()=>now,fetch:(url,init)=>{
+ const options={masterKey:Buffer.alloc(32,7),now:()=>now,diagnostics:{event:event=>state.diagnostics.push(event)},fetch:(url,init)=>{
   const parsed=new URL(url);
   assert.ok(['https://api.dingtalk.com','https://oapi.dingtalk.com','https://qyapi.weixin.qq.com','https://open.feishu.cn'].includes(parsed.origin));
   return fetch('http://127.0.0.1:'+http.address().port+parsed.pathname+parsed.search,init);
@@ -154,7 +159,7 @@ test('I02 unapproved first sender records robot without a business run and anoth
 test('I03 ordinary group, self, old verification and malformed messages cannot bind',async t=>{
  const f=await setup(t),c=await f.save('dingtalk');
  for(const event of [
-  ding('group',{conversationType:'2',isInAtList:false}),ding('self',{senderStaffId:'ding-bot'}),
+  ding('group',{conversationType:'2',isInAtList:false}),ding('self',{senderId:'ding-bot'}),
   ding('old',{text:{content:'identity-verify-00000000-0000-0000-0000-000000000000'}}),
  ])assert.equal(await f.receive(c,event),'ignored');
  await assert.rejects(f.receive(c,ding('bad',{senderStaffId:''})),/ingress_sender_identity_invalid/);
@@ -240,15 +245,15 @@ test('A01 bot search gates authorization until an authenticated exact match and 
 });
 test('A02 candidate, approved recipient and speaker lookup require current exact source',async t=>{
  const f=await setup(t),c=await f.save('wecom');await f.search();f.policy(c);
- assert.equal((await f.app.inject(path+'/human-confirmation')).json().candidates.filter(i=>i.target.kind==='channel').length,0);
+ assert.equal((await f.app.inject(path+'/human-confirmation')).json().candidates.filter(i=>i.target.kind==='wecom_directory').length,0);
  await f.receive(c,wecom(c));
- const candidate=(await f.app.inject(path+'/human-confirmation')).json().candidates.find(i=>i.target.kind==='channel');
- assert.equal(candidate.target.userId,'member');
+ const candidate=(await f.app.inject(path+'/human-confirmation')).json().candidates.find(i=>i.target.kind==='wecom_directory');
+ assert.equal(candidate.target.directoryUserId,'member');
  assert.match(candidate.label,/Engineering/);
  const save=await f.app.inject({method:'PUT',url:path+'/human-confirmation',payload:{expectedVersion:0,rules:[{questionScope:'*',target:candidate.target}]}});
  assert.equal(save.statusCode,200,save.body);
  f.advance(600001);
- assert.deepEqual((await f.app.inject(path+'/human-confirmation')).json().candidates.find(i=>i.target.kind==='channel'),candidate);
+ assert.deepEqual((await f.app.inject(path+'/human-confirmation')).json().candidates.find(i=>i.target.kind==='wecom_directory'),candidate);
  await f.channels.assertWeComPrivateRecipient(c.id,'member');
  await assert.rejects(f.channels.assertWeComPrivateRecipient(c.id,'not-selected'),/authorization_denied/);
  const b=await f.channels.resolveBinding(c.id),actor={kind:'human',externalId:'member',idNamespace:'user_id',applicationId:c.appId,identityEvidence:'channel_verified'};
@@ -261,7 +266,7 @@ test('R01 upgrade retains existing identity, old challenge dedupe and Feishu beh
  f.repository.markVerificationEvent(c.id,'old-event','old-id');
  assert.equal(await f.receive(c,ding('old-id')),'duplicate');assert.equal(f.repository.byId(c.id).status,'pending_verification');
  await f.receive(c,ding());const existing=f.repository.byId(c.id);
- assert.equal(existing.botId,'ding-bot');assert.equal(existing.robotCode,'different-from-client');
+ assert.equal(existing.botId,'different-from-client');assert.equal(existing.robotCode,'different-from-client');
  assert.equal(f.channels.list('w','e').find(item=>item.id===c.id).inboundVerified,true);
  const feishu=await f.save('feishu');assert.equal(feishu.status,'verified');assert.equal(feishu.botId,'feishu-bot');
  assert.equal(feishu.identityEvidence,'provider_api');
@@ -289,6 +294,7 @@ test('P01 all and empty denylist need no search while nonempty lists fail closed
 });
 test('P02 source revisions, dormant lists, expiry and package intersection',async t=>{
  const f=await setup(t),c=await f.save('wecom');await f.search(['member','other']);f.policy(c,[f.rule(c)],[f.rule(c,'other')]);
+ await f.receive(c,wecom(c,'denied-person-evidence',{from:{userid:'other'}}));
  await f.receive(c,wecom(c));const b=await f.channels.resolveBinding(c.id),scope=request(c);
  const legacyLists={allow:[f.rule(c)],deny:[f.rule(c)]};
  let pkg=f.capabilities.save('w','e',{...packageInput,directoryAccess:legacyLists});
@@ -387,4 +393,173 @@ test('Feishu real HTTP application verification pins bot.open_id before first li
  f.policy(c,[{sourceId:c.sourceId,kind:'channel_user',subjectId:channelSubject('channel_user','member','open_id',c.appId),conversationKinds:['private','group']}]);const live=await f.transport.current(c.id),before=f.repository.byId(c.id);
  const raw={schema:'2.0',header:{event_id:'first-feishu-event',event_type:'im.message.receive_v1',app_id:c.appId,tenant_key:'feishu-tenant'},event:{sender:{sender_id:{open_id:'member'},sender_type:'user',tenant_key:'feishu-tenant'},message:{message_id:'first-feishu-message',chat_id:'chat',chat_type:'p2p',message_type:'text',create_time:'1800000000000',content:JSON.stringify({text:'Fixture request'}),mentions:[]}}};
  assert.equal(await live.sink.onEvent(raw),'accepted');assert.equal(await live.sink.onEvent(raw),'duplicate');assert.equal(f.count(),1);const after=f.repository.byId(c.id);assert.equal(after.eventTenantId,'feishu-tenant');assert.equal(after.botId,'feishu-bot');assert.equal(after.status,'verified');assert.equal(after.identityEvidence,'authenticated_first_message');assert.equal(after.revision,before.revision);assert.equal(after.authRevision,before.authRevision);assert.equal(after.stateVersion,before.stateVersion+1);assert.deepEqual(after.identity,before.identity);assert.equal((await f.transport.current(c.id)).session.generation,live.session.generation);
+});
+
+for(const first of ['private','group-one','group-two'])test('DingTalk six sender/conversation combinations bind one robot when first is '+first,async t=>{
+ const f=await setup(t),c=await f.save('dingtalk');f.policy(c,[f.rule(c,'member'),f.rule(c,'other')]);
+ const kinds=[first,...['private','group-one','group-two'].filter(kind=>kind!==first)],versions=new Set(),directoryVersion=f.channels.directorySource(c.id).sourceVersion;
+ for(const kind of kinds)for(const senderStaffId of ['member','other']){
+  const group=kind!=='private',messageId=kind+'-'+senderStaffId;
+  const patch={chatbotUserId:kind+'-bot',conversationType:group?'2':'1',conversationId:group?kind:'private-'+senderStaffId,isInAtList:group?true:undefined,senderStaffId,senderId:'opaque-'+senderStaffId};
+  const raw=ding(messageId,patch);assert.equal(await f.receive(c,raw),'accepted');
+  const bound=f.repository.byId(c.id);assert.equal(bound.botId,'different-from-client');assert.equal(bound.robotCode,'different-from-client');assert.equal(bound.eventTenantId,'ding-corp');assert.equal(bound.sourceId,c.sourceId);
+  versions.add(f.channels.currentBindingVersion(c.id));assert.equal(f.channels.directorySource(c.id).sourceVersion,directoryVersion,'learning the robot does not invalidate app-scoped staff directory evidence');
+  raw.headers.messageId='retry-'+messageId;assert.equal(await f.receive(c,raw),'duplicate');
+ }
+ assert.equal(versions.size,1);assert.equal(f.count(),6);
+ assert.equal(f.store.one('SELECT count(DISTINCT lane) n FROM channel_inbox').n,4,'two private and two shared group lanes');
+ assert.equal(f.store.one("SELECT count(*) n FROM employee_channel_audit WHERE action='first_inbound_confirmed'").n,1);
+ const before=f.repository.byId(c.id),version=f.channels.currentBindingVersion(c.id),oldLive=await f.transport.current(c.id);
+ await f.channels.revalidate('w','e','dingtalk','u',before.revision);
+ assert.equal(await f.receive(c,ding('after-revalidation',{conversationType:'2',conversationId:'group-two',isInAtList:true,chatbotUserId:'different-group-account'})),'accepted');
+ assert.equal(f.channels.currentBindingVersion(c.id),version);assert.equal(f.repository.byId(c.id).sourceId,c.sourceId);
+ await assert.rejects(oldLive.sink.onEvent(ding('old-runner')),/generation_expired|owner_lost/);
+});
+
+for(const legacyStatus of ['verified','pending_verification'])test('legacy DingTalk '+legacyStatus+' callback-scoped records remain unchanged and blocked until explicit revalidation',async t=>{
+ const f=await setup(t),c=await f.save('dingtalk');f.policy(c);await f.receive(c,ding());
+ const record=f.repository.byId(c.id);f.repository.save({...record,botId:'legacy-private-account',status:legacyStatus},record);
+ const before=f.repository.byId(c.id);assert.equal(f.channels.currentBindingVersion(c.id),undefined);assert.equal(await f.channels.resolveBinding(c.id),undefined);assert.equal(f.channels.ingressConfiguration(c.id),undefined);
+ const dto=f.channels.list('w','e')[0];assert.equal(dto.status,'invalid');assert.equal(dto.lastError,'channel_identity_revalidation_required');assert.equal(dto.botId,'different-from-client');assert.equal(dto.capabilities.groupMentions.availability,'authorization_required');assert.deepEqual(f.repository.byId(c.id),before);
+ const next=await f.channels.revalidate('w','e','dingtalk','u',before.revision);assert.equal(next.status,'pending_verification');assert.equal(next.sourceId,c.sourceId);
+ assert.equal(await f.receive(c,ding('new-after-explicit-revalidation',{chatbotUserId:'group-alias',conversationType:'2',isInAtList:true,conversationId:'group'})),'accepted');
+ assert.equal(f.repository.byId(c.id).botId,'different-from-client');assert.equal(f.count(),2,'no previous inbox was deleted');
+});
+
+
+test('WeCom exact evidence is per person: another match cannot clear an unresolved deny or notification target',async t=>{
+ const f=await setup(t),c=await f.save('wecom');await f.search(['member','other']);
+ change(f,c,'all',{deny:[f.rule(c,'other')]});
+ await f.receive(c,wecom(c,'known-member'));assert.equal(f.count(),0);
+ assert.deepEqual(f.repository.byId(c.id).wecomVerifiedContactIds,['member']);
+ const binding=await f.channels.resolveBinding(c.id);
+ assert.equal(await f.channels.matches('w',f.rule(c,'other'),request(c),binding.connection,'private'),'unknown');
+ assert.equal(await f.capabilities.authorizeChannel(request(c),binding.connection,'private'),false);
+ const group={...request(c),conversationKind:'group',groupContext:{conversationId:'room',bindingVersion:binding.bindingVersion}};
+ assert.equal(await f.capabilities.authorizeChannel(group,binding.connection,'group'),false);
+ await f.receive(c,wecom(c,'opaque-other',{from:{userid:'different-callback-id'}}));assert.equal(f.count(),0);
+ const candidates=(await f.app.inject(path+'/human-confirmation')).json().candidates.filter(x=>x.target.kind==='wecom_directory');
+ assert.deepEqual(candidates.filter(x=>x.identityVerified).map(x=>x.target.directoryUserId),['member']);
+ await assert.rejects(f.channels.assertWeComPrivateRecipient(c.id,'other'),/authorization_denied/);
+ assert.deepEqual(await f.channels.describeActor(binding,{kind:'human',externalId:'other',idNamespace:'user_id',applicationId:c.appId,identityEvidence:'channel_verified'}),{});
+ // Only the blocked member's own authenticated exact-ID event resolves that deny.
+ await f.receive(c,wecom(c,'verified-other',{from:{userid:'other'}}));assert.equal(f.count(),0);
+ assert.equal(await f.capabilities.authorizeChannel(request(c),binding.connection,'private'),true);
+ assert.equal(await f.capabilities.authorizeChannel(request(c,'other'),binding.connection,'private'),false);
+ assert.equal(await f.channels.matches('w',f.rule(c,'other'),request(c),binding.connection,'private'),false);
+});
+test('WeCom legacy global identity flag never grants a member and package deny remains fail closed',async t=>{
+ const f=await setup(t),c=await f.save('wecom');await f.search(['member','other']);change(f,c,'all');
+ assert.equal(await f.receive(c,wecom(c,'legacy')),'accepted');
+ const current=f.repository.byId(c.id),{wecomVerifiedContactIds:_ids,...legacy}=current;
+ f.repository.save({...legacy,wecomContactIdentityRevision:c.authRevision},current);
+ const binding=await f.channels.resolveBinding(c.id);
+ assert.equal(await f.channels.matches('w',f.rule(c),request(c),binding.connection,'private'),'unknown');
+ await assert.rejects(f.channels.assertWeComPrivateRecipient(c.id,'member'),/authorization_denied/);
+ assert.deepEqual((await f.app.inject(path+'/human-confirmation')).json().candidates.filter(x=>x.target.kind==='wecom_directory'&&x.identityVerified),[]);
+ // Re-establish one person's evidence; a different package blacklist is unresolved.
+ await f.receive(c,wecom(c,'again'));
+ const pack=f.capabilities.save('w','e',{...packageInput,userPolicyMode:'denylist',directoryAccess:{allow:[],deny:[f.rule(c,'other')]}});
+ assert.equal(await f.capabilities.authorizeChannel(request(c),binding.connection,'private'),true);
+ assert.deepEqual(await f.capabilities.usableChannel(request(c),binding.connection,'private'),[]);
+ const next=await f.channels.revalidate('w','e','wecom','u',c.revision);
+ assert.equal(f.repository.byId(c.id).wecomVerifiedContactIds,undefined);
+ assert.equal(next.memberSearchIdentityVerified,false);
+});
+
+
+const memberVerificationPath=path+'/channels/wecom/member-verification';
+const verificationSendCalls=f=>f.state.calls.filter(c=>c.route==='/cli/message/aibot/send');
+const startMemberVerification=(f,c,userId='member',requestId=randomUUID())=>f.app.inject({method:'POST',url:memberVerificationPath,payload:{userId,sourceId:c.sourceId,requestId}});
+const memberVerificationStatus=(f,c,userId='member')=>f.app.inject(memberVerificationPath+'?'+new URLSearchParams({userId,sourceId:c.sourceId}));
+async function prepareMemberVerification(t){const f=await setup(t),c=await f.save('wecom');await f.search(['member','other']);f.policy(c);await f.receive(c,wecom(c,'callback-initial',{from:{userid:'callback-member'}}));return {f,c};}
+test('WeCom administrator-relay challenge binds different IDs for whitelist, blacklist, package, human target and private recipient',async t=>{
+ const {f,c}=await prepareMemberVerification(t);
+ const sent=await startMemberVerification(f,c);assert.equal(sent.statusCode,200,sent.body);assert.equal(sent.json().status,'pending');
+ const phrase=sent.json().phrase;assert.match(phrase,/^[0-9]{6}$/);assert.equal(sent.headers['cache-control'],'no-store');assert.equal(verificationSendCalls(f).length,0);
+ assert.equal(f.count(),0);assert.equal((await memberVerificationStatus(f,c)).json().status,'pending');
+ assert.equal(await f.receive(c,wecom(c,'verified-challenge',{from:{userid:'callback-member'},text:{content:phrase}})),'accepted');
+ assert.equal(f.count(),0,'control reply never enters the model/business inbox');assert.equal(JSON.stringify(f.state.diagnostics).includes(phrase),false,'the challenge is absent from diagnostic text');
+ assert.equal((await memberVerificationStatus(f,c)).json().status,'verified');
+ const r=f.repository.byId(c.id);assert.equal(JSON.stringify(r).includes(phrase),false);assert.equal(r.wecomContactMappings[0].userId,'member');assert.equal(r.wecomContactMappings[0].callbackUserId,'callback-member');
+ const b=await f.channels.resolveBinding(c.id),scope=request(c,'callback-member');
+ assert.equal(await f.capabilities.authorizeChannel(scope,b.connection,'private'),true);
+ assert.equal(await f.capabilities.authorizeChannel(request(c,'member'),b.connection,'private'),false);
+ assert.equal(await f.receive(c,wecom(c,'after-challenge',{from:{userid:'callback-member'}})),'accepted');assert.equal(f.count(),1);
+ let pkg=f.capabilities.save('w','e',{...packageInput,userPolicyMode:'allowlist',directoryAccess:{allow:[f.rule(c)],deny:[]}});
+ assert.deepEqual((await f.capabilities.usableChannel(scope,b.connection,'private')).map(p=>p.id),[pkg.id]);
+ pkg=f.capabilities.save('w','e',{...packageInput,userPolicyMode:'denylist',directoryAccess:{allow:[],deny:[f.rule(c)]}},pkg.id);
+ assert.deepEqual(await f.capabilities.usableChannel(scope,b.connection,'private'),[]);
+ const candidate=(await f.app.inject(path+'/human-confirmation')).json().candidates.find(x=>x.target.kind==='wecom_directory');assert.equal(candidate.target.directoryUserId,'member');assert.equal(candidate.directorySubjectId,f.rule(c).subjectId);
+ const saved=await f.app.inject({method:'PUT',url:path+'/human-confirmation',payload:{expectedVersion:0,rules:[{questionScope:'*',target:candidate.target}]}});assert.equal(saved.statusCode,200,saved.body);
+ await f.channels.assertWeComPrivateRecipient(c.id,'callback-member');await assert.rejects(f.channels.assertWeComPrivateRecipient(c.id,'member'),/authorization_denied/);
+ assert.deepEqual(await f.channels.describeActor(b,{kind:'human',externalId:'callback-member',idNamespace:'user_id',applicationId:c.appId,identityEvidence:'channel_verified'}),{displayName:'Fixture Member'});
+ change(f,c,'denylist',{deny:[f.rule(c)]});assert.equal(await f.capabilities.authorizeChannel(scope,b.connection,'private'),false);
+ assert.equal(await f.capabilities.authorizeChannel({...scope,conversationKind:'group',groupContext:{conversationId:'room',bindingVersion:b.bindingVersion}},b.connection,'group'),false);
+});
+test('WeCom binds only fresh same-bot private codes while group codes follow existing permission',async t=>{
+ const {f,c}=await prepareMemberVerification(t);const phrase=(await startMemberVerification(f,c)).json().phrase;
+ await f.receive(c,wecom(c,'wrong-token',{from:{userid:'callback-member'},text:{content:phrase==='000000'?'999999':'000000'}}));
+ f.advance(11_000);await f.supervisor.tick();await f.receive(c,wecom(c,'group-token',{from:{userid:'callback-member'},chattype:'group',chatid:'room',text:{content:phrase}}));
+ assert.equal(f.count(),1,'the group message follows the existing allowed group policy, without binding');assert.equal((await memberVerificationStatus(f,c)).json().status,'pending');
+ f.advance(11_000);await f.supervisor.tick();await f.receive(c,wecom(c,'right-token',{from:{userid:'callback-member'},text:{content:phrase}}));
+ f.advance(11_000);await f.supervisor.tick();await f.receive(c,wecom(c,'replayed-by-other',{from:{userid:'attacker'},text:{content:phrase}}));
+ assert.deepEqual(f.repository.byId(c.id).wecomContactMappings.map(m=>m.callbackUserId),['callback-member']);assert.equal(f.count(),1,'known private verification traffic does not add business messages');
+ const secondPhrase=(await startMemberVerification(f,c,'other')).json().phrase;
+ f.advance(11_000);await f.supervisor.tick();await f.receive(c,wecom(c,'callback-conflict',{from:{userid:'callback-member'},text:{content:secondPhrase}}));
+ assert.equal((await memberVerificationStatus(f,c,'other')).json().status,'failed');assert.equal(f.repository.byId(c.id).wecomContactMappings.length,1);
+ const second=await f.save('wecom','other-bot','e2');await f.receive(second,wecom(second,'cross-bot',{from:{userid:'callback-member'},text:{content:phrase}}));
+ assert.equal(f.repository.byId(second.id).wecomContactMappings,undefined);
+});
+test('WeCom administrator code is one-time, never sent, and explicit regeneration invalidates its predecessor',async t=>{
+ const {f,c}=await prepareMemberVerification(t),id=randomUUID();
+ const first=await startMemberVerification(f,c,'member',id),phrase=first.json().phrase;
+ assert.equal(first.json().status,'pending');assert.match(phrase,/^[0-9]{6}$/);
+ const repeated=await startMemberVerification(f,c,'member',id);assert.equal(repeated.json().phrase,phrase);assert.equal(repeated.json().status,'pending');
+ f.advance(30_001);await f.supervisor.tick();const next=await f.app.inject({method:'POST',url:memberVerificationPath,payload:{userId:'member',sourceId:c.sourceId,requestId:randomUUID(),replace:true}}),nextPhrase=next.json().phrase;assert.notEqual(phrase,nextPhrase);
+ await f.receive(c,wecom(c,'replaced-code',{from:{userid:'wrong-person'},text:{content:phrase}}));assert.equal(f.repository.byId(c.id).wecomContactMappings,undefined);
+ f.advance(11_000);await f.supervisor.tick();await f.receive(c,wecom(c,'current-code',{from:{userid:'callback-member'},text:{content:nextPhrase}}));
+ assert.equal((await memberVerificationStatus(f,c)).json().status,'verified');assert.equal(verificationSendCalls(f).length,0);
+ assert.equal(f.state.calls.some(c=>c.route.includes('/message/')),false);
+ assert.equal(JSON.stringify(f.repository.byId(c.id)).includes(nextPhrase),false);
+});
+test('WeCom code rejects expired, replaced-credential and missing receiver cases without requiring a provider session',async t=>{
+ const {f,c}=await prepareMemberVerification(t);const phrase=(await startMemberVerification(f,c)).json().phrase;f.advance(86400001);await f.supervisor.tick();
+ await f.receive(c,wecom(c,'expired-token',{from:{userid:'callback-member'},text:{content:phrase}}));assert.equal((await memberVerificationStatus(f,c)).json().status,'expired');assert.equal(f.repository.byId(c.id).wecomContactMappings,undefined);
+ const currentPhrase=(await startMemberVerification(f,c)).json().phrase;await f.channels.revalidate('w','e','wecom','u',c.revision);
+ f.advance(11_000);await f.supervisor.tick();await f.receive(c,wecom(c,'rotated-token',{from:{userid:'callback-member'},text:{content:currentPhrase}}));assert.equal(f.repository.byId(c.id).wecomContactMappings,undefined);
+ await f.receive(c,wecom(c,'normal-after-rotation',{from:{userid:'callback-member'}}));await f.search();f.state.sessionRows=[];
+ let response=await startMemberVerification(f,c);assert.equal(response.statusCode,200,response.body);assert.equal(response.json().status,'pending');
+ f.channels.setMemberVerificationReceiver(async()=>false);f.advance(30_001);await f.supervisor.tick();
+ response=await f.app.inject({method:'POST',url:memberVerificationPath,payload:{userId:'member',sourceId:c.sourceId,requestId:randomUUID(),replace:true}});assert.equal(response.statusCode,409);assert.equal(response.json().error,'member_verification_receiver_not_ready');assert.equal(verificationSendCalls(f).length,0);
+});
+test('WeCom code requires manager auth, current source and a real selected search candidate',async t=>{
+ const {f,c}=await prepareMemberVerification(t),payload={userId:'member',sourceId:c.sourceId,requestId:randomUUID()};
+ let r=await f.app.inject({method:'POST',url:memberVerificationPath,headers:{'x-test-manager':'no'},payload});assert.equal(r.statusCode,403);
+ r=await f.app.inject({method:'POST',url:memberVerificationPath,payload:{...payload,userId:'fabricated'}});assert.equal(r.statusCode,400);
+ r=await f.app.inject({method:'POST',url:memberVerificationPath,payload:{...payload,sourceId:'wrong'}});assert.equal(r.statusCode,400);
+ const issued=await startMemberVerification(f,c,'member',payload.requestId);assert.equal(issued.statusCode,200);
+ r=await startMemberVerification(f,c,'other',payload.requestId);assert.equal(r.statusCode,409);
+ const status=await memberVerificationStatus(f,c);assert.match(status.json().phrase,/^[0-9]{6}$/);assert.equal(status.headers['cache-control'],'no-store');
+});
+
+test('WeCom quoted and mixed codes cannot bypass private permission while a prefixed known code verifies',async t=>{
+ const {f,c}=await prepareMemberVerification(t);const phrase=(await startMemberVerification(f,c)).json().phrase;
+ const notification='请在机器人私聊发送：'+phrase;
+ for(const [index,patch]of [{text:{content:'收到'},quote:{msgtype:'text',text:{content:notification}}},{msgtype:'mixed',mixed:{msg_item:[{msgtype:'text',text:{content:'核验 '+phrase}}]}}].entries()){
+  await f.receive(c,wecom(c,'embedded-'+index,{from:{userid:'callback-member'},...patch}));
+  assert.equal((await memberVerificationStatus(f,c)).json().status,'pending');
+ }
+ assert.equal(f.count(),0);assert.equal(JSON.stringify(f.state.diagnostics).includes(phrase),false);
+ f.advance(11_000);await f.supervisor.tick();await f.receive(c,wecom(c,'pure-control',{from:{userid:'callback-member'},text:{content:'验证码给你 '+phrase}}));assert.equal((await memberVerificationStatus(f,c)).json().status,'verified');
+});
+test('WeCom independent people may verify concurrently without overwriting or cross-binding',async t=>{
+ const {f,c}=await prepareMemberVerification(t);
+ const [one,two]=await Promise.all([startMemberVerification(f,c),startMemberVerification(f,c,'other')]);
+ assert.equal(one.statusCode,200,one.body);assert.equal(two.statusCode,200,two.body);
+ assert.notEqual(one.json().phrase,two.json().phrase);assert.equal(verificationSendCalls(f).length,0);
+ await f.receive(c,wecom(c,'second-first',{from:{userid:'callback-other'},text:{content:two.json().phrase}}));
+ f.advance(11_000);await f.supervisor.tick();await f.receive(c,wecom(c,'first-second',{from:{userid:'callback-member'},text:{content:one.json().phrase}}));
+ assert.deepEqual(f.repository.byId(c.id).wecomContactMappings.map(m=>[m.userId,m.callbackUserId]).sort(),[['member','callback-member'],['other','callback-other']]);
+ assert.equal(f.count(),0);
 });
