@@ -280,8 +280,10 @@ export class FeishuAppRegistration {
   }
   private validateRequired(r: Registration, verified: VerifiedEmployeeApplication) {
       const report = verified.validation;
-      const missing = missingRegistrationPermissions(this.requested(r), report);
       if (report) r.validation = report;
+      if (report?.checks.find(check => check.id === 'scope_inventory')?.reason === 'authentication')
+        throw new EmployeeChannelError(409, 'authentication_failed', report);
+      const missing = missingRegistrationPermissions(this.requested(r), report);
       if (missing.length) { r.missingScopes = missing; throw new EmployeeChannelError(409, 'feishu_registration_permissions_missing'); }
       if (!report?.canContinue || verified.directoryStatus !== 'available' || !verified.botId) throw new EmployeeChannelError(409, 'feishu_registration_validation_required');
   }

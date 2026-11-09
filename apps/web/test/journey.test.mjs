@@ -159,7 +159,7 @@ test('management routes allow ordinary member resources but never expose member 
 test('registration creates one default workspace, wizard skips optional steps, double-click creates once, cards separate chat/settings', async t => {
   const env = await setup(t); await env.mount(); await click('注册账号');
   assert.equal(document.querySelector('input[name=password]').minLength, 6);
-  assert.equal(document.querySelector('.auth-brand .brand-logo').textContent.trim(), 'identale');
+  assert.equal(document.querySelector('.auth-brand .brand-logo').getAttribute('aria-label'), 'identale');
   assert.equal(document.querySelector('.auth-brand .brand-logo img').getAttribute('src'), '/brand/lockup-horizontal.svg');
   input('input[name=username]', 'journey-owner'); input('input[name=password]', password); await submit('.auth-panel form');
   await until(() => !!document.querySelector('.employee-wizard'));
@@ -809,7 +809,7 @@ test('administrator direct task list filters employees/status/conversation and o
  document.querySelector('.platform-tasks .n-collapse-item__header-main').click();await until(()=>!!document.querySelector('input[aria-label="会话 ID 筛选"]'));input('input[aria-label="会话 ID 筛选"]',f.first.id);await click('应用会话筛选');await until(()=>text().includes('没有符合筛选条件的记录'));assert.ok(f.env.requests.filter(r=>r.url.includes('/task-management/')).every(r=>r.method==='GET'));assert.equal(f.env.db.prepare('SELECT status FROM tasks WHERE id=?').get(a.id).status,'planned');
 });
 
-test('ordinary member can choose authorized employees while administrator task navigation and APIs stay forbidden', async t => {
+test('ordinary member can use personal tasks and choose authorized employees while administrator task APIs stay forbidden', async t => {
   const env=await setup(t),owner=await env.register('admin-route-owner');
   const e=(await env.call('POST',`/api/workspaces/${owner.workspace.id}/entities`,{name:'可用私聊员工',ownWebUse:true})).json().entity;
   const denied=(await env.call('POST',`/api/workspaces/${owner.workspace.id}/entities`,{name:'无使用权员工',ownWebUse:false})).json().entity;
@@ -817,11 +817,15 @@ test('ordinary member can choose authorized employees while administrator task n
   const registration=await env.call('POST','/api/auth/register',{username:'admin-route-member',password},'');assert.equal(registration.statusCode,201,registration.body);const member=registration.json(),memberCookie=registration.headers['set-cookie'].split(';')[0];await env.call('POST','/api/invitations/accept',{token:invited.token},memberCookie);
   const memberId=env.db.prepare('SELECT id FROM members WHERE workspace_id=? AND user_id=?').get(owner.workspace.id,member.user.id).id;
   const grant=await env.call('PUT',`/api/workspaces/${owner.workspace.id}/entities/${e.id}/web-access`,{allowMemberIds:[owner.workspace.memberId,memberId],denyMemberIds:[]},owner.cookie);assert.equal(grant.statusCode,200,grant.body);
-  env.setCookie(memberCookie);await env.mount(`/?ws=${owner.workspace.id}&view=tasks`);await until(()=>!!document.querySelector('.conversations-page')&&!text().includes('正在读取'));
+  env.setCookie(memberCookie);await env.mount(`/?ws=${owner.workspace.id}&view=tasks`);await until(()=>!!document.querySelector('.workbench-page')&&!text().includes('正在读取'));
+  assert.ok(document.querySelector('[aria-label="查看任务的数字员工"]'));
+  assert.equal(document.querySelector('.platform-tasks'),null);
+  assert.equal(env.requests.some(r=>r.url.includes('/task-management/')),false);
+  await env.mount(`/?ws=${owner.workspace.id}&view=conversations`);await until(()=>!!document.querySelector('.conversations-page')&&!text().includes('正在读取'));
   await until(()=>text().includes('还没有最近对话'));await click('发起对话');await until(()=>document.querySelector('.conversation-picker')?.textContent.includes('可用私聊员工'));
   assert.doesNotMatch(document.querySelector('.conversation-picker').textContent,/无使用权员工/);
   assert.equal([...document.querySelectorAll('.app-nav [role=menuitem]')].some(el=>el.textContent.trim()==='首页'),true);
-  assert.equal([...document.querySelectorAll('.app-nav [role=menuitem]')].some(el=>el.textContent.trim()==='任务'),false);
+  assert.equal([...document.querySelectorAll('.app-nav [role=menuitem]')].some(el=>el.textContent.trim()==='任务'),true);
   assert.equal(document.querySelector('.platform-tasks'),null);
   const forbidden=await env.call('GET',`/api/workspaces/${owner.workspace.id}/task-management/overview`);assert.equal(forbidden.statusCode,403);
   assert.equal(env.requests.some(r=>r.url.includes('/task-management/')),false);

@@ -1160,3 +1160,29 @@ test('connected inventory authentication failure pauses automatic retries until 
   assert.deepEqual(f.connection(), before);
   assertPrivate(f);
 });
+
+for (const phase of [1, 2]) {
+  test(`initial inventory authentication failure at validation phase ${phase} pauses automatic retry and keeps credentials`, async t => {
+    const f = fixture(t, {profile: groupedProfile()});
+    f.state.verify = (appId, call) => {
+      const result = verified(appId, f.state.clock);
+      if (call === phase) result.validation.checks[0] = {id: 'scope_inventory', required: false, supported: true, status: 'missing', reason: 'authentication', httpStatus: 401};
+      return result;
+    };
+    f.start(); f.state.sdk[0].resolve({...credentials});
+    await until(() => f.status().state, 'needs_attention'); await settledCheck(f);
+    assert.equal(f.status().error, 'authentication_failed');
+    assert.equal(f.status().credentialSaved, true);
+    assert.equal(f.status().autoCheck.eligible, false);
+    assert.equal(f.connection(), undefined);
+    const count = f.state.verification.length;
+    f.state.clock += 120_000;
+    f.retry(true); await settledCheck(f);
+    assert.equal(f.state.verification.length, count);
+    f.state.verify = undefined;
+    f.retry(); await until(() => f.status().state, 'connected'); await settledCheck(f);
+    assert.equal(f.status().error, undefined);
+    assert.equal(f.state.sdk.length, 1);
+    assertPrivate(f);
+  });
+}
