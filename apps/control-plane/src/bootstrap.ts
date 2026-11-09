@@ -1,3 +1,5 @@
+import {DingTalkRegistrations,type DingTalkRegistrationOptions} from './employee-channels/dingtalk-registration.js';
+import {registerDingTalkRegistrationRoutes} from './employee-channels/dingtalk-registration-routes.js';
 import {resolveHumanTarget,authorizeHumanTarget} from './human-target.js';
 import{BusinessOAuthService,feishuOAuthTransport}from'./business-resources/oauth.js';
 import{ApplicationResourceAccess}from'./business-resources/application-access.js';
@@ -102,6 +104,7 @@ export interface ControlPlaneConfig extends InteractionOptions {
   onDirectorySnapshots?:(service:DirectorySnapshots)=>void;
   onChannelIntegrationService?: (service: ChannelIntegrationService) => void;
   employeeChannels?:EmployeeChannelOptions;
+  dingtalkRegistration?:DingTalkRegistrationOptions;
   /** Trusted test composition only; production always uses the official SDK runner. */
   channelIngressFactory?:ChannelIngressFactory;
   onChannelIngressSupervisor?:(supervisor:ChannelIngressSupervisor)=>void;
@@ -203,6 +206,9 @@ export async function bootstrap(server: FastifyInstance, config: ControlPlaneCon
       requireWorkspaceManager:(request,workspaceId)=>{workspaces.get(auth(request).id,workspaceId);},
     });
     await registerCapabilityConfigRoutes(server, capabilities, {requireManager, currentUser: auth,requireWorkspaceManager:(request,workspaceId)=>{workspaces.get(auth(request).id,workspaceId);}});
+    const dingRegistrations=new DingTalkRegistrations(employeeChannels,{...config.dingtalkRegistration,...(config.employeeChannels?.masterKey??config.modelProfiles?.masterKey?{masterKey:config.employeeChannels?.masterKey??config.modelProfiles!.masterKey!}:{}),...(config.now?{now:config.now}:{})});
+    server.addHook('onClose',()=>dingRegistrations.close());
+    registerDingTalkRegistrationRoutes(server,dingRegistrations,(request,w,e)=>{const user=auth(request);entities.requireManager(user.id,w,e);if(!['GET','DELETE'].includes(request.method))capabilities.assertActive({workspaceId:w,entityId:e});return user.id;});
     await registerEmployeeChannelRoutes(server,employeeChannels,{requireReader:(request,w,e)=>{const user=auth(request);entities.requireReader(user.id,w,e);return{canManage:!!workspaces.get(user.id,w)};},requireManager:(request,workspaceId,entityId)=>{const user=auth(request);entities.requireManager(user.id,workspaceId,entityId);if(!['GET','DELETE'].includes(request.method))capabilities.assertActive({workspaceId,entityId});return user.id;}});
 
     }

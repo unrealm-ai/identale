@@ -23,3 +23,8 @@ css-render 0.15.14 三个包的缺失许可由对应上游源码提交的原文�
 ## 外部资料
 
 文档中的官方标准与产品说明链接仅供参考，不表示将其正文或图片整体纳入本项目许可。新增第三方素材时，应一并提交许可依据、原通知、版本 / 来源和适用范围。
+
+
+### 钉钉扫码注册协议参考
+
+钉钉扫码接入独立实现参照 [DingTalk-Real-AI/dingtalk-openclaw-connector 的 device-auth.ts](https://github.com/DingTalk-Real-AI/dingtalk-openclaw-connector/blob/main/src/device-auth.ts) 及 device-auth-config.ts 的公开协议，2026-11-09 核对。上游项目为 MIT，Copyright (c) 2026 DingTalk Real Team；[原许可](https://github.com/DingTalk-Real-AI/dingtalk-openclaw-connector/blob/main/LICENSE)。本项目未复制其实现、未打包该插件或 DWS，不复用其来源标识，也不因代码许可取得钉钉平台授权。

@@ -1,8 +1,9 @@
 <!-- Modified for Identale; see the root NOTICE. -->
 <script setup lang="ts">
 import { computed, onUnmounted, ref, watch } from 'vue';
-import { NAlert, NButton, NCard, NCheckbox, NForm, NFormItem, NInput, NSpace, NTag, NPopconfirm } from 'naive-ui';
+import { NAlert, NButton, NCard, NCheckbox, NForm, NFormItem, NInput, NSpace, NTag, NPopconfirm, NQrCode } from 'naive-ui';
 import { api, ApiError, errorMessage } from '../../shared/api';
+import { useDingtalkRegistration } from './dingtalk-registration';
 import ChannelBrand from './ChannelBrand.vue';
 import ChannelCapabilities from './ChannelCapabilities.vue';
 import ChannelAccessSettings from './ChannelAccessSettings.vue';
@@ -21,7 +22,7 @@ const sharingEditor=ref<InstanceType<typeof GroupSharingSettings>|null>(null);
 const selectedConnection=ref(false),policyBusy=ref(false),policyDirty=ref(false),confirmPolicySwitch=ref(false);
 const policyEditor=ref<InstanceType<typeof ChannelAccessSettings>|null>(null);
 let pendingPolicySwitch:(()=>void)|undefined;
-const channelLocked=computed(()=>!!props.disabled||busy.value||directoryBusy.value||policyBusy.value||sharingBusy.value);
+const channelLocked=computed(()=>!!props.disabled||busy.value||directoryBusy.value||policyBusy.value||sharingBusy.value||registrationBinding.value);
 const unsaved=computed(()=>policyDirty.value||sharingDirty.value||contextDirty.value||!!appSecret.value||!!appId.value&&appId.value!==(connection.value?.appId??''));
 function requestPolicySwitch(action:()=>void){if(channelLocked.value)return;if(unsaved.value){pendingPolicySwitch=action;confirmPolicySwitch.value=true;return;}action();}
 function discardPolicySwitch(){if(channelLocked.value)return;policyEditor.value?.cancel();sharingEditor.value?.discard();historyEnabled.value=connection.value?.context?.groupListenEnabled??false;keywordText.value=(connection.value?.context?.groupTriggerKeywords??[]).join('\n');appId.value=connection.value?.appId??'';clearSecrets();replaceSource.value=false;confirmPolicySwitch.value=false;pendingPolicySwitch?.();pendingPolicySwitch=undefined;}
@@ -50,7 +51,26 @@ const directoryBusy = ref(false);
 const report = ref<ChannelValidation | null>(null);
 const busy = ref(false), loaded = ref(false), error = ref(''), notice = ref('');
 let controller = new AbortController();
-watch(() => busy.value || directoryBusy.value || policyBusy.value || sharingBusy.value, value => emit('busyChanged', value), { flush: 'sync' });
+const registration = useDingtalkRegistration({
+  base: () => props.base,
+  revision: () => connections.value.find(item => item.provider === 'dingtalk')?.revision ?? 0,
+  appId: () => connections.value.find(item => item.provider === 'dingtalk')?.appId,
+  active: () => selectedConnection.value && provider.value === 'dingtalk' && props.canManage,
+  locked: () => channelLocked.value || policyDirty.value || sharingDirty.value || contextDirty.value || !loaded.value,
+  onSessionExpired: () => emit('sessionExpired'),
+  onBound: (result, replaced) => {
+    connections.value = [...connections.value.filter(item => item.provider !== 'dingtalk'), result];
+    clearSecrets(); replaceSource.value = false;
+    notice.value = replaced ? '换绑已保存。本渠道已恢复新建默认配置，旧名单未迁移；请核对新连接状态与使用范围。' : '机器人已绑定。请核对连接状态与使用范围，长连接和首条消息身份确认仍需分别核验。';
+    if (replaced) emit('rebound');
+    emit('changed');
+  },
+});
+const { open: registrationOpen, available: registrationAvailable, checking: registrationChecking,
+  requesting: registrationRequesting, binding: registrationBinding, session: registrationSession,
+  message: registrationMessage, replacing: registrationReplacing, replaceSource: registrationReplaceSource } = registration;
+
+watch(() => busy.value || directoryBusy.value || policyBusy.value || sharingBusy.value || registrationBinding.value, value => emit('busyChanged', value), { flush: 'sync' });
 watch(unsaved,v=>emit('dirtyChanged',v),{flush:'sync'});
 function clearSecrets() { appSecret.value = ''; }
 watch(provider, () => { clearSecrets(); appId.value = connection.value?.appId ?? ''; replaceSource.value = false; notice.value = ''; error.value = ''; report.value = null; });
@@ -138,6 +158,31 @@ onUnmounted(() => { controller.abort(); clearSecrets();emit('dirtyChanged',false
         <template v-if="canManage">
           <section class="form-section channel-setup" aria-label="渠道接入配置">
             <header class="form-section-heading"><h3>机器人连接凭据</h3><a :href="provider==='feishu'?'https://open.feishu.cn/app':provider==='dingtalk'?'https://open-dev.dingtalk.com/':'https://work.weixin.qq.com/wework_admin/frame'" target="_blank" rel="noopener noreferrer">打开官方后台 ↗</a></header>
+            <section v-if="provider==='dingtalk'" class="dingtalk-registration" aria-label="钉钉扫码创建">
+              <NButton v-if="!registrationOpen" :disabled="channelLocked||!loaded" @click="registration.show">扫码创建新机器人</NButton>
+              <template v-else>
+                <div class="form-section-heading"><h3>扫码创建新机器人</h3><NButton :disabled="registrationBinding" @click="registration.cancel">关闭扫码</NButton></div>
+                <p class="field-note">使用部署方已向钉钉登记的来源创建。取消仅停止本地流程，不会撤销已在钉钉创建的机器人；已有应用仍可在下方手动关联。</p>
+                <p v-if="registrationChecking" role="status">正在检查扫码注册配置…</p>
+                <NAlert v-if="registrationMessage" type="warning" role="status">{{registrationMessage}}</NAlert>
+                <NButton v-if="registrationAvailable&&!registrationSession&&!registrationMessage" :disabled="registrationRequesting||channelLocked" :loading="registrationRequesting" @click="registration.start">开始扫码创建</NButton>
+                <template v-if="registrationSession && ['starting','waiting'].includes(registrationSession.status)">
+                  <p role="status">等待在钉钉确认创建机器人…</p>
+                  <template v-if="registrationSession.verificationUrl">
+                    <NQrCode :value="registrationSession.verificationUrl" :size="192" type="svg" aria-label="钉钉创建机器人二维码"/>
+                    <a :href="registrationSession.verificationUrl" target="_blank" rel="noopener noreferrer">打开钉钉官方验证页面 ↗</a>
+                  </template>
+                  <p class="field-note">本次扫码有效至 {{formatTime(registrationSession.expiresAt)}}。二维码仅在本地生成。</p>
+                </template>
+                <template v-if="registrationSession?.status==='ready'">
+                  <p role="status">机器人已创建，尚未绑定。Client ID：{{registrationSession.clientId}}</p>
+                  <NAlert v-if="registrationReplacing" type="warning" aria-label="扫码换绑授权重置提醒">保存换绑后，启用新连接，仅当前渠道恢复新建默认值：空白名单、群内可用、能力包继承员工使用范围。当前渠道的人员名单、能力包渠道限制、群共享规则与缓存会重置，旧名单不迁移。群内可用和能力包继承可能扩大授权。其他渠道、网页权限和资源绑定不变。未保存前原绑定继续有效。<NCheckbox v-model:checked="registrationReplaceSource" :disabled="registrationBinding" aria-label="确认扫码换绑并重置当前渠道配置">我确认换绑并重置当前渠道配置</NCheckbox></NAlert>
+                  <NButton type="primary" :loading="registrationBinding" :disabled="channelLocked||policyDirty||sharingDirty||contextDirty||(registrationReplacing&&!registrationReplaceSource)" @click="registration.bind">确认绑定到当前员工</NButton>
+                </template>
+                <NButton v-if="registrationMessage" :disabled="channelLocked" @click="registration.cancel();registration.show()">重新检查扫码配置</NButton>
+              </template>
+              <h3>手动关联已有应用</h3>
+            </section>
             <NForm class="channel-connection-form settings-form" @submit.prevent>
               <NFormItem :label="provider==='wecom'?'BotID':provider==='dingtalk'?'Client ID（AppKey）':'App ID'"><NInput v-model:value="appId" :disabled="channelLocked||!loaded" :input-props="{'aria-label':'渠道应用 ID',autocomplete:'off'}"/></NFormItem>
               <NFormItem :label="provider==='wecom'?'Secret':provider==='dingtalk'?'Client Secret（AppSecret）':'App Secret'"><NInput v-model:value="appSecret" type="password" :disabled="channelLocked||!loaded" :input-props="{'aria-label':'渠道应用密钥',autocomplete:'new-password'}"/></NFormItem>
@@ -175,6 +220,7 @@ onUnmounted(() => { controller.abort(); clearSecrets();emit('dirtyChanged',false
   </div>
 </template>
 <style scoped>
+.dingtalk-registration{display:grid;gap:12px;justify-items:start}
 .channel-connections,.channel-detail{display:grid;gap:16px;min-width:0}
 .connection-list{display:grid;gap:12px}
 .connection-list-heading{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;padding:16px 20px;background:var(--surface);border:1px solid var(--subtle);border-radius:12px}

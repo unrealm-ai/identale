@@ -41,6 +41,7 @@ const server = createPlatformServer({
   runtimeService:{url:runtimeServiceUrl,token:runtimeServiceToken},
   ...(hostUrl&&monitorToken?{piMonitor:{url:hostUrl,token:monitorToken}}:{}),
   approvedResources,
+  dingtalkRegistration: { ...(process.env['DENTITY_DINGTALK_REGISTRATION_SOURCE'] ? {source:process.env['DENTITY_DINGTALK_REGISTRATION_SOURCE']} : {}) },
   triggers:{allowLoopbackHttp:process.env['DENTITY_TRIGGER_ALLOW_LOOPBACK_HTTP']==='true'},
   mcpResources:{allowedOrigins:(process.env['DENTITY_MCP_ALLOWED_ORIGINS']??'').split(',').filter(Boolean),allowLoopbackHttp:process.env['DENTITY_MODEL_ALLOW_LOOPBACK_HTTP']==='true'},
   skillResourceRoot:expandHomePath(process.env['DENTITY_SKILL_RESOURCE_ROOT']??defaultSkillResourceRoot()),
