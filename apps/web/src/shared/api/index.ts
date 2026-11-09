@@ -156,7 +156,7 @@ const errors: Record<string, string> = {
   workspace_forbidden: '你无法访问此工作区，请重新登录以刷新成员信息。',
   role_forbidden: '当前角色没有此管理权限。',
   membership_inactive: '你在目标工作区的成员身份已停用，请联系管理员。',
-  invalid_expiry: '邀请有效期必须是 1 至 168 小时的整数。',
+  invalid_expiry: '邀请有效期必须是 1 至 180 天的整数。',
   invalid_origin: '当前访问地址未获允许，请使用配置的本地开发地址。',
   invalid_credentials: '账号名或密码不正确。', username_taken: '这个账号名已被使用。',
   username_exists: '这个账号名已被使用。', invalid_username: '请使用符合要求的账号名。',

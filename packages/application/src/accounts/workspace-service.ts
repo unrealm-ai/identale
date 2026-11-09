@@ -46,8 +46,12 @@ export class WorkspaceService {
     const invite = this.invitation(raw), existing = this.repository.membershipStatus(invite.workspaceId, userId);
     if (existing && existing !== 'active') return fail(403, 'membership_inactive');
     if (!existing) this.repository.insertMember(this.security.id(), invite.workspaceId, userId, invite.role);
-    this.repository.consumeInvitation(this.security.digest(raw), userId);
-    this.accounts.audit(this.now(), 'invitation.consumed', userId, invite.workspaceId);
+    if (!invite.reusable) {
+      this.repository.consumeInvitation(this.security.digest(raw), userId);
+      this.accounts.audit(this.now(), 'invitation.consumed', userId, invite.workspaceId);
+    } else if (!existing) {
+      this.accounts.audit(this.now(), 'invitation.accepted', userId, invite.workspaceId);
+    }
     return this.get(userId, invite.workspaceId);
   }
   invite(userId: string, workspaceId: string, value: unknown) {
@@ -56,10 +60,10 @@ export class WorkspaceService {
     if (role !== 'member' && role !== 'admin') return fail(400, 'invalid_role');
     if (selected.role === 'member' || (role === 'admin' && selected.role !== 'owner')) return fail(403, 'role_forbidden');
     const hours = body['expiresInHours'] ?? 24;
-    if (typeof hours !== 'number' || !Number.isInteger(hours) || hours < 1 || hours > 168) return fail(400, 'invalid_expiry');
+    if (typeof hours !== 'number' || !Number.isInteger(hours) || hours < 1 || hours > 180 * 24) return fail(400, 'invalid_expiry');
     const raw = this.security.token(), expiresAt = this.now() + hours * 3600000;
     this.accounts.transaction(() => {
-      this.repository.insertInvitation(this.security.digest(raw), {workspaceId: selected.id, inviterMemberId: selected.memberId, role, expiresAt, revoked: false, usedBy: null});
+      this.repository.insertInvitation(this.security.digest(raw), {workspaceId: selected.id, inviterMemberId: selected.memberId, role, expiresAt, revoked: false, usedBy: null, reusable: true});
       this.accounts.audit(this.now(), 'invitation.created', userId, selected.id);
     });
     return {token: raw, expiresAt, workspaceId: selected.id, role};
