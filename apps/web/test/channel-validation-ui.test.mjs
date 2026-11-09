@@ -299,3 +299,15 @@ test('automatic registration completion preserves unsaved manual credentials ins
   assert.equal(env.requests.filter(r => r.url.endsWith('/channels')).length, channelReadsBefore);
   assert.ok(env.requests.every(r => r.method === 'GET'));
 });
+
+test('unsaved manual credentials pause automatic Feishu permission retry without disabling three-provider manual entry', async t => {
+  const env = await mount(t, 'settings', { base, canManage: true }, async request => request.url.endsWith('/registration') ? {
+    registration: { id: 'synthetic-registration', state: 'needs_attention', credentialSaved: true, appId: 'cli_synthetic', updatedAt: 1, autoCheck: { eligible: true, inProgress: false, nextCheckAt: Date.now() + 500 } },
+    preset: { name: '合成员工', description: '合成职责' }, permissions: { version: 'v1', scopes: [], events: [], groups: [] }
+  } : []);
+  input('渠道应用 ID', 'cli_manual_unsaved'); input('渠道应用密钥', 'synthetic-unsaved-secret'); await flush();
+  const reads = env.requests.length; await new Promise(resolve => setTimeout(resolve, 800));
+  assert.equal(env.requests.length, reads); assert.ok(env.requests.every(r => r.method === 'GET'));
+  assert.equal(document.querySelector('input[aria-label="渠道应用密钥"]').value, 'synthetic-unsaved-secret');
+  assert.equal(document.querySelector('input[aria-label="渠道应用 ID"]').disabled, false); assert.match(text(), /自动检查暂已暂停/);
+});

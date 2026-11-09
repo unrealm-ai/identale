@@ -249,3 +249,25 @@ test('standalone overview retains the confirmation panel without a Web slot and 
  env.props.canManage=false;await until(()=>!document.querySelector('.human-settings'));assert.equal(document.querySelector('.overview-access-stack'),null);
  assert.equal(env.requests.filter(r=>r.method==='PUT').length,0);
 });
+
+test('real employee tabs pause retained channel registration polling and resume with GET when returning', async t => {
+  const env = await mount(t, 'settings', { entity: { ...entity }, workspace, section: 'channels' }, async request => request.url.endsWith('/channels/feishu/registration') || request.url.endsWith('/channels/feishu/registration/retry') ? {
+    registration: { id: 'synthetic-registration', state: 'needs_attention', credentialSaved: true, appId: 'cli_synthetic', updatedAt: 1, autoCheck: { eligible: true, inProgress: false, nextCheckAt: Date.now() + 500 } },
+    preset: { name: '合成员工', description: '合成职责' }, permissions: { version: 'v1', scopes: [], events: [], groups: [] }
+  } : defaults(request));
+  await until(() => !!document.querySelector('.connection-list')); await click('添加渠道连接');
+  const registrationRequests = () => env.requests.filter(r => r.url.includes('/channels/feishu/registration'));
+  await until(() => registrationRequests().length === 1);
+  for (const destination of ['概览', '能力包', '模型']) {
+    await tab(destination);
+    assert.ok(document.querySelector('[aria-label="飞书自动创建应用"]'), 'show:lazy retains the child component');
+    assert.equal(visible(document.querySelector('[aria-label="飞书自动创建应用"]')), false);
+    const before = registrationRequests().length;
+    await new Promise(resolve => setTimeout(resolve, 800));
+    assert.equal(registrationRequests().length, before, `${destination} must not poll or retry hidden channels`);
+    await tab('渠道'); await until(() => registrationRequests().length === before + 1);
+    assert.equal(registrationRequests().at(-1).method, 'GET', 're-entry must fetch server state before any automatic retry');
+  }
+  await until(() => registrationRequests().some(r => r.method === 'POST'));
+  assert.deepEqual(registrationRequests().find(r => r.method === 'POST').body, { id: 'synthetic-registration', automatic: true });
+});

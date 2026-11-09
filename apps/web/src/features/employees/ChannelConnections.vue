@@ -15,7 +15,7 @@ import ChannelValidationReport from './ChannelValidationReport.vue';
 import { channelApi, ChannelValidationFailure, type ChannelValidation } from './channel-validation';
 import { directoryStatusLabel } from '../directory/types';
 import type { DirectoryConnection, DirectoryProvider, DirectoryIdentityEvidence } from '../directory/types';
-const props = defineProps<{ base: string; canManage: boolean; disabled?: boolean }>();
+const props = withDefaults(defineProps<{ base: string; canManage: boolean; disabled?: boolean; active?: boolean }>(), { active: true });
 const emit = defineEmits<{ busyChanged: [value: boolean]; sessionExpired: []; changed: [];rebound:[];dirtyChanged:[boolean] }>();
 const sharingBusy=ref(false),sharingDirty=ref(false),registrationBusy=ref(false);
 const sharingEditor=ref<InstanceType<typeof GroupSharingSettings>|null>(null);
@@ -141,7 +141,7 @@ onUnmounted(() => { controller.abort(); clearSecrets();emit('dirtyChanged',false
         </section>
         <ChannelCapabilities v-if="connection" :capabilities="connection.capabilities" :provider="provider" @session-expired="emit('sessionExpired')"/>
         <template v-if="canManage">
-          <FeishuRegistration v-if="provider==='feishu'" :base="base" :active="selectedConnection && loaded" :disabled="disabled || busy || directoryBusy || policyBusy || sharingBusy || unsaved" :bound-app-id="connection?.appId" @busy-changed="registrationBusy=$event" @session-expired="emit('sessionExpired')" @changed="registrationChanged"/>
+          <FeishuRegistration v-if="provider==='feishu'" :base="base" :active="active !== false && selectedConnection && loaded" :disabled="disabled || busy || directoryBusy || policyBusy || sharingBusy || unsaved" :bound-app-id="connection?.appId" @busy-changed="registrationBusy=$event" @session-expired="emit('sessionExpired')" @changed="registrationChanged"/>
           <section class="form-section channel-setup" aria-label="渠道接入配置">
             <header class="form-section-heading"><h3>机器人连接凭据</h3><a :href="provider==='feishu'?'https://open.feishu.cn/app':provider==='dingtalk'?'https://open-dev.dingtalk.com/':'https://work.weixin.qq.com/wework_admin/frame'" target="_blank" rel="noopener noreferrer">打开官方后台 ↗</a></header>
             <NForm class="channel-connection-form settings-form" @submit.prevent>

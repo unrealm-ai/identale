@@ -13,7 +13,8 @@ import {EmployeeChannelRepository} from '../dist/employee-channels/repository.js
 import {EmployeeChannelService, EmployeeChannelError} from '../dist/employee-channels/service.js';
 import {DirectoryCredentialVault} from '../dist/directory/secrets.js';
 import {
-  FeishuAppRegistration, FEISHU_REGISTRATION_PERMISSIONS,
+  FeishuAppRegistration,
+  FEISHU_REGISTRATION_PERMISSIONS,
   registerFeishuAppRegistrationRoutes,
 } from '../dist/employee-channels/feishu-registration.js';
 import {PLATFORM_TABLES, RUNTIME_TABLES} from '../dist/split/table-ownership.js';
@@ -35,6 +36,10 @@ const requiredEvents = [
   'im.message.receive_v1', 'im.chat.member.bot.added_v1',
   'im.chat.member.bot.deleted_v1', 'im.chat.disbanded_v1',
 ];
+const legacyProfile = {
+  version: 'conversation-directory-v1', scopes: requiredScopes, userScopes: [], events: requiredEvents,
+  groups: [{id: 'legacy-basic', label: 'Legacy baseline', required: true, identity: 'tenant', scopes: requiredScopes}],
+};
 const code = expected => error => error.code === expected;
 const deferred = () => {
   let resolve, reject;
@@ -62,11 +67,11 @@ function verified(appId, clock, changes = {}) {
     ...changes,
   };
 }
-function fixture(t, {role, masterKey = new Uint8Array(32).fill(7), register} = {}) {
+function fixture(t, {role, masterKey = new Uint8Array(32).fill(7), register, profile = legacyProfile} = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'identale-feishu-registration-'));
   const path = join(dir, 'test.sqlite');
   const state = {clock: 1800000000000, sdk: [], verification: [], unexpectedNetwork: [], diagnostics: []};
-  const f = {dir, path, state, store: new Store(path, role ? {role} : {})};
+  const f = {dir, path, state, profile, store: new Store(path, role ? {role} : {})};
   f.store.run("INSERT INTO users(id,username,display_name) VALUES('u','owner','Owner'),('v','second','Second manager'),('guest','guest','Guest')");
   f.store.run("INSERT INTO workspaces(id,name,created_by) VALUES('w','Workspace','u'),('other','Other','u')");
   f.store.run("INSERT INTO members(id,workspace_id,user_id,role) VALUES('m','w','u','owner'),('v','w','v','admin'),('g','w','guest','member'),('om','other','u','owner')");
@@ -98,12 +103,12 @@ function fixture(t, {role, masterKey = new Uint8Array(32).fill(7), register} = {
   f.construct = () => {
     f.repository = new EmployeeChannelRepository(f.store);
     f.channels = new EmployeeChannelService(f.repository, f.options);
-    f.registration = new FeishuAppRegistration(f.channels, f.options, f.authorize);
+    f.registration = new FeishuAppRegistration(f.channels, f.options, f.authorize, f.profile);
   };
   f.construct();
   f.status = () => f.registration.status('w', 'e', 'u').registration;
   f.start = (operationId = 'synthetic-operation') => f.registration.start('w', 'e', 'u', operationId).registration;
-  f.retry = () => f.registration.retry('w', 'e', 'u', f.status().id).registration;
+  f.retry = (automatic = false) => f.registration.retry('w', 'e', 'u', f.status().id, automatic).registration;
   f.cancel = () => f.registration.cancel('w', 'e', 'u', f.status().id).registration;
   f.raw = () => JSON.parse(f.store.one('SELECT record_json FROM feishu_app_registrations WHERE id=?', f.status().id).record_json);
   f.connection = () => f.repository.byProvider('w', 'e', 'feishu');
@@ -156,8 +161,7 @@ test('server employee metadata and exact application-only permissions drive SDK 
   const f = fixture(t), status = f.registration.status('w', 'e', 'u');
   assert.deepEqual({...status.preset}, {name: '合成员工', description: '合成员工简介'});
   assert.equal(status.registration, null);
-  assert.deepEqual(FEISHU_REGISTRATION_PERMISSIONS, {version: 'conversation-directory-v1', scopes: requiredScopes, events: requiredEvents});
-  assert.deepEqual(status.permissions, FEISHU_REGISTRATION_PERMISSIONS);
+  assert.deepEqual(status.permissions, legacyProfile);
   assert.equal(f.start().state, 'starting');
   const {input} = f.state.sdk[0];
   assert.equal(input.createOnly, true);
@@ -171,6 +175,36 @@ test('server employee metadata and exact application-only permissions drive SDK 
   assert.equal(f.status().expiresAt, f.state.clock + 120_000);
   assertPrivate(f, {pendingUrl: true});
   await accept(f);
+});
+
+test('approved v2 profile preserves all explicitly requested scopes and sends the full grouped manifest', async t => {
+  const explicitlyRequested = [
+    'contact:contact.base:readonly', 'contact:department.base:readonly', 'im:chat:read', 'im:chat:readonly',
+    'im:chat.access_event.bot_p2p_chat:read', 'im:chat.announcement:read', 'im:chat.members:read',
+    'im:message.group_at_msg.include_bot:readonly', 'im:message.group_msg.include_bot:read',
+    'im:message.pins:read', 'im:message.reactions:read', 'contact:user.basic_profile:readonly',
+    'directory:department:search', 'directory:department.base:read', 'directory:department.department_path:read',
+    'directory:department.has_child:read', 'directory:department.name:read', 'directory:department.organization:read',
+    'directory:department.parent_id:read', 'directory:employee:list', 'directory:employee:read',
+    'directory:employee.base.base:read', 'directory:employee.base.department:read',
+    'directory:employee.base.department_path:read', 'directory:department:list', 'directory:department:read',
+    'directory:employee:search',
+  ];
+  const profile = FEISHU_REGISTRATION_PERMISSIONS, f = fixture(t, {profile});
+  assert.equal(profile.version, 'conversation-business-v2');
+  for (const scope of explicitlyRequested) assert.ok(profile.scopes.includes(scope), scope);
+  assert.deepEqual(profile.userScopes, []);
+  assert.deepEqual(profile.groups.filter(group => group.required).flatMap(group => group.scopes), requiredScopes);
+  assert.deepEqual(profile.groups.map(group => group.id), [
+    'conversation-directory', 'messages-groups', 'organization', 'documents', 'base', 'calendar', 'tasks', 'meetings-minutes', 'approvals',
+  ]);
+  assert.deepEqual(new Set(profile.scopes), new Set(profile.groups.flatMap(group => group.scopes)));
+  f.start();
+  assert.deepEqual(f.state.sdk[0].input.addons, {preset: false, scopes: {tenant: profile.scopes}, events: {items: {tenant: requiredEvents}}});
+  await accept(f); await settledCheck(f);
+  assert.equal(f.status().state, 'connected', 'unapproved optional groups cannot block verified baseline');
+  assert.equal(f.status().permissionGroups[0].status, 'granted');
+  assert.ok(f.status().permissionGroups.slice(1).every(group => group.status === 'unknown'));
 });
 
 test('first credentials are encrypted before verification and enabled only after both checks', async t => {
@@ -283,11 +317,12 @@ test('duplicate starts, checks and terminal retries are idempotent', async t => 
   await until(() => f.status().state, 'connected');
   const connection = f.connection();
   assert.equal(f.retry().state, 'connected');
+  await settledCheck(f);
   assert.equal(f.start().id, first.id);
   assert.equal(f.cancel().state, 'connected');
   assert.deepEqual(f.connection(), connection);
   assert.equal(f.state.sdk.length, 1);
-  assert.equal(f.state.verification.length, 2);
+  assert.equal(f.state.verification.length, 2, 'completed baseline-only retry remains a no-op');
   assert.equal(f.store.one('SELECT count(*) AS n FROM feishu_app_registrations').n, 1);
 });
 
@@ -672,9 +707,10 @@ test('restart repairs channel-commit registration-status window without another 
   assert.equal(f.status().missingScopes, undefined);
   assert.deepEqual(f.connection(), saved);
   assert.equal(f.retry().state, 'connected');
+  await settledCheck(f);
   assert.equal(f.start().id, unfinished.id);
   assert.equal(f.state.sdk.length, 1);
-  assert.equal(f.state.verification.length, 2);
+  assert.equal(f.state.verification.length, 2, 'recovered baseline-only registration needs no extra provider read');
   assert.equal(f.store.one('SELECT count(*) AS n FROM employee_channel_audit').n, auditCount);
   assertPrivate(f);
 });
@@ -722,3 +758,405 @@ for (const change of ['disabled', 'pending-verification', 'directory-unavailable
     assertPrivate(f);
   });
 }
+
+// These extension names test grouping only. They are not a production permission manifest.
+const syntheticTenantScope = 'synthetic:extension:read';
+const syntheticUserScope = 'synthetic:user_extension:read';
+const groupedProfile = () => ({
+  version: 'synthetic-grouped-v1', scopes: [...requiredScopes, syntheticTenantScope],
+  userScopes: [syntheticUserScope], events: [...requiredEvents],
+  groups: [
+    {id: 'basic', label: 'Synthetic baseline', required: true, identity: 'tenant', scopes: [...requiredScopes]},
+    {id: 'extended', label: 'Synthetic extension', required: false, identity: 'tenant', scopes: [syntheticTenantScope]},
+    {id: 'user-extension', label: 'Synthetic user extension', required: false, identity: 'user', scopes: [syntheticUserScope], note: 'User authorization is separate from application registration.'},
+  ],
+});
+const group = (f, id) => f.status().permissionGroups.find(value => value.id === id);
+const inventory = result => result.validation.checks.find(check => check.id === 'scope_inventory').scopeInventory;
+const baselineRows = () => requiredScopes.map(scope => ({scope, identity: 'tenant', status: 'granted'}));
+function optionalRows({tenant = 'denied', user = 'denied'} = {}) {
+  return [...baselineRows(), {scope: syntheticTenantScope, identity: 'tenant', status: tenant}, {scope: syntheticUserScope, identity: 'user', status: user}];
+}
+function installInventoryFetch(f, getRows = () => optionalRows()) {
+  delete f.options.verifyApplication; // Exercise the real read-only provider scope transport.
+  const calls = [];
+  const json = value => new Response(JSON.stringify(value), {headers: {'content-type': 'application/json'}});
+  f.options.fetch = async (url, init = {}) => {
+    const target = new URL(url);
+    assert.equal(target.origin, 'https://open.feishu.cn');
+    assert.equal(init.redirect, 'error');
+    calls.push(target.pathname);
+    if (target.pathname === '/open-apis/auth/v3/tenant_access_token/internal') {
+      assert.equal(init.method, 'POST');
+      assert.deepEqual(JSON.parse(init.body), {app_id: credentials.client_id, app_secret: secret});
+      return json({code: 0, tenant_access_token: 'synthetic-readonly-inventory-token', expire: 7200});
+    }
+    assert.equal(target.pathname, '/open-apis/application/v6/scopes', 'connected refresh must only inspect scopes');
+    assert.equal(init.method, 'GET');
+    const rows = await getRows();
+    return json({code: 0, data: {scopes: rows.map(row => ({scope_name: row.scope, scope_type: row.identity, grant_status: row.status === 'granted' ? 1 : row.status === 'denied' ? 2 : 99}))}});
+  };
+  return calls;
+}
+async function settledCheck(f) {
+  await until(() => f.status().autoCheck.inProgress, false, 'automatic check completion');
+  await tick();
+}
+
+test('grouped profile requests explicit tenant/user unions and optional denial does not block baseline completion', async t => {
+  const profile = groupedProfile(), f = fixture(t, {profile});
+  f.state.verify = appId => {
+    const result = verified(appId, f.state.clock);
+    inventory(result).push(...optionalRows().slice(requiredScopes.length));
+    return result;
+  };
+  f.start();
+  assert.deepEqual(f.state.sdk[0].input.addons.scopes, {tenant: profile.scopes, user: profile.userScopes});
+  await accept(f); await settledCheck(f);
+  assert.equal(f.status().profileVersion, profile.version);
+  assert.equal(group(f, 'basic').status, 'granted');
+  assert.equal(group(f, 'extended').required, false);
+  assert.equal(group(f, 'extended').status, 'missing');
+  assert.deepEqual(group(f, 'extended').missingScopes, [syntheticTenantScope]);
+  assert.equal(group(f, 'user-extension').identity, 'user');
+  assert.equal(group(f, 'user-extension').status, 'missing');
+  assert.ok(group(f, 'user-extension').note.includes('separate'));
+  assert.equal(f.connection().enabled, true);
+  assert.equal(f.connection().revision, 1);
+  assert.equal(f.status().missingScopes, undefined);
+  assert.equal(f.status().autoCheck.eligible, true);
+  assertPrivate(f);
+});
+
+test('cross-identity grants never satisfy tenant or user extension groups', async t => {
+  const f = fixture(t, {profile: groupedProfile()});
+  f.state.verify = appId => {
+    const result = verified(appId, f.state.clock);
+    inventory(result).push(
+      {scope: syntheticTenantScope, identity: 'user', status: 'granted'},
+      {scope: syntheticUserScope, identity: 'tenant', status: 'granted'},
+    );
+    return result;
+  };
+  f.start(); await accept(f); await settledCheck(f);
+  assert.equal(group(f, 'basic').status, 'granted');
+  for (const id of ['extended', 'user-extension']) {
+    assert.notEqual(group(f, id).status, 'granted');
+    assert.ok(group(f, id).scopeStates.every(row => row.status !== 'granted'));
+  }
+  assert.equal(f.connection().enabled, true);
+  assertPrivate(f);
+});
+
+test('unknown inventory remains unknown rather than inventing granted or denied group evidence', async t => {
+  const f = fixture(t, {profile: groupedProfile()});
+  f.state.verify = appId => {
+    const result = verified(appId, f.state.clock);
+    result.validation.checks[0] = {id: 'scope_inventory', required: false, supported: true, status: 'unverified', reason: 'inventory_unavailable'};
+    return result;
+  };
+  f.start(); f.state.sdk[0].resolve({...credentials});
+  await until(() => f.status().state, 'needs_attention');
+  assert.ok(f.status().permissionGroups.every(value => value.status === 'unknown'));
+  assert.equal(f.connection(), undefined);
+  assert.equal(f.status().credentialSaved, true);
+});
+
+test('automatic retry observes approval and completes without another SDK registration', async t => {
+  const f = fixture(t, {profile: groupedProfile()});
+  let approved = false;
+  f.state.verify = appId => {
+    const result = verified(appId, f.state.clock);
+    if (!approved) inventory(result)[0].status = 'denied';
+    return result;
+  };
+  f.start(); f.state.sdk[0].resolve({...credentials});
+  await until(() => f.status().state, 'needs_attention'); await settledCheck(f);
+  assert.equal(f.status().autoCheck.eligible, true);
+  assert.equal(f.status().autoCheck.nextCheckAt, f.state.clock + 5000);
+  approved = true;
+  f.state.clock = f.status().autoCheck.nextCheckAt;
+  f.retry(true);
+  await until(() => f.status().state, 'connected'); await settledCheck(f);
+  assert.equal(f.state.sdk.length, 1);
+  assert.equal(f.connection().revision, 1);
+  assert.equal(group(f, 'basic').status, 'granted');
+  assertPrivate(f);
+});
+
+test('GET remains provider-read-only at scheduled check time and automatic retries use bounded backoff', async t => {
+  const f = fixture(t, {profile: groupedProfile()}), app = f.app();
+  f.state.verify = appId => { const result = verified(appId, f.state.clock); inventory(result)[0].status = 'denied'; return result; };
+  f.start(); f.state.sdk[0].resolve({...credentials});
+  await until(() => f.status().state, 'needs_attention'); await settledCheck(f);
+  for (const delay of [5000, 10000, 20000, 30000, 60000, 60000]) {
+    const dto = f.status(), before = f.state.verification.length;
+    assert.equal(dto.autoCheck.nextCheckAt - f.state.clock, delay);
+    f.retry(true); await tick();
+    assert.equal(f.state.verification.length, before, 'automatic retry cannot bypass cooldown');
+    f.state.clock = dto.autoCheck.nextCheckAt;
+    for (let read = 0; read < 3; read++) {
+      const response = await app.inject({url: base});
+      assert.equal(response.statusCode, 200);
+      assert.equal(response.headers['cache-control'], 'no-store');
+      assert.equal(response.json().registration.autoCheck.inProgress, false);
+    }
+    assert.equal(f.state.verification.length, before, 'GET must not launch provider requests');
+    f.retry(true); await settledCheck(f);
+    assert.equal(f.state.verification.length, before + 1);
+    assert.equal(f.status().state, 'needs_attention');
+  }
+  const before = f.state.verification.length;
+  f.retry(false); await settledCheck(f);
+  assert.equal(f.state.verification.length, before + 1, 'manual retry is immediate during cooldown');
+  assert.equal(f.state.sdk.length, 1);
+});
+
+test('concurrent automatic retry requests share one check and HTTP rejects unapproved automatic input', async t => {
+  const f = fixture(t, {profile: groupedProfile()}), app = f.app(), gate = deferred();
+  let gated = false;
+  f.state.verify = async appId => {
+    if (gated) await gate.promise;
+    const result = verified(appId, f.state.clock); inventory(result)[0].status = 'denied'; return result;
+  };
+  f.start(); f.state.sdk[0].resolve({...credentials});
+  await until(() => f.status().state, 'needs_attention'); await settledCheck(f);
+  const id = f.status().id;
+  for (const payload of [{id, automatic: 'true'}, {id, automatic: true, scopes: [syntheticTenantScope]}, {id, automatic: true, appId: 'cli_forged'}]) {
+    const response = await app.inject({method: 'POST', url: base + '/retry', payload});
+    assert.equal(response.statusCode, 400);
+  }
+  f.state.clock = f.status().autoCheck.nextCheckAt;
+  gated = true;
+  const before = f.state.verification.length;
+  const replies = await Promise.all(Array.from({length: 4}, () => app.inject({method: 'POST', url: base + '/retry', payload: {id, automatic: true}})));
+  assert.ok(replies.every(reply => reply.statusCode === 200));
+  assert.equal(f.state.verification.length, before + 1);
+  assert.equal(f.status().autoCheck.inProgress, true);
+  gate.resolve(); await settledCheck(f);
+  assert.equal(f.state.verification.length, before + 1);
+  assert.equal(f.state.sdk.length, 1);
+});
+
+test('connected optional refresh reads scopes once without saving, reconnecting or authorizing user resources', async t => {
+  const f = fixture(t, {profile: groupedProfile()});
+  f.start(); await accept(f); await settledCheck(f);
+  const connection = f.connection(), audit = f.store.all('SELECT * FROM employee_channel_audit');
+  let notifications = 0;
+  f.channels.setCleanupListener(() => notifications++);
+  const gate = deferred();
+  const calls = installInventoryFetch(f, async () => { await gate.promise; return optionalRows({tenant: 'granted', user: 'granted'}); });
+  f.state.clock = f.status().autoCheck.nextCheckAt;
+  f.retry(true);
+  await until(() => calls.filter(path => path.endsWith('/scopes')).length, 1, 'scope inventory request');
+  assert.equal(f.status().state, 'connected');
+  assert.equal(f.status().autoCheck.inProgress, true);
+  f.retry(true); f.retry(false);
+  assert.equal(calls.filter(path => path.endsWith('/scopes')).length, 1);
+  gate.resolve(); await settledCheck(f);
+  assert.ok(f.status().permissionGroups.every(value => value.status === 'granted'));
+  assert.equal(f.status().autoCheck.eligible, false);
+  assert.equal(f.status().autoCheck.nextCheckAt, null);
+  assert.equal(group(f, 'user-extension').identity, 'user');
+  assert.ok(group(f, 'user-extension').note.includes('separate'));
+  assert.deepEqual(f.connection(), connection);
+  assert.deepEqual(f.store.all('SELECT * FROM employee_channel_audit'), audit);
+  assert.equal(notifications, 0);
+  const requestCount = calls.length;
+  f.state.clock += 120_000;
+  f.retry(true); await tick();
+  assert.equal(calls.length, requestCount, 'completed groups must stop automatic provider checks');
+  assert.equal(f.state.verification.length, 2, 'no repeated full application validation');
+  assert.equal(f.state.sdk.length, 1);
+  assertPrivate(f);
+});
+
+test('registration keeps its profile snapshot through caller mutation, restart and a newer default', async t => {
+  const profile = groupedProfile(), original = structuredClone(profile), f = fixture(t, {profile});
+  f.state.verify = appId => { const result = verified(appId, f.state.clock); inventory(result)[0].status = 'denied'; return result; };
+  f.start();
+  profile.version = 'mutated-after-start';
+  profile.scopes.push('synthetic:mutated_requirement:read');
+  profile.groups[0].scopes.push('synthetic:mutated_requirement:read');
+  f.state.sdk[0].resolve({...credentials});
+  await until(() => f.status().state, 'needs_attention'); await settledCheck(f);
+  assert.equal(f.status().profileVersion, original.version);
+  assert.deepEqual(f.raw().profile, original);
+  assert.deepEqual(f.status().requestedPermissions, original);
+  assert.deepEqual(f.status().permissionGroups.map(({status, scopeStates, missingScopes, ...value}) => value), original.groups);
+  f.profile = groupedProfile();
+  f.profile.version = 'synthetic-grouped-v2';
+  f.profile.scopes.push('synthetic:new_baseline:read');
+  f.profile.groups[0].scopes.push('synthetic:new_baseline:read');
+  f.restart();
+  assert.equal(f.status().profileVersion, original.version);
+  assert.deepEqual(f.raw().profile, original);
+  assert.deepEqual(f.status().requestedPermissions, original);
+  assert.deepEqual(f.status().permissionGroups.map(({status, scopeStates, missingScopes, ...value}) => value), original.groups);
+  f.state.verify = undefined;
+  f.retry();
+  await until(() => f.status().state, 'connected'); await settledCheck(f);
+  assert.equal(f.state.sdk.length, 1);
+  const next = f.registration.start('w', 'e2', 'u', 'new-profile-operation');
+  assert.equal(next.registration.profileVersion, 'synthetic-grouped-v2');
+  assert.deepEqual(next.registration.requestedPermissions, f.profile);
+  assert.ok(f.state.sdk[1].input.addons.scopes.tenant.includes('synthetic:new_baseline:read'));
+});
+
+test('legacy records without profile keep the original fourteen requirements after upgrade', async t => {
+  const f = fixture(t);
+  f.state.verify = appId => { const result = verified(appId, f.state.clock); inventory(result)[0].status = 'denied'; return result; };
+  f.start(); f.state.sdk[0].resolve({...credentials});
+  await until(() => f.status().state, 'needs_attention'); await settledCheck(f);
+  const historical = f.raw();
+  delete historical.profile; // Only emulate the pre-profile serialized record format.
+  f.store.run('UPDATE feishu_app_registrations SET record_json=? WHERE id=?', JSON.stringify(historical), historical.id);
+  f.profile = groupedProfile();
+  f.profile.version = 'synthetic-upgraded-default';
+  f.profile.groups[0].scopes.push('synthetic:added_requirement:read');
+  f.profile.scopes.push('synthetic:added_requirement:read');
+  f.restart();
+  assert.equal(f.status().profileVersion, 'conversation-directory-v1');
+  assert.equal(f.status().requestedPermissions.version, 'conversation-directory-v1');
+  assert.deepEqual(f.status().requestedPermissions.scopes, requiredScopes);
+  assert.deepEqual(f.status().requestedPermissions.userScopes, []);
+  assert.deepEqual(f.status().requestedPermissions.events, requiredEvents);
+  assert.deepEqual(f.status().permissionGroups.flatMap(value => value.scopes), requiredScopes);
+  f.state.verify = undefined; f.retry();
+  await until(() => f.status().state, 'connected'); await settledCheck(f);
+  assert.equal(f.state.sdk.length, 1);
+  assertPrivate(f);
+});
+
+test('automatic cooldown and profile survive restart without a background provider call', async t => {
+  const f = fixture(t, {profile: groupedProfile()});
+  f.state.verify = appId => { const result = verified(appId, f.state.clock); inventory(result)[0].status = 'denied'; return result; };
+  f.start(); f.state.sdk[0].resolve({...credentials});
+  await until(() => f.status().state, 'needs_attention'); await settledCheck(f);
+  const schedule = f.status().autoCheck.nextCheckAt, before = f.state.verification.length;
+  f.restart();
+  assert.equal(f.status().autoCheck.nextCheckAt, schedule);
+  assert.equal(f.status().profileVersion, 'synthetic-grouped-v1');
+  assert.equal(f.status().autoCheck.inProgress, false);
+  f.state.clock = schedule + 60_000;
+  for (let i = 0; i < 5; i++) { f.status(); await tick(); }
+  assert.equal(f.state.verification.length, before);
+  f.retry(true); await settledCheck(f);
+  assert.equal(f.state.verification.length, before + 1);
+  assert.equal(f.state.sdk.length, 1);
+});
+
+for (const change of ['role-revoked', 'employee-disabled', 'channel-disabled', 'different-app', 'credentials-rotated']) {
+  test(`connected refresh fences ${change} during an in-flight scope read`, async t => {
+    const f = fixture(t, {profile: groupedProfile()});
+    f.start(); await accept(f); await settledCheck(f);
+    const gate = deferred();
+    const calls = installInventoryFetch(f, async () => { await gate.promise; return optionalRows({tenant: 'granted', user: 'granted'}); });
+    f.retry();
+    await until(() => calls.filter(path => path.endsWith('/scopes')).length, 1);
+    const before = f.connection();
+    if (change === 'role-revoked') f.store.run("UPDATE members SET role='member' WHERE id='m'");
+    if (change === 'employee-disabled') f.store.run("UPDATE entities SET lifecycle_enabled=0 WHERE id='e'");
+    if (change === 'channel-disabled') f.channels.settings('w', 'e', 'feishu', 'u', {enabled: false, expectedRevision: before.revision});
+    if (change === 'different-app' || change === 'credentials-rotated') {
+      const replacementService = new EmployeeChannelService(f.repository, {...f.options, verifyApplication: async (_provider, appId) => verified(appId, f.state.clock)});
+      await replacementService.save('w', 'e', 'feishu', 'u', {appId: change === 'different-app' ? 'cli_replacement' : credentials.client_id, appSecret: 'synthetic-replacement', expectedRevision: before.revision, ...(change === 'different-app' ? {replaceSource: true} : {})});
+    }
+    const current = f.connection();
+    gate.resolve(); await settledCheck(f);
+    assert.notEqual(group(f, 'extended').status, 'granted');
+    assert.deepEqual(f.connection(), current);
+    assert.equal(f.state.sdk.length, 1);
+    assertPrivate(f);
+  });
+}
+
+test('closing during connected optional refresh drops late results and restart recovers its read-only check', async t => {
+  const f = fixture(t, {profile: groupedProfile()});
+  f.start(); await accept(f); await settledCheck(f);
+  const before = f.connection(), gate = deferred();
+  const calls = installInventoryFetch(f, async () => { await gate.promise; return optionalRows({tenant: 'granted', user: 'granted'}); });
+  f.retry();
+  await until(() => calls.filter(path => path.endsWith('/scopes')).length, 1);
+  f.restart();
+  assert.equal(f.status().autoCheck.inProgress, false);
+  gate.resolve(); await tick(); await tick();
+  assert.notEqual(group(f, 'extended').status, 'granted');
+  assert.deepEqual(f.connection(), before);
+  installInventoryFetch(f, () => optionalRows({tenant: 'granted', user: 'granted'}));
+  f.retry(); await settledCheck(f);
+  assert.equal(group(f, 'extended').status, 'granted');
+  assert.deepEqual(f.connection(), before);
+  assert.equal(f.state.sdk.length, 1);
+  assertPrivate(f);
+});
+
+for (const change of ['role-revoked', 'employee-disabled', 'channel-disabled', 'different-app']) {
+  test(`automatic and manual checks refuse ${change} before provider access`, async t => {
+    const f = fixture(t, {profile: groupedProfile()});
+    f.start(); await accept(f); await settledCheck(f);
+    const before = f.connection();
+    if (change === 'role-revoked') f.store.run("UPDATE members SET role='member' WHERE id='m'");
+    if (change === 'employee-disabled') f.store.run("UPDATE entities SET lifecycle_enabled=0 WHERE id='e'");
+    if (change === 'channel-disabled') f.channels.settings('w', 'e', 'feishu', 'u', {enabled: false, expectedRevision: before.revision});
+    if (change === 'different-app') await f.channels.save('w', 'e', 'feishu', 'u', {appId: 'cli_changed_before_check', appSecret: 'synthetic-new-secret', expectedRevision: before.revision, replaceSource: true});
+    const current = f.connection(), calls = installInventoryFetch(f);
+    assert.equal(f.status().autoCheck.eligible, false);
+    f.state.clock += 120_000;
+    for (const automatic of [true, false]) {
+      try { f.retry(automatic); }
+      catch (error) { assert.ok(error instanceof EmployeeChannelError); }
+      await tick();
+    }
+    assert.equal(calls.length, 0);
+    assert.deepEqual(f.connection(), current);
+    assert.equal(f.state.sdk.length, 1);
+  });
+}
+
+test('connected inventory errors are redacted, preserve channel configuration and remain unknown', async t => {
+  const f = fixture(t, {profile: groupedProfile()});
+  f.start(); await accept(f); await settledCheck(f);
+  const before = f.connection();
+  installInventoryFetch(f, () => { throw new Error(secret + ' ' + verificationUrl); });
+  f.retry(); await settledCheck(f);
+  assert.equal(f.status().state, 'connected');
+  assert.equal(group(f, 'extended').status, 'unknown');
+  assert.equal(group(f, 'user-extension').status, 'unknown');
+  assert.deepEqual(f.connection(), before);
+  assert.equal(f.state.sdk.length, 1);
+  assertPrivate(f);
+});
+
+test('connected inventory authentication failure pauses automatic retries until an explicit successful check', async t => {
+  const f = fixture(t, {profile: groupedProfile()});
+  f.start(); await accept(f); await settledCheck(f);
+  const before = f.connection();
+  const calls = installInventoryFetch(f, () => optionalRows({tenant: 'granted', user: 'granted'}));
+  const fetch = f.options.fetch;
+  let rejectInventory = true;
+  f.options.fetch = async (url, init) => {
+    if (rejectInventory && new URL(url).pathname.endsWith('/scopes')) {
+      calls.push(new URL(url).pathname);
+      return new Response(JSON.stringify({code: 99991663, msg: secret}), {status: 401, headers: {'content-type': 'application/json'}});
+    }
+    return fetch(url, init);
+  };
+  f.retry(); await settledCheck(f);
+  assert.equal(f.status().state, 'connected');
+  assert.equal(f.status().error, 'authentication_failed');
+  assert.equal(f.status().validation.checks.find(check => check.id === 'scope_inventory').reason, 'authentication');
+  assert.equal(f.status().autoCheck.eligible, false);
+  assert.equal(group(f, 'extended').status, 'unknown');
+  assert.deepEqual(f.connection(), before);
+  const count = calls.length;
+  f.state.clock += 120_000;
+  f.retry(true); await settledCheck(f);
+  assert.equal(calls.length, count, 'automatic retry must not repeat a known authentication failure');
+  rejectInventory = false;
+  f.retry(); await settledCheck(f);
+  assert.equal(f.status().error, undefined);
+  assert.ok(f.status().permissionGroups.every(value => value.status === 'granted'));
+  assert.deepEqual(f.connection(), before);
+  assertPrivate(f);
+});

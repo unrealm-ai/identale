@@ -14,11 +14,11 @@ const window = new Window({ url: 'http://127.0.0.1:5173/' });
 for (const name of ['window', 'document', 'navigator', 'location', 'history', 'localStorage', 'Node', 'ShadowRoot', 'Document', 'Element', 'HTMLElement', 'SVGElement', 'HTMLDialogElement', 'Event', 'MouseEvent', 'KeyboardEvent', 'PointerEvent', 'FocusEvent', 'InputEvent', 'Image', 'HTMLInputElement', 'HTMLTextAreaElement', 'getComputedStyle', 'MutationObserver', 'ResizeObserver', 'requestAnimationFrame', 'cancelAnimationFrame']) Object.defineProperty(globalThis, name, { value: name === 'window' ? window : window[name], configurable: true });
 const { createApp, h, reactive, nextTick } = await import('vue');
 const bundle = await mkdtemp(resolve('apps/web/.channel-validation-ui-test-'));
-const paths = { registration: 'apps/web/src/features/employees/FeishuRegistration.vue' };
+const paths = { registration: 'apps/web/src/features/employees/FeishuRegistration.vue', qrFailure: 'apps/web/src/features/employees/FeishuRegistrationQr.vue' };
 const components = {};
 for (const [name, path] of Object.entries(paths)) {
   const outfile = join(bundle, `${name}.mjs`);
-  await build({ entryPoints: [path], outfile, bundle: true, platform: 'node', format: 'esm', external: ['vue', 'naive-ui'], plugins: [{ name: 'vue-sfc', setup(builder) { builder.onLoad({ filter: /\.vue$/ }, async ({ path }) => { const { descriptor } = parse(await readFile(path, 'utf8'), { filename: path }); return { contents: compileScript(descriptor, { id: path, inlineTemplate: true, fs: { fileExists: existsSync, readFile: file => readFileSync(file, 'utf8') } }).content, loader: 'ts', resolveDir: resolve(path, '..') }; }); } }] });
+  await build({ entryPoints: [path], outfile, bundle: true, platform: 'node', format: 'esm', external: ['vue', 'naive-ui'], plugins: [{ name: 'vue-sfc', setup(builder) { builder.onLoad({ filter: /\.vue$/ }, async ({ path }) => { let source = await readFile(path, 'utf8'); if (name === 'qrFailure') source = source.replace("import { NQrCode } from 'naive-ui';", "const NQrCode = { render() { throw new Error('Synthetic QR encoding failure'); } };"); const { descriptor } = parse(source, { filename: path }); return { contents: compileScript(descriptor, { id: path, inlineTemplate: true, fs: { fileExists: existsSync, readFile: file => readFileSync(file, 'utf8') } }).content, loader: 'ts', resolveDir: resolve(path, '..') }; }); } }] });
   components[name] = (await import(pathToFileURL(outfile).href)).default;
 }
 test.after(async () => { await rm(bundle, { recursive: true, force: true }); await window.happyDOM.close(); });
@@ -161,4 +161,126 @@ test('stopped registrations warn about provider-side creation before offering an
     assert.match(text(), /停止等待不代表撤销飞书侧操作/); assert.match(text(), /避免重复创建应用/);
   }
   assert.ok(env.requests.every(r => r.method === 'GET'));
+});
+
+const autoState = (state = 'needs_attention', extra = {}) => envelope(state, { credentialSaved: true, appId: 'cli_synthetic', autoCheck: { eligible: true, inProgress: false, nextCheckAt: Date.now() }, ...extra });
+const groupResult = (id, required, identity, status) => ({ id, label: `服务端权限组 ${id}`, required, identity, scopes: [`synthetic:${id}`], note: '服务端说明', status, missingScopes: status === 'missing' ? [`synthetic:${id}`] : [], scopeStates: [{ scope: `synthetic:${id}`, status }] });
+
+test('approval pending automatically retries saved credentials when due and becomes connected', async t => {
+  const env = await mount(t, 'registration', { base, active: true }, async req => req.method === 'GET' ? autoState() : autoState('connected', { autoCheck: { eligible: false, inProgress: false, nextCheckAt: null } }));
+  await until(() => text().includes('基础检查通过，已启用渠道'));
+  const mutation = env.requests.find(r => r.method === 'POST'); assert.equal(mutation.url, `/api${base}/channels/feishu/registration/retry`);
+  assert.deepEqual(mutation.body, { id: 'synthetic-registration', automatic: true });
+  assert.equal(env.requests.filter(r => r.method === 'POST').length, 1);
+});
+
+test('basic completion and incomplete extension groups have independent authorization status including personal OAuth', async t => {
+  await mount(t, 'registration', { base, active: true }, async () => autoState('connected', { permissionGroups: [groupResult('basic', true, 'tenant', 'granted'), groupResult('extension', false, 'tenant', 'missing'), groupResult('personal', false, 'user', 'unknown')], autoCheck: { eligible: false, inProgress: false, nextCheckAt: null } }));
+  assert.match(text(), /基础检查通过，已启用渠道/);
+  const groups = [...document.querySelectorAll('.registration-permission-group')]; assert.equal(groups.length, 3);
+  assert.match(groups[0].textContent, /基础 · 必需.*授权已生效/); assert.match(groups[1].textContent, /扩展 · 独立授权.*授权未齐/);
+  assert.match(groups[2].textContent, /个人 OAuth 授权/); assert.match(text(), /授权生效不代表相关业务功能已实现/);
+  assert.ok(button('重新检查已保存的应用'));
+});
+
+test('inactive and disabled pages issue no automatic requests, resume with GET, and fence late old-employee checks', async t => {
+  let release; const held = new Promise(resolve => { release = resolve; }); t.after(() => release()); let hold = false;
+  const env = await mount(t, 'registration', { base, active: true }, async req => { if (hold && req.method === 'POST') { await held; return autoState('connected'); } return autoState(); });
+  env.props.disabled = true; await flush(); const stopped = env.requests.length;
+  await new Promise(resolve => setTimeout(resolve, 650)); assert.equal(env.requests.length, stopped);
+  env.props.disabled = false; await flush(); assert.equal(env.requests.at(-1).method, 'GET');
+  env.props.active = false; await flush(); const exited = env.requests.length;
+  await new Promise(resolve => setTimeout(resolve, 650)); assert.equal(env.requests.length, exited);
+  hold = true; env.props.active = true; await until(() => env.requests.some(r => r.method === 'POST'));
+  env.props.base = '/workspaces/synthetic-workspace/entities/other'; env.props.disabled = true; await flush(); release(); await flush();
+  assert.doesNotMatch(text(), /基础检查通过，已启用渠道/); assert.ok(env.requests.every(r => !r.url.endsWith('/cancel')));
+});
+
+test('hidden tabs stop scheduled checks and visible tabs fetch before continuing', async t => {
+  t.after(() => { delete document.hidden; });
+  const env = await mount(t, 'registration', { base, active: true }, async () => autoState());
+  Object.defineProperty(document, 'hidden', { configurable: true, value: true }); document.dispatchEvent(new Event('visibilitychange'));
+  await new Promise(resolve => setTimeout(resolve, 650)); assert.equal(env.requests.length, 1);
+  Object.defineProperty(document, 'hidden', { configurable: true, value: false }); document.dispatchEvent(new Event('visibilitychange')); await flush();
+  assert.equal(env.requests[1].method, 'GET'); env.props.active = false; await flush();
+  assert.ok(env.requests.every(r => r.method === 'GET'));
+});
+
+test('transient read errors recover by GET but forbidden/not-found/session failures halt automatic work', async t => {
+  for (const status of [401, 403, 404]) {
+    const env = await mount(t, 'registration', { base, active: true }, async () => ({ status, data: { error: 'synthetic_denied' } }));
+    await new Promise(resolve => setTimeout(resolve, 2100)); assert.equal(env.requests.length, 1); env.app.unmount();
+  }
+  let calls = 0;
+  const env = await mount(t, 'registration', { base, active: true }, async () => { if (++calls === 1) throw new Error('Synthetic transient failure'); return envelope(); });
+  await new Promise(resolve => setTimeout(resolve, 2100)); assert.equal(env.requests.length, 2); assert.ok(env.requests.every(r => r.method === 'GET'));
+});
+
+test('two page instances honor server in-progress state without duplicate automatic checks or app creation', async t => {
+  let state = autoState('connected', { autoCheck: { eligible: true, inProgress: true, nextCheckAt: null } });
+  const env = await mount(t, 'registration', { base, active: true }, async () => state);
+  const other = document.createElement('div'); document.body.append(other); const app = createApp({ render: () => h(components.registration, { base, active: true }) }); app.mount(other); t.after(() => app.unmount());
+  await new Promise(resolve => setTimeout(resolve, 1900)); assert.ok(env.requests.length >= 4); assert.ok(env.requests.every(r => r.method === 'GET'));
+  state = autoState('connected', { autoCheck: { eligible: false, inProgress: false, nextCheckAt: null } });
+});
+
+test('branded QR card identifies identale, uses existing logo and 192px QR, and expires reactively', async t => {
+  await mount(t, 'registration', { base, active: true }, async () => envelope('awaiting_confirmation', { verificationUrl: 'https://accounts.feishu.cn/confirm', expiresAt: Date.now() + 700 }));
+  const card = document.querySelector('[aria-label="identale 发起的飞书应用授权卡片"]'); assert.ok(card);
+  assert.match(card.textContent, /identale 发起.*飞书扫码创建应用/s); assert.match(card.textContent, /不是飞书官方页面/);
+  assert.equal(card.querySelector('img').getAttribute('src'), '/channel-logos/feishu.png'); assert.ok(card.querySelector('.scan-qr-frame'));
+  assert.match(card.querySelector('.n-qr-code').getAttribute('style'), /192px/); assert.ok(card.querySelector('[role="timer"]'));
+  await new Promise(resolve => setTimeout(resolve, 1100)); assert.equal(card.querySelector('a'), null); assert.match(card.textContent, /二维码已过期/); assert.ok(card.querySelector('.scan-qr-placeholder'));
+});
+
+test('long official URLs keep full data and a usable official link while degrading safely without dense QR', async t => {
+  const official = `https://accounts.feishu.cn/confirm?description=${'synthetic'.repeat(400)}`;
+  await mount(t, 'registration', { base, active: true }, async () => envelope('awaiting_confirmation', { verificationUrl: official }));
+  assert.match(text(), /确认链接较长/); assert.equal(document.querySelector('.n-qr-code'), null);
+  assert.equal([...document.querySelectorAll('a')].find(a => a.textContent.includes('打开飞书确认页')).href, official);
+  assert.ok(button('取消等待'));
+});
+
+test('QR encoder exception is contained and offers fallback instead of breaking the page', async t => {
+  await mount(t, 'qrFailure', { value: 'https://accounts.feishu.cn/confirm?synthetic=true' });
+  await until(() => text().includes('二维码生成失败')); assert.match(text(), /官方确认链接继续/);
+});
+
+test('existing registration displays its requested manifest snapshot instead of the newer creation default', async t => {
+  const oldManifest = { version: 'synthetic-v1', scopes: ['synthetic:old'], events: ['synthetic.old_event'], userScopes: [], groups: [{ id: 'old', label: '旧申请组', required: true, identity: 'tenant', scopes: ['synthetic:old'] }] };
+  let state = envelope('needs_attention', { credentialSaved: true, requestedPermissions: oldManifest, profileVersion: oldManifest.version });
+  state.permissions = { version: 'synthetic-v2', scopes: ['synthetic:new'], events: ['synthetic.new_event'], groups: [{ id: 'new', label: '新版新建组', required: true, identity: 'tenant', scopes: ['synthetic:new'] }] };
+  const env = await mount(t, 'registration', { base, active: true }, async () => state);
+  assert.match(document.querySelector('.registration-manifest').textContent, /本次申请权限与事件（synthetic-v1）/);
+  assert.match(text(), /synthetic:old/); assert.doesNotMatch(text(), /synthetic:new|新版新建组/);
+  state = { ...state, registration: registration('cancelled', { requestedPermissions: oldManifest, permissionGroups: [groupResult('old', true, 'tenant', 'missing')] }) };
+  await click('刷新创建状态'); assert.match(document.querySelector('.registration-manifest').textContent, /新建时申请权限与事件（synthetic-v2）/);
+  assert.match(text(), /synthetic:new/); assert.doesNotMatch(document.querySelector('.registration-permission-groups').textContent, /旧申请组|synthetic:old/);
+  assert.ok(env.requests.every(r => r.method === 'GET'));
+});
+
+test('missing historical manifest is disclosed without substituting current default scopes', async t => {
+  const value = envelope('needs_attention', { credentialSaved: true, permissionGroups: [groupResult('old', true, 'tenant', 'missing')] });
+  value.permissions = { version: 'new-default', scopes: ['synthetic:new_default'], events: [] };
+  await mount(t, 'registration', { base, active: true }, async () => value);
+  assert.match(text(), /本次申请清单暂不可用/); assert.match(text(), /synthetic:old/);
+  assert.doesNotMatch(text(), /synthetic:new_default|new-default/); assert.equal(document.querySelector('.registration-manifest'), null);
+});
+
+test('medium-length official confirmation URLs keep a larger 320px QR and unchanged fallback link', async t => {
+  const official = `https://accounts.feishu.cn/confirm?description=${'synthetic'.repeat(180)}`;
+  await mount(t, 'registration', { base, active: true }, async () => envelope('awaiting_confirmation', { verificationUrl: official }));
+  const qr = document.querySelector('.n-qr-code'); assert.ok(qr); assert.match(qr.getAttribute('style'), /320px/);
+  assert.equal(document.querySelector('.qr-fallback'), null);
+  assert.equal([...document.querySelectorAll('a')].find(a => a.textContent.includes('打开飞书确认页')).href, official);
+});
+
+test('server approval impact and unverified scope notes are visible without implying personal OAuth or granted access', async t => {
+  const group = { ...groupResult('approval_fixture', false, 'tenant', 'unknown'), label: '合成审批扩展', note: '高影响：应用身份可访问企业审批范围；当前相关功能尚未实现。', scopeNotes: { 'synthetic:approval_fixture': '官方 CLI 已声明，本租户与独立接口证据尚未补齐。' } };
+  const manifest = { version: 'synthetic-profile', scopes: group.scopes, userScopes: [], events: [], groups: [group] };
+  await mount(t, 'registration', { base, active: true }, async () => ({ ...envelope('needs_attention', { credentialSaved: true, requestedPermissions: manifest, permissionGroups: [group] }), permissions: manifest }));
+  const details = document.querySelector('.registration-permission-group'); assert.match(details.textContent, /高影响.*企业审批范围.*尚未实现/);
+  assert.match(details.querySelector('.scope-evidence-note').textContent, /官方 CLI 已声明.*本租户与独立接口证据尚未补齐/);
+  assert.match(details.textContent, /授权待确认/); assert.doesNotMatch(details.textContent, /授权已生效|个人 OAuth/);
+  assert.match(text(), /飞书可能忽略未识别权限.*未返回或未知不计为已授权/);
 });
