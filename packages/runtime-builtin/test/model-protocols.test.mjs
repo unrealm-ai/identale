@@ -8,6 +8,25 @@ function response(protocol,withTool=false){
  if(protocol==='openai_responses')return{status:'completed',output:withTool?[{type:'function_call',id:'fc_one',call_id:call.id,name:call.name,arguments:JSON.stringify(call.arguments)}]:[{type:'message',role:'assistant',content:[{type:'output_text',text:'Final fixture reply'}]}],usage:{input_tokens:7,output_tokens:3}};
  return{type:'message',role:'assistant',stop_reason:withTool?'tool_use':'end_turn',content:withTool?[{type:'tool_use',id:call.id,name:call.name,input:call.arguments}]:[{type:'text',text:'Final fixture reply'}],usage:{input_tokens:7,output_tokens:3}};
 }
+for(const protocol of protocols)for(const base of ['','/','/v1','/v1/'])test(`${protocol} canonicalizes ${base||'(origin)'} before resolving its exact credential destination`,async()=>{
+ const endpoint='https://fixture.invalid'+base,approved=endpoint.replace(/\/+$/,'');let resolutions=0,requests=0;
+ const client=new OpenAICompatibleModelClient({protocol,endpoint,model:'synthetic',secretRef:'profile'},async(ref,destination)=>{
+  resolutions++;assert.equal(ref,'profile');assert.equal(destination,approved);return 'synthetic-key';
+ },async(url,init)=>{requests++;assert.equal(url,modelProtocolEndpoint(approved,protocol));assert.equal(init.redirect,'error');return Response.json(response(protocol));});
+ assert.equal((await client.complete({messages:[{role:'user',content:'fixture'}],tools:[],maxOutputTokens:128,signal:new AbortController().signal})).text,'Final fixture reply');
+ assert.equal(resolutions,1);assert.equal(requests,1);
+});
+for(const protocol of protocols)test(`${protocol} still rejects a different host, port or API path before HTTP`,async()=>{
+ const approved='https://fixture.invalid';
+ for(const endpoint of ['https://other.invalid','https://fixture.invalid:8443','https://fixture.invalid/v1','https://fixture.invalid/custom']){
+  let resolutions=0,requests=0;
+  const client=new OpenAICompatibleModelClient({protocol,endpoint,model:'synthetic',secretRef:'profile'},async(_ref,destination)=>{
+   resolutions++;if(destination!==approved)throw Object.assign(Error('model_endpoint_changed'),{code:'model_endpoint_changed'});return 'synthetic-key';
+  },async()=>{requests++;return Response.json(response(protocol));});
+  await assert.rejects(client.complete({messages:[],tools:[],maxOutputTokens:128,signal:new AbortController().signal}),error=>error.diagnostic.category==='conflict'&&error.diagnostic.providerCode==='model_credential_unavailable');
+  assert.equal(resolutions,1);assert.equal(requests,0);
+ }
+});
 for(const protocol of protocols)test(protocol+' preserves image input, tool identity/results and final reply across a full two-request exchange',async()=>{
  const requests=[],client=new OpenAICompatibleModelClient({protocol,endpoint:'https://fixture.invalid/v1',model:'synthetic',secretRef:'profile',imageInput:true,readImage:async()=>({data:'AAAA',mediaType:'image/png'})},async()=> 'synthetic-key',async(url,init)=>{assert.equal(String(url),modelProtocolEndpoint('https://fixture.invalid/v1',protocol));assert.equal(init.redirect,'error');if(protocol==='anthropic_messages'){assert.equal(init.headers['x-api-key'],'synthetic-key');assert.equal(init.headers.authorization,undefined);}else assert.equal(init.headers.authorization,'Bearer synthetic-key');const body=JSON.parse(init.body);requests.push(body);return Response.json(response(protocol,requests.length===1));});
  const messages=[{role:'system',content:'Trusted policy'},{role:'user',content:'Inspect the shared image and query the task.',images:[{assetId:'allowed',version:'fixed'}]}],input={messages,tools:[tool],maxOutputTokens:256,signal:new AbortController().signal};

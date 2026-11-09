@@ -39,7 +39,9 @@ export class OpenAICompatibleModelClient implements ModelClientPort {
     const local=['127.0.0.1','localhost','[::1]'].includes(endpoint.hostname);
     const httpAllowed=endpoint.protocol==='http:'&&local&&config.allowLoopbackHttp===true;
     if((endpoint.protocol!=='https:'&&!httpAllowed) || endpoint.username || endpoint.password || endpoint.search || endpoint.hash || !config.model.trim() || !config.secretRef.trim()) throw new Error('HTTPS or explicitly enabled loopback HTTP model endpoint and secret reference required');
-    this.endpoint=endpoint.href;
+    // Match the saved/probed API base before the resolver checks its exact binding.
+    // URL.href adds '/' to a bare origin; this must not look like a new destination.
+    this.endpoint=endpoint.href.replace(/\/+$/,'');
     this.thinkingParameters=interactionThinkingParameters(config);
   }
   async complete(input: Parameters<ModelClientPort['complete']>[0],control?:Parameters<ModelClientPort['complete']>[1]): ReturnType<ModelClientPort['complete']> {

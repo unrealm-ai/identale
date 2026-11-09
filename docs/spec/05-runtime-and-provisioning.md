@@ -6,6 +6,15 @@
 
 local-pi 承载交互任务管理回调的完整平台链路尚未提供，不能因 Host 声明部分 interaction 能力就把它视为 builtin 的完整替代。
 
+### 模型 API 地址
+
+填写服务商提供的 API 基础地址，并选择对应协议。联通测试、保存配置和 builtin 交互在核对凭据绑定前使用一致的地址形式：解析 URL 后去掉末尾斜杠，因此只有域名的 `https://provider.example` 与 `https://provider.example/` 等价，不会因根路径斜杠不同导致凭据不可用。
+
+- Chat Completions 在基础地址后拼接 `/chat/completions`，Responses 拼接 `/responses`；两者都不自动补 `/v1`。如果服务商要求 `/v1`，须在基础地址中填写。
+- Anthropic Messages 使用 `/v1/messages`；基础地址末尾已有 `/v1` 时不会重复添加。
+
+地址规范化不放宽凭据的目标绑定。更换域名、端口或 API 基础路径仍按地址变更处理，须重新输入或清除 API Key；连接配置需重新测试后保存。联通测试通过只说明测试请求成功，不保证所有工具调用、流式执行和服务商扩展均兼容。
+
 ## 契约分层
 
 `packages/contracts` 定义准备、Session 和执行相关契约。`packages/application` 承载相应应用接口与用例；具体 HTTP、模型和 SDK 行为留在 Adapter。

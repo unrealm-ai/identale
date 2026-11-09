@@ -8,7 +8,7 @@
 | --- | --- |
 | 创建数字员工，绑定模型、能力包和使用范围 | [03 数字员工、角色与配置](03-agents-and-profiles.md) |
 | 查看执行进度、补充任务或处理人工确认 | [02 任务、人工继续与结果投递](02-tasks-events-and-delivery.md) |
-| 配置交互和后台执行所需的模型与资源 | [05 Runtime 与执行](05-runtime-and-provisioning.md) |
+| 配置模型协议、API 基础地址和交互 / 后台执行资源 | [05 Runtime 与执行](05-runtime-and-provisioning.md) |
 
 ## 接入渠道、管理会话权限与使用资料
 

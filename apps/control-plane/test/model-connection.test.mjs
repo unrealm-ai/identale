@@ -8,18 +8,19 @@ import Fastify from 'fastify';
 import {Store} from '../dist/store.js';
 import {ModelProfileService,registerModelProfileRoutes} from '../dist/model-profiles.js';
 import {OpenAICompatibleModelClient} from '@dentity/runtime-builtin';
+import {createServer as createPlatform} from '../dist/server.js';
 
 const secret='synthetic-local-provider-credential';
 const masterKey=Buffer.alloc(32,9);
 const code=expected=>error=>error.code===expected;
-async function setup(t){
+async function setup(t,base='/v1'){
  const requests=[],hooks={},provider=createServer(async(req,res)=>{
   if(req.url==='/redirect-target'){requests.push({redirectTarget:true});res.end('{}');return;}
   const chunks=[];for await(const chunk of req)chunks.push(chunk);
   const body=JSON.parse(Buffer.concat(chunks).toString('utf8'));
   requests.push({path:req.url,body,authorization:req.headers.authorization});
   if(hooks.beforeResponse)await hooks.beforeResponse();
-  if(req.url!=='/v1/chat/completions'){res.writeHead(404);res.end(secret);return;}
+  if(req.url!==base.replace(/\/+$/,'')+'/chat/completions'){res.writeHead(404);res.end(secret);return;}
   if(req.headers.authorization!==`Bearer ${secret}`){res.writeHead(401);res.end(secret);return;}
   if(body.model==='missing-model'||body.model==='incompatible'&&body.enable_thinking===false){res.writeHead(400);res.end(secret);return;}
   if(body.model==='redirect'){res.writeHead(307,{location:'/redirect-target'});res.end();return;}
@@ -29,7 +30,7 @@ async function setup(t){
   res.end(JSON.stringify({choices:[{finish_reason:'stop',message:{role:'assistant',content:'OK'}}],usage:{prompt_tokens:2,completion_tokens:1}}));
  });
  await new Promise(resolve=>provider.listen(0,'127.0.0.1',resolve));
- const endpoint=`http://127.0.0.1:${provider.address().port}/v1`;
+ const endpoint=`http://127.0.0.1:${provider.address().port}${base}`;
  const dir=mkdtempSync(join(tmpdir(),'dentity-connection-')),store=new Store(join(dir,'isolated.sqlite'));
  store.run("INSERT INTO users(id,username,display_name) VALUES('u','user','User')");
  store.run("INSERT INTO workspaces(id,name,created_by) VALUES('w','Workspace','u'),('other','Other','u')");
@@ -38,7 +39,7 @@ async function setup(t){
  const options={masterKey,allowLoopbackHttp:true},service=new ModelProfileService(store,options);
  const input={name:'Local synthetic model',provider:'openai-compatible',endpoint,modelId:'supported',apiKey:secret};
  t.after(async()=>{provider.closeAllConnections();await new Promise(resolve=>provider.close(resolve));store.close();rmSync(dir,{recursive:true,force:true});});
- return {service,store,input,requests,options,hooks};
+ return {service,store,input,requests,options,hooks,dir};
 }
 
 test('local connection probe checks fixed dual none parameters and unlocks atomic create plus bind',async t=>{
@@ -168,8 +169,8 @@ test('loopback HTTP still needs its flag; existing profiles survive disabled pol
  assert.deepEqual(store.one('SELECT * FROM model_catalog WHERE id=?',profile.id),before);
 });
 
-test('unlisted local model probes, saves and completes builtin inference through the resolved credential',async t=>{
- const {service,store,input,requests,options}=await setup(t),config={...input,bindEntityId:'e'};
+for(const base of ['','/','/v1','/v1/'])test(`base ${base||'(origin)'} probes, saves and completes builtin inference through the resolved credential`,async t=>{
+ const {service,store,input,requests,options}=await setup(t,base),config={...input,bindEntityId:'e'};
  const tested=await service.testConnection('w',null,'u',config);
  const profile=service.saveValidated('w',null,'u',{...config,connectionTestReceipt:tested.connectionTestReceipt});
  const restarted=new ModelProfileService(store,options);
@@ -180,5 +181,43 @@ test('unlisted local model probes, saves and completes builtin inference through
  });
  const result=await client.complete({messages:[{role:'user',content:'Synthetic inference'}],tools:[],maxOutputTokens:20,signal:new AbortController().signal});
  assert.equal(result.text,'OK');assert.deepEqual(result.usage,{inputTokens:2,outputTokens:1});assert.equal(requests.length,3);
- assert.ok(requests.every(request=>request.path==='/v1/chat/completions'&&request.authorization===`Bearer ${secret}`));
+ assert.equal(profile.endpoint,input.endpoint.replace(/\/+$/,''));
+ assert.ok(requests.every(request=>request.path===base.replace(/\/+$/,'')+'/chat/completions'&&request.authorization===`Bearer ${secret}`));
+});
+
+for(const base of ['','/','/v1','/v1/'])test(`base ${base||'(origin)'} completes a platform HTTP turn with the production credential binding`,async t=>{
+ const f=await setup(t,base),origin='http://127.0.0.1:15173';
+ const app=createPlatform({databasePath:join(f.dir,'platform.sqlite'),origin,pollIntervalMs:0,modelProfiles:f.options});
+ try {
+  await app.ready();
+  const call=(method,url,payload,cookie)=>app.inject({method,url,...(payload===undefined?{}:{payload}),headers:{origin,...(cookie?{cookie}:{})}});
+  const registered=await call('POST','/api/auth/register',{username:'endpoint-user',password:'Synthetic endpoint test password 2026!'});
+  assert.equal(registered.statusCode,201,registered.body);
+  const cookie=registered.headers['set-cookie'].split(';')[0],workspace=`/api/workspaces/${registered.json().workspace.id}`;
+  const employee=await call('POST',workspace+'/entities',{name:'Endpoint fixture',ownWebUse:true},cookie);
+  assert.equal(employee.statusCode,200,employee.body);
+  const entityId=employee.json().entity.id,config={...f.input,bindEntityId:entityId};
+  const tested=await call('POST',workspace+'/model-profiles/test-connection',config,cookie);
+  assert.equal(tested.statusCode,200,tested.body);
+  const saved=await call('POST',workspace+'/model-profiles',{...config,connectionTestReceipt:tested.json().connectionTestReceipt},cookie);
+  assert.equal(saved.statusCode,200,saved.body);
+  assert.equal(saved.json().endpoint,f.input.endpoint.replace(/\/+$/,''));
+  const conversations=`${workspace}/entities/${entityId}/conversations`;
+  const opened=await call('POST',conversations,{operationId:'endpoint-conversation'},cookie);
+  assert.ok([200,201].includes(opened.statusCode),opened.body);
+  const turns=`${conversations}/${opened.json().conversation.id}/turns`;
+  const started=await call('POST',turns,{operationId:'endpoint-turn',text:'Synthetic inference'},cookie);
+  assert.equal(started.statusCode,202,started.body);
+  let turn;
+  const deadline=Date.now()+5000;
+  do {
+   const state=await call('GET',`${turns}/${started.json().turn.id}`,undefined,cookie);
+   assert.equal(state.statusCode,200,state.body);turn=state.json().turn;
+   if(['succeeded','failed','unknown','canceled'].includes(turn.status))break;
+   await new Promise(resolve=>setTimeout(resolve,10));
+  } while(Date.now()<deadline);
+  assert.equal(turn.status,'succeeded',JSON.stringify(turn));assert.equal(turn.text,'OK');
+  assert.equal(f.requests.length,3);
+  assert.ok(f.requests.every(request=>request.path===base.replace(/\/+$/,'')+'/chat/completions'&&request.authorization===`Bearer ${secret}`));
+ } finally { await app.close(); }
 });
