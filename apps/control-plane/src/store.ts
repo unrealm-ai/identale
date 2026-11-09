@@ -56,6 +56,7 @@ export class Store {
             this.db.exec(statement);
           }
         } finally {canonical.close();}
+        if(options.role==='platform')this.migrateInvitationReuse();
         if(options.role==='runtime'){migrateHumanRuns(raw);migrateHumanRequestInput(raw);migrateTaskTitles(raw);}
         this.run('INSERT OR IGNORE INTO builtin_storage_metadata VALUES(1,?)', randomUUID());
         this.databaseId = this.one<{database_id:string}>('SELECT database_id FROM builtin_storage_metadata WHERE id=1')!.database_id;
@@ -91,6 +92,7 @@ export class Store {
     this.db.exec('CREATE TABLE IF NOT EXISTS builtin_storage_metadata(id INTEGER PRIMARY KEY CHECK(id=1), database_id TEXT NOT NULL)');
     this.run('INSERT OR IGNORE INTO builtin_storage_metadata VALUES(1,?)',randomUUID());
     this.databaseId=this.one<{database_id:string}>('SELECT database_id FROM builtin_storage_metadata WHERE id=1')!.database_id;
+    this.migrateInvitationReuse();
     if (!this.all<{name:string}>('PRAGMA table_info(entities)').some(column => column.name === 'lifecycle_enabled')) this.db.exec('ALTER TABLE entities ADD COLUMN lifecycle_enabled INTEGER NOT NULL DEFAULT 1 CHECK(lifecycle_enabled IN (0,1))');
     if (!this.all<{name:string}>('PRAGMA table_info(entities)').some(column => column.name === 'lifecycle_revision')) this.db.exec('ALTER TABLE entities ADD COLUMN lifecycle_revision INTEGER NOT NULL DEFAULT 1');
     if (!this.all<{name:string}>('PRAGMA table_info(entities)').some(column => column.name === 'execution_thinking_level')) this.db.exec("ALTER TABLE entities ADD COLUMN execution_thinking_level TEXT NOT NULL DEFAULT 'medium' CHECK(execution_thinking_level IN ('none','low','medium','high'))");
@@ -111,6 +113,12 @@ export class Store {
       CREATE TABLE IF NOT EXISTS human_requests(request_id TEXT PRIMARY KEY,workspace_id TEXT NOT NULL,entity_id TEXT NOT NULL,task_id TEXT NOT NULL REFERENCES tasks(id),source_run_id TEXT NOT NULL UNIQUE REFERENCES runs(id),session_id TEXT NOT NULL,question_json TEXT NOT NULL,question_digest TEXT NOT NULL,input_revision INTEGER NOT NULL DEFAULT 1,content_version INTEGER NOT NULL,safe INTEGER NOT NULL DEFAULT 0,checkpoint_ref TEXT,status TEXT NOT NULL DEFAULT 'waiting',target_json TEXT,target_conversation_id TEXT,notification_status TEXT NOT NULL DEFAULT 'pending',notification_error TEXT,response_json TEXT,response_digest TEXT,continuation_run_id TEXT UNIQUE REFERENCES runs(id),created_at INTEGER NOT NULL,updated_at INTEGER NOT NULL);
       CREATE TABLE IF NOT EXISTS human_response_operations(operation_id TEXT PRIMARY KEY,actor_digest TEXT NOT NULL,request_hash TEXT NOT NULL,result_json TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS human_response_messages(request_id TEXT NOT NULL REFERENCES human_requests(request_id),message_id TEXT NOT NULL,actor_json TEXT NOT NULL,text TEXT NOT NULL,candidate_json TEXT NOT NULL,created_at INTEGER NOT NULL,PRIMARY KEY(request_id,message_id));`);migrateHumanRequestInput(this.db);
+  }
+  private migrateInvitationReuse(): void {
+    this.transaction(() => {
+      if (this.all<{name: string}>('PRAGMA table_info(invitations)').some(column => column.name === 'reusable')) return;
+      this.db.exec('ALTER TABLE invitations ADD COLUMN reusable INTEGER NOT NULL DEFAULT 0 CHECK(reusable IN (0,1))');
+    });
   }
   one<T>(sql: string, ...args: SQLInputValue[]): T | undefined { return this.db.prepare(sql).get(...args) as T | undefined; }
   all<T>(sql: string, ...args: SQLInputValue[]): T[] { return this.db.prepare(sql).all(...args) as T[]; }

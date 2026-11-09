@@ -194,10 +194,31 @@ test('invitation registration joins target without default workspace and member 
   const env = await setup(t); const owner = await env.register('invite-owner');
   const invite = (await env.call('POST', `/api/workspaces/${owner.workspace.id}/invitations`, {})).json(); env.setCookie('');
   await env.mount('/#invite=' + encodeURIComponent(invite.token));
+  assert.doesNotMatch(document.querySelector('.invite-context').textContent, /仅限一次/);
   assert.equal(location.hash, ''); await click('注册账号'); input('input[name=username]', 'invited-member'); input('input[name=password]', password); await submit('.auth-panel form');
   await until(() => !!document.querySelector('.app-nav'));
   assert.equal(env.db.prepare('SELECT count(*) n FROM workspaces').get().n, 1);
   assert.ok(document.querySelector('.employee-wizard'));assert.ok(document.querySelector('input[aria-label="员工名称"]'));
+});
+
+test('invitation dialog uses whole days and generates a reusable link at the 180-day limit', async t => {
+  const env = await setup(t); const owner = await env.register('invite-dialog-owner');
+  await env.mount(); await click('暂时退出');
+  await click('设置'); await click('成员'); await click('邀请成员');
+  const selector = 'input[aria-label="有效期（天）"]';
+  const expiry = document.querySelector(selector);
+  assert.equal(expiry.value, '2');
+  assert.ok(button('生成邀请链接'));
+  assert.equal(document.querySelectorAll('.workspace-dialog form .n-form-item').length, 2);
+  expiry.focus();
+  input(selector, '180');
+  expiry.blur();
+  await flush();
+  await submit('.workspace-dialog form');
+  await until(() => !!document.querySelector('input[aria-label="邀请链接"]'));
+  const created = env.requests.find(r => r.method === 'POST' && r.url === `/api/workspaces/${owner.workspace.id}/invitations`);
+  assert.deepEqual(created.body, { role: 'member', expiresInHours: 180 * 24 });
+  assert.match(document.querySelector('.invite-result').textContent, /有效期内可供多人加入/);
 });
 
 test('accept invitation after auth expires preserves invitation through login and registration choice', async t => {
