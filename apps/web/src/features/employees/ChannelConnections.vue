@@ -4,6 +4,8 @@ import { computed, onUnmounted, ref, watch } from 'vue';
 import { NAlert, NButton, NCard, NCheckbox, NForm, NFormItem, NInput, NSpace, NTag, NPopconfirm } from 'naive-ui';
 import { api, ApiError, errorMessage } from '../../shared/api';
 import ChannelBrand from './ChannelBrand.vue';
+import WeComRegistration from './WeComRegistration.vue';
+import type { WeComRegistrationCredentials } from './wecom-registration';
 import ChannelCapabilities from './ChannelCapabilities.vue';
 import ChannelAccessSettings from './ChannelAccessSettings.vue';
 import GroupSharingSettings from './GroupSharingSettings.vue';
@@ -14,15 +16,17 @@ import ChannelValidationReport from './ChannelValidationReport.vue';
 import { channelApi, ChannelValidationFailure, type ChannelValidation } from './channel-validation';
 import { directoryStatusLabel } from '../directory/types';
 import type { DirectoryConnection, DirectoryProvider, DirectoryIdentityEvidence } from '../directory/types';
-const props = defineProps<{ base: string; canManage: boolean; disabled?: boolean }>();
+const props = withDefaults(defineProps<{ base: string; canManage: boolean; disabled?: boolean; active?: boolean }>(), { active: true });
 const emit = defineEmits<{ busyChanged: [value: boolean]; sessionExpired: []; changed: [];rebound:[];dirtyChanged:[boolean] }>();
-const sharingBusy=ref(false),sharingDirty=ref(false);
+const sharingBusy=ref(false),sharingDirty=ref(false),registrationBusy=ref(false);
 const sharingEditor=ref<InstanceType<typeof GroupSharingSettings>|null>(null);
 const selectedConnection=ref(false),policyBusy=ref(false),policyDirty=ref(false),confirmPolicySwitch=ref(false);
 const policyEditor=ref<InstanceType<typeof ChannelAccessSettings>|null>(null);
 let pendingPolicySwitch:(()=>void)|undefined;
-const channelLocked=computed(()=>!!props.disabled||busy.value||directoryBusy.value||policyBusy.value||sharingBusy.value);
+const channelLocked=computed(()=>!!props.disabled||busy.value||directoryBusy.value||policyBusy.value||sharingBusy.value||registrationBusy.value);
 const unsaved=computed(()=>policyDirty.value||sharingDirty.value||contextDirty.value||!!appSecret.value||!!appId.value&&appId.value!==(connection.value?.appId??''));
+const registrationBlocked=computed(()=>props.active===false||!!props.disabled||busy.value||directoryBusy.value||policyBusy.value||sharingBusy.value||!loaded.value||unsaved.value);
+function receiveRegistration(credentials:WeComRegistrationCredentials){if(!props.canManage||provider.value!=='wecom'||!selectedConnection.value||registrationBlocked.value)return;appId.value=credentials.botId;appSecret.value=credentials.secret;report.value=null;notice.value='';error.value='';}
 function requestPolicySwitch(action:()=>void){if(channelLocked.value)return;if(unsaved.value){pendingPolicySwitch=action;confirmPolicySwitch.value=true;return;}action();}
 function discardPolicySwitch(){if(channelLocked.value)return;policyEditor.value?.cancel();sharingEditor.value?.discard();historyEnabled.value=connection.value?.context?.groupListenEnabled??false;keywordText.value=(connection.value?.context?.groupTriggerKeywords??[]).join('\n');appId.value=connection.value?.appId??'';clearSecrets();replaceSource.value=false;confirmPolicySwitch.value=false;pendingPolicySwitch?.();pendingPolicySwitch=undefined;}
 function guardProvider(value:DirectoryProvider){if(channelLocked.value)return false;if(unsaved.value){requestPolicySwitch(()=>provider.value=value);return false;}return true;}
@@ -50,7 +54,7 @@ const directoryBusy = ref(false);
 const report = ref<ChannelValidation | null>(null);
 const busy = ref(false), loaded = ref(false), error = ref(''), notice = ref('');
 let controller = new AbortController();
-watch(() => busy.value || directoryBusy.value || policyBusy.value || sharingBusy.value, value => emit('busyChanged', value), { flush: 'sync' });
+watch(() => busy.value || directoryBusy.value || policyBusy.value || sharingBusy.value || registrationBusy.value, value => emit('busyChanged', value), { flush: 'sync' });
 watch(unsaved,v=>emit('dirtyChanged',v),{flush:'sync'});
 function clearSecrets() { appSecret.value = ''; }
 watch(provider, () => { clearSecrets(); appId.value = connection.value?.appId ?? ''; replaceSource.value = false; notice.value = ''; error.value = ''; report.value = null; });
@@ -138,6 +142,8 @@ onUnmounted(() => { controller.abort(); clearSecrets();emit('dirtyChanged',false
         <template v-if="canManage">
           <section class="form-section channel-setup" aria-label="渠道接入配置">
             <header class="form-section-heading"><h3>机器人连接凭据</h3><a :href="provider==='feishu'?'https://open.feishu.cn/app':provider==='dingtalk'?'https://open-dev.dingtalk.com/':'https://work.weixin.qq.com/wework_admin/frame'" target="_blank" rel="noopener noreferrer">打开官方后台 ↗</a></header>
+            <WeComRegistration v-if="selectedConnection && provider==='wecom'" :key="base" :context="base" :disabled="registrationBlocked" @busy-changed="v=>registrationBusy=v" @credentials="receiveRegistration"/>
+            <p v-if="provider==='wecom' && unsaved" class="field-note">当前有未保存修改。请先保存，或清空手填凭据并取消其他修改，再开始扫码。</p>
             <NForm class="channel-connection-form settings-form" @submit.prevent>
               <NFormItem :label="provider==='wecom'?'BotID':provider==='dingtalk'?'Client ID（AppKey）':'App ID'"><NInput v-model:value="appId" :disabled="channelLocked||!loaded" :input-props="{'aria-label':'渠道应用 ID',autocomplete:'off'}"/></NFormItem>
               <NFormItem :label="provider==='wecom'?'Secret':provider==='dingtalk'?'Client Secret（AppSecret）':'App Secret'"><NInput v-model:value="appSecret" type="password" :disabled="channelLocked||!loaded" :input-props="{'aria-label':'渠道应用密钥',autocomplete:'new-password'}"/></NFormItem>
