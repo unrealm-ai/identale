@@ -266,3 +266,36 @@ test('create and edit use one robot credentials heading with each provider offic
     assert.ok(env.requests.every(request => request.method === 'GET'));
   });
 });
+
+test('automatic Feishu onboarding supplements manual existing-app credentials for all three providers', async t => {
+  const env = await mount(t, 'settings', { base, canManage: true }, async request => request.url.endsWith('/registration') ? { registration: null, preset: { name: '合成员工', description: '合成职责' }, permissions: { version: 'v1', scopes: ['im:message'], events: ['im.message.receive_v1'] } } : []);
+  assert.ok(document.querySelector('[aria-label="飞书自动创建应用"]'));
+  assert.match(text(), /创建飞书应用/);
+  for (const provider of ['飞书', '钉钉', '企业微信']) {
+    await choose(provider);
+    const manual = document.querySelector('.channel-setup'); assert.ok(manual);
+    assert.ok(manual.querySelector('input[aria-label="渠道应用 ID"]'));
+    assert.ok(manual.querySelector('input[aria-label="渠道应用密钥"]'));
+    assert.equal(manual.querySelector('input[aria-label="渠道应用 ID"]').disabled, false);
+    assert.equal(manual.querySelector('input[aria-label="渠道应用密钥"]').disabled, false);
+    assert.ok(button('验证并保存渠道连接'));
+    assert.equal(!!document.querySelector('[aria-label="飞书自动创建应用"]'), provider === '飞书');
+  }
+  assert.ok(env.requests.every(request => request.method === 'GET'));
+});
+
+test('automatic registration completion preserves unsaved manual credentials instead of silently refreshing them', async t => {
+  let connected = false;
+  const env = await mount(t, 'settings', { base, canManage: true }, async request => request.url.endsWith('/registration') ? {
+    registration: { id: 'synthetic-registration', state: connected ? 'connected' : 'awaiting_confirmation', credentialSaved: connected, ...(connected ? { appId: 'cli_synthetic' } : { verificationUrl: 'https://accounts.feishu.cn/confirm' }), updatedAt: 1 },
+    preset: { name: '合成员工', description: '合成职责' }, permissions: { version: 'v1', scopes: [], events: [] }
+  } : []);
+  const channelReadsBefore = env.requests.filter(r => r.url.endsWith('/channels')).length;
+  input('渠道应用 ID', 'cli_manual_unsaved'); input('渠道应用密钥', 'synthetic-unsaved-secret'); await flush();
+  connected = true; await click('刷新创建状态');
+  await until(() => text().includes('当前未保存的手动输入已保留'));
+  assert.equal(document.querySelector('input[aria-label="渠道应用 ID"]').value, 'cli_manual_unsaved');
+  assert.equal(document.querySelector('input[aria-label="渠道应用密钥"]').value, 'synthetic-unsaved-secret');
+  assert.equal(env.requests.filter(r => r.url.endsWith('/channels')).length, channelReadsBefore);
+  assert.ok(env.requests.every(r => r.method === 'GET'));
+});

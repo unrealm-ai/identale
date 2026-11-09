@@ -4,6 +4,7 @@ import { computed, onUnmounted, ref, watch } from 'vue';
 import { NAlert, NButton, NCard, NCheckbox, NForm, NFormItem, NInput, NSpace, NTag, NPopconfirm } from 'naive-ui';
 import { api, ApiError, errorMessage } from '../../shared/api';
 import ChannelBrand from './ChannelBrand.vue';
+import FeishuRegistration from './FeishuRegistration.vue';
 import ChannelCapabilities from './ChannelCapabilities.vue';
 import ChannelAccessSettings from './ChannelAccessSettings.vue';
 import GroupSharingSettings from './GroupSharingSettings.vue';
@@ -16,12 +17,12 @@ import { directoryStatusLabel } from '../directory/types';
 import type { DirectoryConnection, DirectoryProvider, DirectoryIdentityEvidence } from '../directory/types';
 const props = defineProps<{ base: string; canManage: boolean; disabled?: boolean }>();
 const emit = defineEmits<{ busyChanged: [value: boolean]; sessionExpired: []; changed: [];rebound:[];dirtyChanged:[boolean] }>();
-const sharingBusy=ref(false),sharingDirty=ref(false);
+const sharingBusy=ref(false),sharingDirty=ref(false),registrationBusy=ref(false);
 const sharingEditor=ref<InstanceType<typeof GroupSharingSettings>|null>(null);
 const selectedConnection=ref(false),policyBusy=ref(false),policyDirty=ref(false),confirmPolicySwitch=ref(false);
 const policyEditor=ref<InstanceType<typeof ChannelAccessSettings>|null>(null);
 let pendingPolicySwitch:(()=>void)|undefined;
-const channelLocked=computed(()=>!!props.disabled||busy.value||directoryBusy.value||policyBusy.value||sharingBusy.value);
+const channelLocked=computed(()=>!!props.disabled||busy.value||directoryBusy.value||policyBusy.value||sharingBusy.value||registrationBusy.value);
 const unsaved=computed(()=>policyDirty.value||sharingDirty.value||contextDirty.value||!!appSecret.value||!!appId.value&&appId.value!==(connection.value?.appId??''));
 function requestPolicySwitch(action:()=>void){if(channelLocked.value)return;if(unsaved.value){pendingPolicySwitch=action;confirmPolicySwitch.value=true;return;}action();}
 function discardPolicySwitch(){if(channelLocked.value)return;policyEditor.value?.cancel();sharingEditor.value?.discard();historyEnabled.value=connection.value?.context?.groupListenEnabled??false;keywordText.value=(connection.value?.context?.groupTriggerKeywords??[]).join('\n');appId.value=connection.value?.appId??'';clearSecrets();replaceSource.value=false;confirmPolicySwitch.value=false;pendingPolicySwitch?.();pendingPolicySwitch=undefined;}
@@ -50,7 +51,7 @@ const directoryBusy = ref(false);
 const report = ref<ChannelValidation | null>(null);
 const busy = ref(false), loaded = ref(false), error = ref(''), notice = ref('');
 let controller = new AbortController();
-watch(() => busy.value || directoryBusy.value || policyBusy.value || sharingBusy.value, value => emit('busyChanged', value), { flush: 'sync' });
+watch(() => busy.value || directoryBusy.value || policyBusy.value || sharingBusy.value || registrationBusy.value, value => emit('busyChanged', value), { flush: 'sync' });
 watch(unsaved,v=>emit('dirtyChanged',v),{flush:'sync'});
 function clearSecrets() { appSecret.value = ''; }
 watch(provider, () => { clearSecrets(); appId.value = connection.value?.appId ?? ''; replaceSource.value = false; notice.value = ''; error.value = ''; report.value = null; });
@@ -76,6 +77,10 @@ function mergeIdentityEvidence(evidence: DirectoryIdentityEvidence) {
   if (current) current.memberSearchVerifiedUserIds = [...new Set([...(current.memberSearchVerifiedUserIds ?? []), evidence.userId])];
 }
 async function load() { await run(read); }
+function registrationChanged() {
+  if (unsaved.value) { notice.value = '飞书自动接入已完成。当前未保存的手动输入已保留；请先保存或放弃修改，再刷新渠道状态。'; return; }
+  void load(); emit('changed');
+}
 async function mutate(action: 'connect' | 'revalidate' | 'settings') {
   if (!props.canManage || !loaded.value || channelLocked.value || policyDirty.value || sharingDirty.value || contextDirty.value || action === 'connect' && (!credentialsComplete.value || replacing.value&&!replaceSource.value)) return;
   const current = connection.value, selected = provider.value, rebinding=action==='connect'&&replacing.value;
@@ -136,6 +141,7 @@ onUnmounted(() => { controller.abort(); clearSecrets();emit('dirtyChanged',false
         </section>
         <ChannelCapabilities v-if="connection" :capabilities="connection.capabilities" :provider="provider" @session-expired="emit('sessionExpired')"/>
         <template v-if="canManage">
+          <FeishuRegistration v-if="provider==='feishu'" :base="base" :active="selectedConnection && loaded" :disabled="disabled || busy || directoryBusy || policyBusy || sharingBusy || unsaved" :bound-app-id="connection?.appId" @busy-changed="registrationBusy=$event" @session-expired="emit('sessionExpired')" @changed="registrationChanged"/>
           <section class="form-section channel-setup" aria-label="渠道接入配置">
             <header class="form-section-heading"><h3>机器人连接凭据</h3><a :href="provider==='feishu'?'https://open.feishu.cn/app':provider==='dingtalk'?'https://open-dev.dingtalk.com/':'https://work.weixin.qq.com/wework_admin/frame'" target="_blank" rel="noopener noreferrer">打开官方后台 ↗</a></header>
             <NForm class="channel-connection-form settings-form" @submit.prevent>

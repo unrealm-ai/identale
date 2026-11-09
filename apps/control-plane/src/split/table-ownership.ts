@@ -9,7 +9,7 @@ export const PLATFORM_TABLES = [
   'model_selection_epochs', 'model_catalog_migrations', 'skill_resource_versions',
   'skill_resource_state', 'workspace_mcp_versions', 'workspace_mcp_state',
   'employee_channel_connections', 'employee_channel_verification_events',
-  'employee_channel_audit', 'employee_channel_directory_credentials',
+  'employee_channel_audit', 'employee_channel_directory_credentials', 'feishu_app_registrations',
   'wecom_bot_contacts', 'wecom_member_verification_requests',
   'channel_observation_receipts',
   'directory_sync_tasks', 'directory_snapshot_users', 'directory_snapshot_aliases',

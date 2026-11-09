@@ -61,6 +61,26 @@
 
 ## 三渠道的配置及验收
 
+### 飞书自动创建或手动关联
+
+员工保存后，进入「设置 → 渠道 → 飞书」，可以选择扫码创建新应用，或在下方手动填写已有应用的 App ID / App Secret。钉钉和企业微信的手动关联入口保持不变。自动创建不会替换已有飞书绑定，也不会修改已有飞书应用。
+
+自动接入使用官方 SDK 的 `registerApp`，预填该员工**已保存**的名称和职责简介。点击创建后，用飞书扫码或打开官方确认页；确认页会展示请求的应用权限。后台取得凭据后立即加密保存，浏览器不会取得 App Secret。页面关闭或暂时离开不会撤销飞书侧操作；可以回来刷新状态。明确取消只停止本地等待，不会删除已创建的飞书应用。
+
+本版一次声明「会话与通讯录 v1」权限和事件，关闭官方 SDK 的额外预设：
+
+- 通讯录及租户：`tenant:tenant:readonly`、`contact:contact.base:readonly`、`contact:user.base:readonly`、`contact:user.employee:readonly`、`contact:user.department:readonly`、`contact:department.base:readonly`、`contact:department.organize:readonly`、`contact:user.employee_id:readonly`。
+- 消息与群：`im:message.p2p_msg:readonly`、`im:message.group_at_msg:readonly`、`im:message:send_as_bot`、`im:message:readonly`、`im:message.group_msg`、`im:chat:readonly`。普通群消息权限用于现有群上下文及原消息读取，不等于允许未 @ 消息自动执行任务。
+- 事件：`im.message.receive_v1`、`im.chat.member.bot.added_v1`、`im.chat.member.bot.deleted_v1`、`im.chat.disbanded_v1`。
+
+此权限组不包含文档、妙记、用户 OAuth、应用管理和附件上传等扩展能力。未来按功能选权限组尚未实现。权限范围会在创建前完整显示，不应把它称为“全部免审批”。
+
+取得凭据后，系统检查每项应用身份权限的生效状态、机器人身份、通讯录可见范围、部门读取与真实姓名样本。缺项、范围为空、审批未完成或接口结果无法核实时，保留加密凭据并阻止渠道启用；处理后点击「重新检查已保存的应用」，无需重新创建。全部满足后才保存为正式渠道，再独立查看长连接、入站消息与使用范围。
+
+**审批和连接边界**：租户免审规则、开发者身份、可用范围和发布流程决定是否需要管理员审批。SDK 返回凭据不证明发布、审批、事件订阅方式或长连接已经完成；本流程不代替管理员审批，也不会自动调用应用管理接口修改或发布应用。请按页面检查结果，在飞书后台补齐通讯录可见范围、所需发布或审批及长连接事件配置。扫描被取消、过期或中断后，如果飞书已确认创建，应先检查飞书后台并使用手动关联，避免重复创建。当前仅支持飞书国内版，不接续 Lark 国际版注册。
+
+本功能通过隔离数据库和合成注册结果验证；尚需使用获准的真实租户扫码验收，不能将本地测试视为真实审批、消息收发通过。依据：[飞书官方扫码创建文档](https://open.feishu.cn/document/mcp_open_tools/integrating-agents-with-feishu/scan-to-create-an-app-in-one-click-nodejs)、[官方 Node SDK](https://github.com/larksuite/node-sdk/blob/main/README.zh.md#一键创建应用)。
+
 ### 飞书应用机器人
 
 1. 配置飞书应用的 App ID / App Secret，启用机器人和所需消息权限。应用 App ID 与机器人在消息中的身份不是同一个标识；系统会自动查询机器人身份，无需手工填写机器人 ID。

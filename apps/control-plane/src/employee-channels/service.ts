@@ -10,7 +10,7 @@ import {createDirectoryAdapter} from '../adapters/directory/index.js';
 import {FeishuConversationAdapter,FeishuMinutesAdapter,DingTalkBotConversationAdapter} from '../adapters/channels/index.js';
 import {EmployeeApplicationTransport} from './provider.js';
 import {EmployeeChannelRepository,ChannelBindingConflict} from './repository.js';
-import type {EmployeeChannelRecord,EmployeeChannelOptions,EmployeeChannelCredential,ResolvedEmployeeChannelBinding} from './types.js';
+import type {VerifiedEmployeeApplication,EmployeeChannelRecord,EmployeeChannelOptions,EmployeeChannelCredential,ResolvedEmployeeChannelBinding} from './types.js';
 import {validationOf,wecomBotValidation,type ChannelValidation} from './validation.js';
 import {resolveChannelConfigurationCapabilities} from './capabilities.js';
 import type {ChannelIngressCandidate} from '../adapters/channels/ingress/normalize.js';
@@ -102,7 +102,7 @@ export class EmployeeChannelService {
  subjects(w:string,e:string){return{sources:this.list(w,e),users:[],departments:[]};}
  private require(w:string,e:string,p:DirectoryProvider){this.entity(w,e);return this.repository.byProvider(w,e,p)??fail(404,'channel_connection_not_found');}
  private write(r:EmployeeChannelRecord,old:EmployeeChannelRecord|undefined,actor:string,action:string){try{this.repository.store.transaction(()=>{if(!this.repository.save(r,old))fail(409,'channel_configuration_changed');if(!old)initializeChannelSourceAccess(this.repository.store,r.workspaceId,r.entityId,r.sourceId);else if(old.sourceId!==r.sourceId)this.resetSource(old,r.sourceId);else if(usesWeComBotSearch(old)&&old.authRevision!==r.authRevision)this.botContacts.remove(old.id);if(action==='verification_candidate_observed'&&r.verification?.candidate)this.repository.markVerificationEvent(r.id,r.verification.candidate.eventId,r.verification.candidate.messageId);this.repository.audit(r,actor,action,this.now());});this.active.delete(r.id);this.changed(r.id);}catch(error){if(error instanceof EmployeeChannelError)throw error;fail(409,'channel_connection_conflict');}}
- async save(w:string,e:string,p:DirectoryProvider,actor:string,input:{appId:string;appSecret:string;expectedRevision?:number;replaceSource?:boolean}){
+ async save(w:string,e:string,p:DirectoryProvider,actor:string,input:{appId:string;appSecret:string;expectedRevision?:number;replaceSource?:boolean},beforeCommit?:(verified:VerifiedEmployeeApplication)=>void){
   if(input.replaceSource!==undefined&&typeof input.replaceSource!=='boolean')fail(400,'invalid_channel_request');
   if(p==='wecom')return this.saveWecom(w,e,actor,input);
   this.entity(w,e);if(!this.vault.available)fail(503,'channel_secret_key_unconfigured');
@@ -129,7 +129,7 @@ export class EmployeeChannelService {
    if(preserve&&old.robotCode){r.botId=old.robotCode;if(old.eventTenantId)r.previousInstallation={botId:old.robotCode,tenantId:old.eventTenantId};}
    if(preserve&&old.eventTenantId)r.eventTenantId=old.eventTenantId;
   }
-  r.credential=this.vault.seal(JSON.stringify(secret),this.scope(r));this.write(r,old,actor,changed?'source_replaced':old?'credentials_revalidated':'connection_created');return this.dto(r,true);
+  beforeCommit?.(verified);r.credential=this.vault.seal(JSON.stringify(secret),this.scope(r));this.write(r,old,actor,changed?'source_replaced':old?'credentials_revalidated':'connection_created');return this.dto(r,true);
  }
  async revalidate(w:string,e:string,p:DirectoryProvider,actor:string,expectedRevision?:number){
   const r=this.require(w,e,p);if(expectedRevision!==undefined&&r.revision!==expectedRevision)fail(409,'channel_configuration_changed');
