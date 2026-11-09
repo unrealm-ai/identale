@@ -55,7 +55,7 @@ async function mount(t, name, initial, handler = async () => { throw new Error('
 const base = '/workspaces/workspace-a/entities/employee-a';
 const yesCapability={supported:true,availability:'available'}, noCapability={supported:false,availability:'unsupported',reason:'当前机器人接入未实现'};
 const fixtureCapabilities=(provider='feishu')=>({privateMessages:yesCapability,groupMentions:yesCapability,ordinaryGroupMessages:provider==='feishu'?yesCapability:noCapability,keywordTriggers:provider==='feishu'?yesCapability:noCapability,recentGroupContext:provider==='feishu'?yesCapability:noCapability,directoryRead:yesCapability,meetingRead:{supported:true,availability:'authorization_required',reason:'独立业务授权尚未配置'},documentRead:{supported:false,availability:'unknown',reason:'读取链路尚未接通'}});
-const connection = (overrides = {}) => ({ capabilities:fixtureCapabilities(overrides.provider), validation:{version:1,provider:overrides.provider??'feishu',checkedAt:Date.now(),canContinue:true,checks:[{id:'credentials',required:true,supported:true,status:'pass'},{id:'directory_identity',required:true,supported:true,status:'pass'},{id:'directory_scope',required:true,supported:true,status:'pass'},{id:'user_name',required:true,supported:true,status:'pass'}]},transport: { state: 'connected', changedAt: 1792756800000 }, id: 'connection-1', sourceId: 'source-1', entityId: 'employee-a', provider: 'feishu', appId: 'fixture-app', tenantId: 'fixture-tenant', tenantIdNamespace: 'tenant_key', revision: 1, authRevision: 1, status: 'verified', identityEvidence: 'provider_api', inboundVerified: false, directoryStatus: 'available', enabled: true, ...overrides });
+const connection = (overrides = {}) => ({ capabilities:fixtureCapabilities(overrides.provider), validation:{version:1,provider:overrides.provider??'feishu',checkedAt:Date.now(),canContinue:true,checks:[{id:'credentials',required:true,supported:true,status:'pass'},{id:'directory_identity',required:true,supported:true,status:'pass'},{id:'directory_scope',required:true,supported:true,status:'pass'},{id:'user_name',required:true,supported:true,status:'pass'}]},transport: { state: 'connected', changedAt: 1792756800000 }, id: 'connection-1', sourceId: 'source-1', entityId: 'employee-a', provider: 'feishu', appId: 'fixture-app', botId: 'fixture-bot-open-id', tenantId: 'fixture-tenant', tenantIdNamespace: 'tenant_key', revision: 1, authRevision: 1, status: 'verified', identityEvidence: 'provider_api', inboundVerified: false, directoryStatus: 'available', enabled: true, ...overrides });
 const subjects = source => ({ sources: [source ?? connection()], users: [], departments: [] });
 const department = { externalId: 'department-7', subjectId: JSON.stringify({ id: 'department-7', namespace: 'department_id', applicationId: 'fixture-app' }), displayName: '研发部', kind: 'department' };
 const page = (items, overrides = {}) => ({ sourceId: 'source-1', provider: 'feishu', appId: 'fixture-app', items, exhausted: true, ...overrides });
@@ -75,13 +75,13 @@ test('employee connection submits manual parameters, clears secrets, blocks dupl
   assert.equal(env.requests.filter(item => item.method === 'PUT').length, 1);
   assert.deepEqual(env.requests.find(item => item.method === 'PUT').body, { appId: 'fixture-app', appSecret: 'synthetic-fixture-secret', expectedRevision: 0, replaceSource: false });
   assert.equal(document.querySelector('input[aria-label="botId"]'), null);
-  release(); await until(() => text().includes('等待机器人身份验证'));
-  assert.ok(text().includes('不代表企业 corpId 已验证')); assert.equal(document.body.innerHTML.includes('synthetic-fixture-secret'), false);
+  release(); await until(() => text().includes('等待首条消息确认租户'));
+  assert.ok(text().includes('租户 tenant_key 尚未确认')); assert.equal(document.body.innerHTML.includes('synthetic-fixture-secret'), false);
 });
 
 test('member sees both provider statuses without credential forms or mutation actions', async t => {
   const env = await mount(t, 'settings', { base, canManage: false }, async () => [connection(), connection({ id: 'connection-2', sourceId: 'source-2', provider: 'dingtalk', status: 'invalid', directoryStatus: 'unavailable' })]);
-  await until(()=>document.querySelectorAll('.connection-list .n-card').length===2);assert.ok(text().includes('不可用'));document.querySelector('.connection-list .n-card button').click();await flush();assert.ok(text().includes('机器人已验证'));assert.ok(text().includes('测试入站：尚未确认'));assert.equal(document.querySelector('.connection-diagnostics').open,false);assert.ok(text().includes('厂商 API 身份证据'));await click('返回连接列表');
+  await until(()=>document.querySelectorAll('.connection-list .n-card').length===2);assert.ok(text().includes('不可用'));document.querySelector('.connection-list .n-card button').click();await flush();assert.ok(text().includes('机器人已验证'));assert.ok(text().includes('入站确认记录：尚无确认记录'));assert.equal(document.querySelector('.connection-diagnostics').open,false);assert.ok(text().includes('厂商 API 身份证据'));await click('返回连接列表');
   assert.ok(text().includes('飞书')); assert.ok(text().includes('钉钉')); assert.equal(document.querySelector('input'), null);
   assert.equal(document.querySelector('[data-testid="callback-path"]'), null); assert.equal(text().includes('/api/channel-callbacks/connection-1'), false);
   assert.equal(document.querySelector('.channel-connection-form'), null); assert.ok(env.requests.every(item => item.method === 'GET'));
@@ -202,37 +202,32 @@ test('single-page channel form keeps official requirements and clears unsubmitte
  assert.equal(env.requests.some(r=>r.method!=='GET'),false,'browsing and editing credentials must not save or create employees');assert.equal(JSON.stringify({...localStorage,...window.sessionStorage}).includes('synthetic-secret'),false);
 });
 
-test('pending robot verification requires explicit start, checking signed candidate and separate confirmation', async t => {
-  let current = connection({ status: 'pending_verification' });
-  const env = await mount(t, 'settings', { base, canManage: true }, async request => {
-    if (request.url.endsWith('/verification/start')) return { challengeId: 'fixture-challenge', challengeText: 'verify fixture-code', revision: 2, expiresAt: Date.now() + 60000 };
-    if (request.url.endsWith('/verification/confirm')) { current = connection({ revision: 2, botId: 'verified-fixture-bot', identityEvidence: 'authenticated_event_confirmed', inboundVerified: true }); return current; }
-    if (request.url.endsWith('/verification')) return { status: 'observed', revision: 2, candidateId: 'fixture-candidate', botId: 'verified-fixture-bot', expiresAt: Date.now() + 60000 };
-    return [current];
-  });
-  await until(() => text().includes('开始机器人身份验证'));
-  assert.deepEqual(env.requests.map(r=>r.url).sort(),[`/api${base}/channels`,`/api${base}/runtime-status`,`/api${base}/directory-access`,`/api${base}/group-sharing`,`/api${base}/group-sharing/status`,'/api/business-resources/configuration'].sort());assert.ok(env.requests.every(r=>r.method==='GET')); await click('开始机器人身份验证');
-  await until(() => text().includes('检查测试消息候选')); assert.equal(env.requests.some(item => item.url.endsWith('/verification/confirm')), false);
-  await click('检查测试消息候选'); await until(() => text().includes('身份核对无误，确认绑定此候选'));
-  assert.equal(env.requests.some(item => item.url.endsWith('/verification/confirm')), false);
-  await click('身份核对无误，确认绑定此候选'); await until(() => text().includes('机器人已验证'));
-  assert.ok(text().includes('测试入站：已确认'));
-  assert.ok(text().includes('管理员确认的已认证事件'));
-  assert.deepEqual(env.requests.find(item => item.url.endsWith('/verification/confirm')).body, { candidateId: 'fixture-candidate', expectedRevision: 2 });
+test('Feishu pending tenant identity updates from ordinary inbound evidence without challenge actions', async t => {
+  let current = connection({ status: 'pending_verification', tenantId: 'fixture-app', tenantIdNamespace: 'app_scoped' });
+  const env = await mount(t, 'settings', { base, canManage: true }, async () => [current]);
+  await until(() => text().includes('等待首条消息确认租户'));
+  assert.match(document.querySelector('[aria-label="飞书身份确认状态"]').textContent, /机器人 open_id.*仅待确认租户 tenant_key.*普通真人私聊.*真正 @.*同一条消息.*首发者不会自动获得使用权/);
+  assert.match(text(), /App ID 标识应用/); assert.match(text(), /无需手填/);
+  for (const label of ['开始机器人身份验证', '检查测试消息候选', '身份核对无误，确认绑定此候选']) assert.equal(text().includes(label), false);
+  current = connection({ revision: 2, identityEvidence: 'authenticated_first_message', inboundVerified: true });
+  await click('刷新渠道状态'); await until(() => text().includes('机器人已验证'));
+  assert.ok(text().includes('入站确认记录：已确认')); assert.ok(text().includes('首条真实消息自动确认'));
+  assert.equal(document.querySelector('[aria-label="飞书身份确认状态"]'), null);
+  assert.ok(env.requests.every(request => request.method === 'GET' && !request.url.includes('/verification')));
 });
 
-test('waiting or expired robot verification cannot expose a confirmation action', async t => {
-  let expired = false;
-  const env = await mount(t, 'settings', { base, canManage: true }, async request => {
-    if (request.url.endsWith('/verification/start')) return { challengeId: 'fixture-challenge', challengeText: 'verify fixture-code', revision: 2, expiresAt: Date.now() + 60000 };
-    if (request.url.endsWith('/verification')) return expired ? { status: 'not_started' } : { status: 'waiting', expiresAt: Date.now() + 60000 };
-    return [connection({ status: 'pending_verification' })];
-  });
-  await until(() => text().includes('开始机器人身份验证')); await click('开始机器人身份验证'); await click('检查测试消息候选');
-  await until(() => text().includes('尚未收到可确认的测试消息'));
-  expired = true; await click('检查测试消息候选'); await until(() => text().includes('验证尚未开始或已过期'));
-  assert.equal(text().includes('身份核对无误，确认绑定此候选'), false);
-  assert.equal(env.requests.some(item => item.url.endsWith('/verification/confirm')), false);
+test('Feishu complete API identity does not require a first message while missing bot identity stays blocked', async t => {
+  let current = connection();
+  const env = await mount(t, 'settings', { base, canManage: true }, async () => [current]);
+  await until(() => text().includes('机器人与租户身份已验证，可按使用范围使用'));
+  assert.ok(text().includes('入站确认记录：尚无确认记录')); assert.ok(text().includes('厂商 API 身份证据'));
+  assert.equal(document.querySelector('[aria-label="飞书身份确认状态"]'), null);
+  current = connection({ status: 'pending_verification', botId: undefined });
+  await click('刷新渠道状态'); await until(() => text().includes('机器人身份不完整'));
+  assert.match(document.querySelector('[aria-label="飞书身份确认状态"]').textContent, /尚未取得可信的机器人 open_id.*不能自动确认身份.*启用机器人能力.*App ID.*不能替代机器人身份/);
+  assert.equal(text().includes('等待首条消息确认租户'), false);
+  assert.equal(text().includes('开始机器人身份验证'), false);
+  assert.ok(env.requests.every(request => request.method === 'GET' && !request.url.includes('/verification')));
 });
 
 test('Feishu context settings preserve enabled status with CAS and remove static meeting material configuration', async t => {
@@ -299,11 +294,11 @@ test('transport lifecycle is distinct from identity and exposes safe health time
   let current = connection({ status: 'pending_verification', transport: { state: 'connecting', changedAt: 1792756800000 } });
   await mount(t, 'settings', { base, canManage: true }, async () => [current]);
   await until(() => text().includes('长连接：正在连接'));
-  assert.ok(text().includes('等待机器人身份验证'));
+  assert.ok(text().includes('等待首条消息确认租户'));
   for (const [state, label] of [['connected', '已连接'], ['reconnecting', '正在重连'], ['failed', '连接失败'], ['stopped', '已停止']]) {
     current = connection({ status: 'pending_verification', transport: { state, changedAt: 1792756800000, lastConnectedAt: 1792756700000, lastDisconnectedAt: 1792756750000, ...(state === 'failed' ? { error: 'transport_connect_failed' } : {}) } });
     await click('刷新渠道状态');
-    assert.ok(text().includes(`长连接：${label}`)); assert.ok(text().includes('等待机器人身份验证'));
+    assert.ok(text().includes(`长连接：${label}`)); assert.ok(text().includes('等待首条消息确认租户'));
     assert.ok(text().includes('最近连接：')); assert.ok(text().includes('最近断线：'));
     if (state === 'failed') assert.ok(text().includes('transport_connect_failed'));
   }
@@ -369,7 +364,7 @@ test('WeCom employee selection keeps unsupported contexts absent and waits for a
   assert.ok(!text().includes('按部门授权'));
   assert.equal(document.querySelector('.wecom-directory-binding'),null);
   assert.equal(env.requests.some(item=>item.url.endsWith('/directory-credentials')),false);
-  assert.ok(text().includes('智能机器人 BotID')); assert.ok(text().includes('启用智能机器人 API 长连接'));
+  assert.ok(text().includes('机器人连接凭据')); assert.deepEqual([...document.querySelectorAll('.channel-connection-form .n-form-item-label')].map(label => label.textContent.trim()), ['BotID', 'Secret']); assert.ok(text().includes('启用智能机器人 API 长连接'));
   assert.ok(text().includes('等待首条消息')); assert.equal(text().includes('开始机器人身份验证'),false);
   assert.equal(document.querySelector('[aria-label="读取当前群历史"]'), null);
   assert.equal(document.querySelector('[aria-label="明确的 Minutes token"]'), null);

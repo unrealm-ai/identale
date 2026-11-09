@@ -111,3 +111,43 @@ test('I06 automatic first inbound observation reaches the platform without chang
  assert.equal(after.stateVersion,before.stateVersion+1);
  assert.equal(f.platform.store.one('SELECT count(*) n FROM channel_observation_receipts').n,1);
 });
+
+const feishuPending=r=>({...r,provider:'feishu',identity:{appId:'app',tenantId:'directory-display',tenantIdNamespace:'display_id'},botId:'ou_verified_bot',identityEvidence:'app_credentials_only'});
+const feishuFirst={appId:'app',botId:'ou_verified_bot',tenantId:'tenant-key',tenantNamespace:'tenant_key'};
+test('Feishu automatic identity report survives stale snapshots and a lost acceptance response without rotating the configuration',async t=>{
+ const f=fixture(t,feishuPending),before=f.runtime.repository.byId('c');
+ f.runtime.service.observeFirstInbound('c',feishuFirst);
+ const local=f.runtime.repository.byId('c');assert.equal(local.status,'verified');assert.equal(local.inboundVerified,true);assert.equal(local.identityEvidence,'authenticated_first_message');assert.equal(local.eventTenantId,'tenant-key');assert.equal(local.botId,'ou_verified_bot');
+ assert.equal(local.revision,before.revision);assert.equal(local.authRevision,before.authRevision);assert.equal(local.stateVersion,before.stateVersion+1);assert.deepEqual(local.identity,before.identity);assert.deepEqual(local.context,before.context);assert.equal(local.sourceId,before.sourceId);assert.equal(local.verification,undefined);
+ const resetSnapshot=()=>f.runtime.store.run('UPDATE employee_channel_connections SET record_json=?,state_version=? WHERE id=?',JSON.stringify(before),before.stateVersion,before.id);
+ resetSnapshot();f.reporter.reconcile();assert.equal(f.runtime.repository.byId('c').eventTenantId,'tenant-key');assert.equal(f.runtime.store.one('SELECT count(*) n FROM channel_state_reports').n,1);
+ f.lose();await f.reporter.flush();assert.equal(f.reporter.status()[0].status,'pending');await f.reporter.flush();assert.equal(f.reporter.status()[0].status,'accepted');
+ const authoritative=f.platform.repository.byId('c');assert.equal(authoritative.status,'verified');assert.equal(authoritative.stateVersion,before.stateVersion+1);assert.equal(authoritative.revision,before.revision);assert.equal(authoritative.authRevision,before.authRevision);assert.deepEqual(authoritative.identity,before.identity);assert.equal(f.sent[0].reportId,f.sent[1].reportId);
+ resetSnapshot();f.reporter.reconcile();assert.equal(f.runtime.repository.byId('c').status,'verified');assert.equal(f.runtime.repository.byId('c').eventTenantId,'tenant-key');
+ assert.equal(f.platform.store.one('SELECT count(*) n FROM channel_observation_receipts').n,1);assert.equal(JSON.stringify(f.sent).includes('synthetic-private'),false);
+});
+
+test('Feishu delayed automatic identity cannot overwrite admin disable, credential rotation or source replacement',async t=>{
+ for(const change of ['disabled','credentials','replacement'])await t.test(change,async t=>{
+  const f=fixture(t,feishuPending);f.runtime.service.observeFirstInbound('c',feishuFirst);
+  const current=f.platform.repository.byId('c'),patch=change==='disabled'?{enabled:false,status:'disabled',revision:current.revision+1}:change==='credentials'?{authRevision:current.authRevision+1,revision:current.revision+1}:{sourceId:'replacement-source',appId:'new-app',identity:{appId:'new-app',tenantId:'new-display',tenantIdNamespace:'display_id'},botId:'ou_new_bot',revision:current.revision+1,authRevision:current.authRevision+1};
+  f.platform.repository.save({...current,...patch},current);const expected=f.platform.repository.byId('c');await f.reporter.flush();assert.deepEqual(f.platform.repository.byId('c'),expected);assert.equal(f.reporter.status()[0].status,'conflict');
+  f.runtime.store.run('UPDATE employee_channel_connections SET record_json=?,state_version=?,revision=?,app_id=?,bot_id=? WHERE id=?',JSON.stringify(expected),expected.stateVersion,expected.revision,expected.appId,expected.botId??null,expected.id);
+  f.reporter.reconcile();assert.deepEqual(f.runtime.repository.byId('c'),expected);
+ });
+});
+
+test('Feishu automatic identity and durable observation roll back together and competing tenant evidence cannot overwrite the winner',async t=>{
+ const f=fixture(t,feishuPending),before=f.runtime.repository.byId('c');
+ assert.throws(()=>f.runtime.store.transaction(()=>{f.runtime.service.observeFirstInbound('c',feishuFirst);throw Error('synthetic rollback');}),/synthetic rollback/);
+ assert.deepEqual(f.runtime.repository.byId('c'),before);assert.equal(f.runtime.store.one('SELECT count(*) n FROM channel_state_reports').n,0);
+ f.runtime.service.observeFirstInbound('c',feishuFirst);f.platform.service.observeFirstInbound('c',{...feishuFirst,tenantId:'other-tenant-key'});const winner=f.platform.repository.byId('c');
+ await f.reporter.flush();assert.deepEqual(f.platform.repository.byId('c'),winner);assert.equal(winner.eventTenantId,'other-tenant-key');assert.equal(f.reporter.status()[0].status,'conflict');
+});
+
+test('Feishu automatic identity report survives runtime restart without storing platform credentials in runtime main schema',async t=>{
+ const f=fixture(t,feishuPending);f.runtime.service.observeFirstInbound('c',feishuFirst);
+ const store=await f.reopen(),repository=new EmployeeChannelRepository(store);assert.equal(repository.byId('c'),undefined);
+ const reporter=installChannelObservationReporter(store,repository,{url:'http://127.0.0.1:1',token,fetch:async(_url,init)=>{const r=await f.server.inject({method:'POST',url:'/internal/config/channel-observation',headers:init.headers,payload:JSON.parse(init.body)});return new Response(r.body,{status:r.statusCode});}});
+ try{await reporter.flush();const actual=f.platform.repository.byId('c');assert.equal(actual.status,'verified');assert.equal(actual.eventTenantId,'tenant-key');assert.equal(actual.botId,'ou_verified_bot');assert.equal(actual.inboundVerified,true);assert.equal(reporter.status()[0].status,'accepted');assert.equal(store.one("SELECT 1 FROM main.sqlite_master WHERE name='employee_channel_connections'"),undefined);}finally{await reporter.close();}
+});

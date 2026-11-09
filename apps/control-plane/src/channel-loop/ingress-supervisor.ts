@@ -8,6 +8,7 @@ import type {ChannelIngressFactory} from './ingress-types.js';
 import {IngressOwner} from './ingress-owner.js';
 import {normalizeChannelIngressEvent,ingressMessageText,ingressReplyTarget} from '../adapters/channels/ingress/normalize.js';
 import {redactMessageJson} from '../adapters/message-json.js';
+import {dingtalkIdentityDiagnostic} from '../adapters/channels/ingress/identity-diagnostics.js';
 
 type Live={session:ChannelIngressSession;port:ChannelIngressPort};
 type Health=ChannelIngressStatus & {lastConnectedAt?:number;lastDisconnectedAt?:number};
@@ -55,14 +56,16 @@ export class ChannelIngressSupervisor {
   let fingerprint:string;try{fingerprint=JSON.stringify(envelope);}catch{fingerprint=randomUUID();}
   const traceId=createHash('sha256').update(JSON.stringify(target&&bindingVersion?[r.workspaceId,r.entityId,r.id,bindingVersion,target.conversation.tenantId,target.conversation.externalId,target.messageId,'initial']:[r.id,fingerprint])).digest('hex');
   const correlation={traceId,messageId:traceId};
-  // Raw SDK message fields are logged before business parsing; credentials are redacted at the adapter boundary.
-  let payload:{json?:unknown;text?:string}={...(text!==undefined?{text}:{})};
+  // Feishu retains redacted message diagnostics; DingTalk failures log only
+  // fixed identity comparisons, never the pre-parsed message or callback.
+  let payload:{json?:unknown;text?:string}=r.provider==='dingtalk'?{}:{...(text!==undefined?{text}:{})};
   if(r.provider==='feishu')try{payload=redactMessageJson({json:envelope,...payload}) as typeof payload;}catch{/* Invalid JSON cannot break the existing rejection/ACK path. */}
   this.diagnostics.event({stage:'ingress.received',phase:'point',...correlation,status:'received',receivedAt:this.now(),...payload,...(r.provider==='feishu'&&payload.json!==undefined?{messageKind:'receive' as const}:{})});
   let normalized:ReturnType<typeof normalizeChannelIngressEvent>;
   try{normalized=normalizeChannelIngressEvent(live.session,envelope,hints,this.now());}
   catch(error){
-   this.diagnostics.event({stage:'ingress.received',phase:'point',...correlation,outcome:'failure',status:'failed',reason:'identity_invalid',...diagnosticFailure(error)});
+   const ingressIdentity=dingtalkIdentityDiagnostic(live.session,envelope,hints,error);
+   this.diagnostics.event({stage:'ingress.received',phase:'point',...correlation,outcome:'failure',status:'failed',reason:'identity_invalid',...diagnosticFailure(error),...(ingressIdentity?{ingressIdentity}:{})});
    if(r.status==='verified'&&target&&bindingVersion)await this.loop.rejectAuthenticatedEvent({workspaceId:r.workspaceId,entityId:r.entityId,connectionId:r.id,bindingVersion,appId:r.appId,...target},'identity',write=>this.commit(live,write));
    else this.diagnostics.event({stage:'outbox.send',phase:'point',...correlation,outcome:'failure',status:'failed',reason:'reply_target_unavailable'});
    throw error;
@@ -70,7 +73,26 @@ export class ChannelIngressSupervisor {
   return this.applyNormalized(live,normalized);
  }
  private async applyNormalized(live:Live,normalized:ReturnType<typeof normalizeChannelIngressEvent>):Promise<ChannelIngressDisposition>{
-  this.assert(live);const r=this.connections.repository.byId(live.session.connectionId)!;
+  this.assert(live);let r=this.connections.repository.byId(live.session.connectionId)!;
+  // Consume legacy verification traffic before identity observation or group
+  // lifecycle writes. Expired challenges remain control traffic, never business.
+  if(normalized.kind==='message'){
+   const {event}=normalized;
+   if(event.origin!=='live')return this.commit(live,()=> 'ignored');
+   if(this.connections.isVerificationEvent(r.id,event.eventId,event.message.id))return this.commit(live,()=> 'duplicate');
+   if(normalized.verificationText===r.verification?.challengeText||
+      /^identity-verify-[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(normalized.verificationText))
+    return this.commit(live,()=> 'ignored');
+   if(r.status==='pending_verification'){
+    const isHuman=event.message.author.kind==='human'&&!!event.message.author.externalId;
+    const directed=event.message.conversationKind==='private'||(r.provider==='wecom'
+     ? event.message.providerDirectedBot===true
+     : event.message.mentions.includes(normalized.candidate.botId));
+    if(!isHuman||!directed)return this.commit(live,()=> 'ignored');
+    this.commit(live,()=>this.connections.observeFirstInbound(r.id,normalized.candidate));
+    r=this.connections.repository.byId(r.id)!;
+   }
+  }
   const event=normalized.kind==='message'||normalized.kind==='group_record'?normalized.event:undefined;
   const bindingVersion=this.connections.currentBindingVersion(r.id);
   const target=event?{conversation:event.message.conversation,messageId:event.message.id,eventId:event.eventId,...(event.message.threadId?{threadId:event.message.threadId}:{})}:undefined;
@@ -89,26 +111,6 @@ export class ChannelIngressSupervisor {
    if(r.status!=='verified'||!this.groups)return this.commit(live,()=> 'ignored');
    const binding=await this.connections.resolveBinding(r.id);if(!binding)return this.commit(live,()=> 'ignored');
    return this.commit(live,()=>{this.groups!.record(binding,event);return'accepted';});
-  }
-  if(this.connections.isVerificationEvent(r.id,event.eventId,event.message.id))return this.commit(live,()=> 'duplicate');
-  if(r.provider!=='feishu'&&(normalized.verificationText===r.verification?.challengeText||
-     /^identity-verify-[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(normalized.verificationText)))
-   return this.commit(live,()=> 'ignored');
-  if(r.status==='pending_verification'&&r.provider!=='feishu'){
-   const isHuman=event.message.author.kind==='human'&&!!event.message.author.externalId;
-   const directed=event.message.conversationKind==='private'||(r.provider==='wecom'
-    ? event.message.providerDirectedBot===true
-    : event.message.mentions.includes(normalized.candidate.botId));
-   if(!isHuman||!directed)return this.commit(live,()=> 'ignored');
-   this.commit(live,()=>this.connections.observeFirstInbound(r.id,normalized.candidate));
-   bindingVersion=this.connections.currentBindingVersion(r.id);
-  }else if(r.status==='pending_verification'){
-   const v=r.verification;
-   if(!v||v.expiresAt<=this.now())return this.commit(live,()=> 'ignored');
-   if(normalized.verificationText!==v.challengeText) return this.commit(live,()=> 'ignored');
-   const botId=normalized.candidate.botId;
-   if(!botId||event.message.author.kind!=='human'||!event.message.author.externalId||event.message.author.externalId===botId||(event.message.conversationKind==='group'&&!event.message.mentions.includes(botId)&&!(r.provider==='wecom'&&event.message.providerDirectedBot===true)))throw new ChannelError('forbidden','channel_verification_invalid');
-   return this.commit(live,()=>{this.connections.recordVerifiedCandidate(r.id,String(r.revision),{appId:r.appId,botId,tenantId:event.tenantId,...(normalized.candidate.robotCode?{robotCode:normalized.candidate.robotCode}:{}),challengeText:v.challengeText,eventId:event.eventId,messageId:event.message.id});return 'accepted';});
   }
   if(r.provider==='wecom'&&event.message.author.kind==='human'&&event.message.author.externalId&&
      (event.message.conversationKind==='private'||event.message.providerDirectedBot===true))

@@ -51,7 +51,7 @@ const report = (provider='feishu', canContinue=true) => ({version:1,provider,che
   {id:'scope_inventory',required:false,supported:provider==='feishu',status:provider==='feishu'?'pass':'unverified',...(provider==='feishu'?{}:{reason:'inventory_unavailable'})},
   {id:'group_history',required:false,supported:provider==='feishu',status:provider==='feishu'?'missing':'unsupported',reason:provider==='feishu'?'denied':'adapter_unsupported',...(provider==='feishu'?{missingScopes:['im:message.group_msg']}:{})},
 ]});
-const result=(provider='feishu')=>({draftId:'synthetic-channel-draft',expiresAt:Date.now()+60_000,source:{provider,status:'pending_verification',validation:report(provider)},scope:{departmentCount:1,userCount:1,entireOrganization:false}});
+const result=(provider='feishu')=>({draftId:'synthetic-channel-draft',expiresAt:Date.now()+60_000,source:{provider,botId:'synthetic-bot-open-id',status:'pending_verification',validation:report(provider)},scope:{departmentCount:1,userCount:1,entireOrganization:false}});
 const base='/workspaces/synthetic-workspace';
 async function choose(provider){const tab=[...document.querySelectorAll('[role=tab]')].find(el=>el.querySelector('.provider-label')&&el.textContent.trim()===provider);assert.ok(tab);tab.click();await flush();}
 
@@ -188,4 +188,81 @@ test('retired static Minutes stays absent while declared group capabilities save
  const connection={capabilities,groupListeningStatus:{enabled:true,permission:'granted',cachedMessages:0},id:'synthetic-connection',provider:'feishu',appId:'synthetic-app',tenantId:'synthetic-tenant',tenantIdNamespace:'tenant_key',enabled:true,status:'verified',revision:3,directoryStatus:'available',context:{historyEnabled:false,groupListenEnabled:true,meetingRefs:[{kind:'minutes',externalId:'syntheticminute'}]},transport:{state:'stopped',changedAt:1}};
  const env=await mount(t,'settings',{base,canManage:true},async request=>request.url==='/api/business-resources/configuration'?{configured:false,reason:'business_oauth_not_configured'}:request.method==='GET'?[connection]:{});
  assert.equal(document.querySelector('textarea[aria-label="允许读取的飞书妙记"]'),null);document.querySelector('button[aria-label="群上下文范围"]').click();await flush();assert.ok(text().includes('资料引用'));document.querySelector('button[aria-label="群上下文范围"]').click();await flush();const keywords=document.querySelector('textarea[aria-label="群聊触发关键词"]');assert.ok(keywords);assert.ok(document.querySelector('[aria-label="保留近期群消息作为上下文"]'));assert.equal(button('保存').disabled,true);keywords.value='合成关键词';keywords.dispatchEvent(new InputEvent('input',{bubbles:true,inputType:'insertText',data:'合成关键词'}));await flush();await click('保存');await until(()=>env.requests.some(r=>r.method==='PUT'));assert.deepEqual(env.requests.find(r=>r.method==='PUT').body,{enabled:true,expectedRevision:3,groupListenEnabled:true,groupTriggerKeywords:['合成关键词']});assert.equal('meetingRefs'in env.requests.find(r=>r.method==='PUT').body,false);
+});
+
+
+test('Feishu wizard distinguishes API-complete identity from tenant pending without authorizing the sender', async t => {
+  for (const status of ['verified', 'pending_verification']) await t.test(status, async t => {
+    const ready = [], response = result(); response.source.status = status;
+    const env = await mount(t, 'draft', { base, disabled: false, onReadyChanged: value => ready.push(value) }, async request => request.method === 'DELETE' ? {} : response);
+    assert.match(text(), /App ID 标识应用，不是机器人 open_id/);
+    assert.equal(document.querySelector('input[aria-label="botId"]'), null);
+    input('渠道应用 ID', 'synthetic-app'); input('渠道应用 Secret', 'synthetic-secret');
+    await channelCard('validate'); await click('验证渠道凭据'); await until(() => text().includes('渠道草稿已准备'));
+    const feedback = document.querySelector('.channel-verification-feedback').textContent;
+    assert.match(feedback, status === 'verified' ? /open_id 与租户 tenant_key 已由官方 API 验证，无需首条消息/ : /普通真人私聊或真实群 @.*按使用范围鉴权.*首发者不会自动获得使用权/);
+    assert.equal(ready.at(-1), true);
+    await click('跳过渠道连接'); assert.equal(document.querySelector('.channel-validation-report'), null);
+    await choose('钉钉'); assert.equal(document.querySelector('input[aria-label="渠道应用 Secret"]').value, '');
+    assert.ok(env.requests.every(request => /employee-channel-drafts/.test(request.url)));
+    assert.equal(env.requests.filter(request => request.method === 'POST').length, 1);
+  });
+});
+
+test('Feishu missing trusted bot open_id blocks readiness and explains App ID cannot replace it', async t => {
+  const ready = [], validation = report(); validation.canContinue = false;
+  validation.checks.push({ id: 'bot_identity', required: true, supported: true, status: 'unverified', reason: 'parse' });
+  let inconsistent = false;
+  const env = await mount(t, 'draft', { base, disabled: false, onReadyChanged: value => ready.push(value) }, async request => {
+    if (request.method === 'DELETE') return {};
+    if (!inconsistent) return { status: 400, data: { error: 'channel_validation_failed', validation } };
+    const response = result(); delete response.source.botId; return response;
+  });
+  input('渠道应用 ID', 'synthetic-app'); input('渠道应用 Secret', 'synthetic-secret');
+  await channelCard('validate'); await click('验证渠道凭据'); await until(() => text().includes('必要检查尚未全部通过'));
+  assert.match(document.querySelector('.validation-issues').textContent, /未取得可信的机器人 open_id.*App ID 不能替代机器人 open_id.*不能靠首条消息补齐/);
+  assert.equal(ready.at(-1), false);
+  inconsistent = true; await click('验证渠道凭据'); await until(() => text().includes('App ID 不能代替机器人身份'));
+  assert.equal(ready.at(-1), false); assert.equal(text().includes('渠道草稿已准备'), false);
+  assert.equal(env.requests.filter(request => request.method === 'DELETE').length, 1);
+});
+
+test('Feishu wizard ignores late workspace results, deletes them at their origin and blocks duplicate clicks', async t => {
+  let release; const held = new Promise(resolve => { release = resolve; }); t.after(() => release());
+  const ready = [], changes = [], oldResponse = result(); oldResponse.draftId = 'old-workspace-draft';
+  const nextBase = '/workspaces/synthetic-next-workspace';
+  const env = await mount(t, 'draft', { base, disabled: false, onReadyChanged: value => ready.push(value), onChange: value => changes.push(value) }, async request => {
+    if (request.method === 'DELETE') return {};
+    if (request.url === `/api${base}/employee-channel-drafts`) { await held; return oldResponse; }
+    const response = result(); response.draftId = 'new-workspace-draft'; response.source.status = 'verified'; return response;
+  });
+  input('渠道应用 ID', 'synthetic-old-app'); input('渠道应用 Secret', 'synthetic-old-secret');
+  await channelCard('validate'); await click('验证渠道凭据'); button('验证渠道凭据').click();
+  assert.equal(env.requests.filter(request => request.method === 'POST').length, 1);
+  assert.equal(button('跳过渠道连接').disabled, true);
+  env.props.base = nextBase; await flush();
+  assert.equal(document.querySelector('input[aria-label="渠道应用 Secret"]').value, ''); assert.equal(ready.at(-1), false);
+  input('渠道应用 ID', 'synthetic-new-app'); input('渠道应用 Secret', 'synthetic-new-secret');
+  await channelCard('validate'); await click('验证渠道凭据'); await until(() => changes.at(-1)?.draftId === 'new-workspace-draft');
+  release(); await until(() => env.requests.some(request => request.method === 'DELETE' && request.url === `/api${base}/employee-channel-drafts/old-workspace-draft`));
+  assert.equal(changes.at(-1).draftId, 'new-workspace-draft'); assert.equal(ready.at(-1), true);
+  assert.match(document.querySelector('.channel-verification-feedback').textContent, /无需首条消息完成身份确认/);
+  await click('跳过渠道连接'); assert.equal(changes.at(-1), null);
+  assert.ok(env.requests.some(request => request.method === 'DELETE' && request.url === `/api${nextBase}/employee-channel-drafts/new-workspace-draft`));
+  assert.ok(env.requests.every(request => request.url.includes('/employee-channel-drafts')));
+});
+
+
+test('create and edit use one robot credentials heading with each provider official field names', async t => {
+  for (const component of ['draft', 'settings']) await t.test(component, async t => {
+    const env = await mount(t, component, { base, disabled: false, canManage: true }, async () => []);
+    for (const [provider, labels] of [['飞书', ['App ID', 'App Secret']], ['钉钉', ['Client ID（AppKey）', 'Client Secret（AppSecret）']], ['企业微信', ['BotID', 'Secret']]]) {
+      await choose(provider);
+      if (component === 'draft') await channelCard('credentials');
+      const section = component === 'draft' ? document.querySelector('.slide.is-current') : document.querySelector('.channel-setup');
+      assert.match(section.textContent, /机器人连接凭据/);
+      assert.deepEqual([...section.querySelectorAll('.n-form-item-label')].map(label => label.textContent.trim()), labels);
+    }
+    assert.ok(env.requests.every(request => request.method === 'GET'));
+  });
 });

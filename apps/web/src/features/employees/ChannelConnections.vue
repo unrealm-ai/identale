@@ -45,10 +45,7 @@ const replacing=computed(()=>!!connection.value&&!!appId.value.trim()&&appId.val
 watch(appId,()=>{replaceSource.value=false;});
 const transportLabel = (state: DirectoryConnection['transport']['state']) => ({ stopped: '已停止', connecting: '正在连接', connected: '已连接', reconnecting: '正在重连', failed: '连接失败' })[state];
 const formatTime = (value: number) => new Date(value).toLocaleString('zh-CN');
-type Challenge = { challengeId: string; challengeText: string; expiresAt: number; revision: number };
-type Verification = { status: 'not_started' | 'waiting' | 'observed'; revision?: number; candidateId?: string; botId?: string; tenantId?: string; robotCode?: string; expiresAt: number };
 const credentialsComplete = computed(() => !!appId.value.trim() && !!appSecret.value);
-const challenge = ref<Challenge | null>(null), verification = ref<Verification | null>(null);
 const directoryBusy = ref(false);
 const report = ref<ChannelValidation | null>(null);
 const busy = ref(false), loaded = ref(false), error = ref(''), notice = ref('');
@@ -56,8 +53,8 @@ let controller = new AbortController();
 watch(() => busy.value || directoryBusy.value || policyBusy.value || sharingBusy.value, value => emit('busyChanged', value), { flush: 'sync' });
 watch(unsaved,v=>emit('dirtyChanged',v),{flush:'sync'});
 function clearSecrets() { appSecret.value = ''; }
-watch(provider, () => { challenge.value = null; verification.value = null; clearSecrets(); appId.value = connection.value?.appId ?? ''; replaceSource.value = false; notice.value = ''; error.value = ''; report.value = null; });
-watch(connection, value => { historyEnabled.value = value?.context?.groupListenEnabled ?? false;keywordText.value=(value?.context?.groupTriggerKeywords??[]).join('\n'); challenge.value = null; verification.value = null; appId.value = value?.appId ?? ''; clearSecrets(); replaceSource.value = false; });
+watch(provider, () => { clearSecrets(); appId.value = connection.value?.appId ?? ''; replaceSource.value = false; notice.value = ''; error.value = ''; report.value = null; });
+watch(connection, value => { historyEnabled.value = value?.context?.groupListenEnabled ?? false;keywordText.value=(value?.context?.groupTriggerKeywords??[]).join('\n'); appId.value = value?.appId ?? ''; clearSecrets(); replaceSource.value = false; });
 async function run(action: (signal: AbortSignal) => Promise<void>) {
   if (channelLocked.value) return; const signal = controller.signal; busy.value = true; error.value = ''; notice.value = '';
   try { await action(signal); } catch (cause) { if (!signal.aborted) { if (cause instanceof ChannelValidationFailure && cause.validation) { report.value = cause.validation; error.value = ''; } else error.value = errorMessage(cause); if (cause instanceof ApiError && cause.status === 401) emit('sessionExpired'); } }
@@ -83,8 +80,8 @@ async function mutate(action: 'connect' | 'revalidate' | 'settings') {
   await run(async signal => {
     try {
       const result = await channelApi<DirectoryConnection & {validation?:ChannelValidation}>(`${props.base}/channels/${selected}${action === 'connect' ? '' : `/${action}`}`, signal, body, action === 'revalidate' ? 'POST' : 'PUT');
-      report.value = result.validation ?? null;
       if (signal.aborted) return;
+      report.value = result.validation ?? null;
       notice.value = rebinding ? '换绑已保存。本渠道已恢复新建默认配置，旧名单未迁移；请核对新连接状态与使用范围。' : action === 'settings' ? (current?.enabled ? '已提交停用，请刷新核对连接状态。' : '已提交启用，请重新验证凭据并等待连接。') : current ? '已提交重新验证或连接。使用范围、能力包、群共享和上下文设置均保留，停用状态不变；请核对连接状态。' : '配置已保存：空白名单、群内可用，能力包继承本渠道范围。请核对连接状态。';
       if(rebinding)emit('rebound');
     } finally { if (!signal.aborted) { await read(signal); if (!signal.aborted) emit('changed'); } }
@@ -107,27 +104,7 @@ async function saveContext() {
     if (!signal.aborted) { await read(signal);notice.value = '已保存。';emit('changed'); }
   });
 }
-async function verifyRobot(action: 'start' | 'read' | 'confirm') {
-  if (!props.canManage || !connection.value || connection.value.status !== 'pending_verification' || busy.value) return;
-  const selected = provider.value, expectedRevision = action === 'confirm' ? verification.value?.revision : connection.value.revision;
-  const candidateId = verification.value?.candidateId;
-  if (action === 'confirm' && (!candidateId || verification.value?.status !== 'observed' || expectedRevision === undefined)) return;
-  if (action === 'confirm' && verification.value!.expiresAt <= Date.now()) { error.value = '本次验证已过期，请重新开始。'; return; }
-  await run(async signal => {
-    const url = `${props.base}/channels/${selected}/verification`;
-    if (action === 'start') {
-      const result = await api<Challenge>(`${url}/start`, signal, { expectedRevision });
-      if (!signal.aborted) { connection.value!.revision = result.revision; challenge.value = result; verification.value = null; }
-    } else if (action === 'read') {
-      const result = await api<Verification>(url, signal);
-      if (!signal.aborted) { verification.value = result; if (result.status === 'not_started') challenge.value = null; }
-    } else {
-      try { await api(`${url}/confirm`, signal, { candidateId, expectedRevision }); if (!signal.aborted) { notice.value = '候选确认已提交，请以下方测试入站状态为准；这不代表完整收发已验证。'; emit('changed'); } }
-      finally { if (!signal.aborted) await read(signal); }
-    }
-  });
-}
-watch(() => props.base, () => { controller.abort(); controller = new AbortController(); busy.value = false; loaded.value = false; challenge.value = null; verification.value = null; connections.value = [];policyDirty.value=false;policyBusy.value=false;sharingBusy.value=false;sharingDirty.value=false;confirmPolicySwitch.value=false;pendingPolicySwitch=undefined; clearSecrets(); void load(); }, { immediate: true });
+watch(() => props.base, () => { controller.abort(); controller = new AbortController(); busy.value = false; loaded.value = false; report.value = null; notice.value = ''; error.value = ''; connections.value = []; runtimeSnapshot.value = null;policyDirty.value=false;policyBusy.value=false;sharingBusy.value=false;sharingDirty.value=false;confirmPolicySwitch.value=false;pendingPolicySwitch=undefined; clearSecrets(); void load(); }, { immediate: true });
 onUnmounted(() => { controller.abort(); clearSecrets();emit('dirtyChanged',false); emit('busyChanged', false); });
 </script>
 <template>
@@ -150,16 +127,17 @@ onUnmounted(() => { controller.abort(); clearSecrets();emit('dirtyChanged',false
           <p v-if="!item.runtimeTransport" role="status">暂时无法确认此连接的运行状态，请稍后刷新。</p>
           <p v-if="item.runtimeTransport?.error && item.runtimeTransport.error!=='channel_ingress_standby'" role="status">连接错误：{{item.runtimeTransport.error}}</p><p v-if="item.lastError" role="status">{{item.lastError}}</p>
           <details class="connection-diagnostics"><summary>连接诊断</summary><p v-if="item.observedAt">运行状态观测时间：{{formatTime(item.observedAt)}}</p><template v-if="item.runtimeTransport"><p>状态更新时间：{{formatTime(item.runtimeTransport.changedAt)}}</p><p v-if="item.runtimeTransport.lastConnectedAt">最近连接：{{formatTime(item.runtimeTransport.lastConnectedAt)}}</p><p v-if="item.runtimeTransport.lastDisconnectedAt">最近断线：{{formatTime(item.runtimeTransport.lastDisconnectedAt)}}</p><p v-if="item.runtimeTransport.error==='channel_ingress_standby'">当前平台进程处于待命状态，不代表渠道已停用或全局连接离线；此处不推断另一进程的在线状态。</p></template>
-            <p>{{item.provider==='wecom'?'BotID':'应用'}} {{item.appId}} · 版本 {{item.revision}}</p><p>身份证据：{{evidenceLabel(item.identityEvidence)}}</p><p>{{item.provider==='feishu'?'测试入站':'首条消息'}}：{{item.inboundVerified?'已确认':'尚未确认'}}</p><p v-if="item.botId">{{item.status==='verified'?'已验证机器人':'配置机器人（待验证）'}} {{item.botId}}</p><p>身份依据：{{item.tenantIdNamespace}} · {{item.tenantId}}</p><p v-if="item.tenantIdNamespace==='app_scoped'||item.tenantIdNamespace==='app_id'">仅证明应用身份，不代表企业 corpId 已验证。</p>
+            <p>{{item.provider==='wecom'?'BotID':item.provider==='feishu'?'应用 App ID':'应用'}} {{item.appId}} · 版本 {{item.revision}}</p><p>身份证据：{{evidenceLabel(item.identityEvidence)}}</p><p>{{item.provider==='feishu'?'入站确认记录':'首条消息'}}：{{item.inboundVerified?'已确认':item.provider==='feishu'?'尚无确认记录':'尚未确认'}}</p><p v-if="item.botId">{{item.provider==='feishu'?'机器人 open_id':item.status==='verified'?'已验证机器人':'配置机器人（待验证）'}} {{item.botId}}</p><p>身份依据：{{item.tenantIdNamespace}} · {{item.tenantId}}</p><p v-if="item.tenantIdNamespace==='app_scoped'||item.tenantIdNamespace==='app_id'">{{item.provider==='feishu'?'租户 tenant_key 尚未确认，应用 App ID 不能代替租户身份。':'仅证明应用身份，不代表企业 corpId 已验证。'}}</p>
           </details>
         </section>
         <ChannelCapabilities v-if="connection" :capabilities="connection.capabilities" :provider="provider" @session-expired="emit('sessionExpired')"/>
         <template v-if="canManage">
           <section class="form-section channel-setup" aria-label="渠道接入配置">
-            <header class="form-section-heading"><h3>{{provider==='wecom'?'智能机器人':'应用凭据'}}</h3><a :href="provider==='feishu'?'https://open.feishu.cn/app':provider==='dingtalk'?'https://open-dev.dingtalk.com/':'https://work.weixin.qq.com/wework_admin/frame'" target="_blank" rel="noopener noreferrer">打开官方后台 ↗</a></header>
+            <header class="form-section-heading"><h3>机器人连接凭据</h3><a :href="provider==='feishu'?'https://open.feishu.cn/app':provider==='dingtalk'?'https://open-dev.dingtalk.com/':'https://work.weixin.qq.com/wework_admin/frame'" target="_blank" rel="noopener noreferrer">打开官方后台 ↗</a></header>
             <NForm class="channel-connection-form settings-form" @submit.prevent>
-              <NFormItem :label="provider==='wecom'?'智能机器人 BotID':provider==='dingtalk'?'Client ID（AppKey）':'App ID'"><NInput v-model:value="appId" :disabled="channelLocked||!loaded" :input-props="{'aria-label':'渠道应用 ID',autocomplete:'off'}"/></NFormItem>
-              <NFormItem :label="provider==='wecom'?'机器人 Secret':provider==='dingtalk'?'Client Secret（AppSecret）':'App Secret'"><NInput v-model:value="appSecret" type="password" :disabled="channelLocked||!loaded" :input-props="{'aria-label':'渠道应用密钥',autocomplete:'new-password'}"/></NFormItem>
+              <NFormItem :label="provider==='wecom'?'BotID':provider==='dingtalk'?'Client ID（AppKey）':'App ID'"><NInput v-model:value="appId" :disabled="channelLocked||!loaded" :input-props="{'aria-label':'渠道应用 ID',autocomplete:'off'}"/></NFormItem>
+              <NFormItem :label="provider==='wecom'?'Secret':provider==='dingtalk'?'Client Secret（AppSecret）':'App Secret'"><NInput v-model:value="appSecret" type="password" :disabled="channelLocked||!loaded" :input-props="{'aria-label':'渠道应用密钥',autocomplete:'new-password'}"/></NFormItem>
+              <p v-if="provider==='feishu'" class="field-note">App ID 标识应用；机器人 open_id 标识应用内的机器人，由官方 API 自动读取，无需手填。未取得可信 open_id 时不能完成连接验证。</p>
               <p class="field-note">{{provider==='wecom'?'仅需本员工独立机器人的 BotID 和 Secret。':'每位员工使用独立机器人应用。'}}<InfoHint label="凭据保存与更换">密钥只写入，提交后清空。相同机器人重新验证、重连或轮换密钥保留所有配置和停用状态。更换机器人须确认换绑并保存；转绑其他员工前须先解除原绑定。</InfoHint></p>
             </NForm>
             <NAlert v-if="replacing" type="warning" aria-label="换绑授权重置提醒">保存换绑后，启用新连接，仅当前渠道恢复新建默认值：空白名单、群内可用、能力包继承员工使用范围；飞书近期群消息上下文默认打开。当前渠道的人员名单、能力包渠道限制、群共享规则与缓存会重置，旧名单不迁移。群内可用和能力包继承可能扩大授权。其他渠道、网页权限和资源绑定不变。未保存前原绑定继续有效。<NCheckbox v-model:checked="replaceSource" :disabled="channelLocked" aria-label="确认换绑并重置当前渠道配置">我确认换绑并重置当前渠道配置</NCheckbox></NAlert>
@@ -168,15 +146,12 @@ onUnmounted(() => { controller.abort(); clearSecrets();emit('dirtyChanged',false
             <ChannelValidationReport v-if="report && (provider!=='wecom'||!report.canContinue)" :report="report"/>
         <div class="channel-actions" ><NButton key="connect" @click="mutate('connect')" type="primary" :disabled="channelLocked || policyDirty || sharingDirty || contextDirty || !loaded || !credentialsComplete || (replacing&&!replaceSource)" :loading="busy">{{replacing?'保存换绑':provider==='wecom'?'保存机器人配置':'验证并保存渠道连接'}}</NButton><NButton key="revalidate" v-if="connection" :disabled="channelLocked||policyDirty||sharingDirty||contextDirty" @click="mutate('revalidate')">{{provider==='wecom'?'重新连接并检查':'重新验证已存凭据'}}</NButton><NButton key="settings" v-if="connection" :disabled="channelLocked||policyDirty||sharingDirty||contextDirty" @click="mutate('settings')">{{ connection.enabled ? '停用此渠道' : '启用此渠道' }}</NButton><NPopconfirm v-if="connection" :disabled="channelLocked||policyDirty||sharingDirty||contextDirty" positive-text="确认解除绑定" negative-text="保留绑定" @positive-click="unbindChannel"><template #trigger><NButton :disabled="channelLocked||policyDirty||sharingDirty||contextDirty">解除渠道绑定</NButton></template>解除本员工的当前渠道绑定并停止连接，释放全平台机器人身份；历史业务记录保留，旧授权不会转给新的绑定。</NPopconfirm></div>
           </section>
-      <NAlert v-if="provider !== 'feishu' && connection?.status === 'pending_verification'" type="info">凭据已保存。长连接在线后，给机器人发一条普通私聊或群定向消息，系统会自动确认身份。</NAlert>
-      <NCard v-if="provider === 'feishu' && connection?.status === 'pending_verification'" title="显式验证机器人身份" size="small">
-        <p>先开始本次验证，再从企业客户端向目标机器人发送下方完整验证文本，不要附带业务或敏感信息。收到测试消息后，请核对机器人身份并明确确认。</p>
-        <NButton :disabled="busy || directoryBusy" @click="verifyRobot('start')">开始机器人身份验证</NButton>
-        <template v-if="challenge"><p>请完整发送：{{ challenge.challengeText }}</p><p>本次验证截止：{{ new Date(challenge.expiresAt).toLocaleString('zh-CN') }}</p><NButton :disabled="channelLocked" @click="verifyRobot('read')">检查测试消息候选</NButton></template>
-        <NAlert v-if="verification?.status === 'not_started'" type="warning">验证尚未开始或已过期，请重新开始。</NAlert>
-        <NAlert v-if="verification?.status === 'waiting'" type="info">尚未收到可确认的测试消息。请检查目标应用、长连接在线状态及验证有效期。</NAlert>
-        <template v-if="verification?.status === 'observed'"><NAlert type="warning">核对下列身份是否属于此员工的目标机器人；不匹配时不要确认。</NAlert><p>机器人：{{ verification.botId || '未提供' }}</p><p>企业依据：{{ verification.tenantId || '未提供，不推断企业身份' }}</p><p v-if="verification.robotCode">机器人代码：{{ verification.robotCode }}</p><NButton type="primary" :disabled="busy || !verification.candidateId || verification.revision === undefined || verification.expiresAt <= Date.now()" @click="verifyRobot('confirm')">身份核对无误，确认绑定此候选</NButton></template>
-      </NCard>
+      <NAlert v-if="provider === 'feishu' && connection?.status === 'verified'" type="success">机器人与租户身份已验证，可按使用范围使用；实际收发、长连接与模型状态仍需分别核对。</NAlert>
+      <NAlert v-if="provider === 'feishu' && connection?.status === 'pending_verification'" :type="connection.botId ? 'info' : 'warning'" aria-label="飞书身份确认状态">
+        <template v-if="connection.botId">已通过官方 API 取得机器人 open_id，仅待确认租户 tenant_key。长连接在线后，从飞书客户端给此机器人发普通真人私聊，或在群里真正 @ 此机器人；系统会自动确认租户，并按现有使用范围处理同一条消息。首发者不会自动获得使用权，无需验证口令或人工确认。发送后可刷新渠道状态。</template>
+        <template v-else>尚未取得可信的机器人 open_id，不能自动确认身份。请先在飞书应用中启用机器人能力，再重新验证已存凭据；应用 App ID 或消息中的 @ 不能替代机器人身份。</template>
+      </NAlert>
+      <NAlert v-if="provider !== 'feishu' && connection?.status === 'pending_verification'" type="info">凭据已保存。长连接在线后，给机器人发一条普通私聊或群定向消息，系统会自动确认身份；同一条消息仍按现有使用范围鉴权，首发者不会自动获得使用权。</NAlert>
     <ChannelAccessSettings v-if="canManage && selectedConnection && connection" ref="policyEditor" :base="base" :connection="connection" :can-manage="canManage" :disabled="!!disabled||busy||directoryBusy||sharingBusy" @busy-changed="v=>policyBusy=v" @dirty-changed="v=>policyDirty=v" @changed="emit('changed')" @session-expired="emit('sessionExpired')" />
       <NCard v-if="connection && provider!=='wecom' && (connection.capabilities?.recentGroupContext.supported || connection.capabilities?.keywordTriggers.supported)" title="群聊触发与上下文" size="small">
         <p class="field-note">普通群消息：{{ connection.groupListeningStatus?.permission === 'granted' ? '已授权' : connection.groupListeningStatus?.permission === 'denied' ? '未授权' : '未核验' }}<InfoHint label="关于群消息接收">上下文开关只控制近期群消息保留，不控制 SDK 接收或关键词触发。群消息接收权限与连接状态分别核验。最近窗口缓存 {{ connection.groupListeningStatus?.cachedMessages ?? 0 }} 条；没有缓存不表示已获权限。</InfoHint></p>

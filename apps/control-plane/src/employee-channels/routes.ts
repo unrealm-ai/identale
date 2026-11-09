@@ -10,15 +10,9 @@ export async function registerEmployeeChannelRoutes(app:FastifyInstance,service:
  route('POST','/:provider/revalidate',['expectedRevision'],(w,e,p,a,r)=>service.revalidate(w,e,p,a,(r.body as {expectedRevision?:number}|undefined)?.expectedRevision));
  route('PUT','/:provider/settings',['enabled','expectedRevision','historyEnabled','groupListenEnabled','groupTriggerKeywords','meetingRefs'],(w,e,p,a,r)=>service.settings(w,e,p,a,r.body as any));
  route('DELETE','/:provider',['expectedRevision'],(w,e,p,a,r)=>service.unbind(w,e,p,a,r.body as {expectedRevision:number}));
- route('POST','/:provider/verification/start',['expectedRevision'],(w,e,p,a,r)=>{
-  if(p!=='feishu')throw new EmployeeChannelError(409,'channel_verification_automatic');
-  return service.startVerification(w,e,p,a,r.body as any);
- });
+ route('POST','/:provider/verification/start',['expectedRevision'],()=>{throw new EmployeeChannelError(409,'channel_verification_automatic');});
  route('GET','/:provider/verification',[],(w,e,p)=>service.verification(w,e,p));
- route('POST','/:provider/verification/confirm',['expectedRevision','candidateId'],(w,e,p,a,r)=>{
-  if(p!=='feishu')throw new EmployeeChannelError(409,'channel_verification_automatic');
-  return service.confirmVerification(w,e,p,a,r.body as any);
- });
+ route('POST','/:provider/verification/confirm',['expectedRevision','candidateId'],()=>{throw new EmployeeChannelError(409,'channel_verification_automatic');});
  route('GET','/:provider/directory',[],(w,e,p,_a,r)=>service.discovery(w,e,p,r.query as any));
  route('POST','/wecom/member-search',['keywords'],(w,e,_p,_a,r)=>service.searchWeComMembers(w,e,(r.body as {keywords?:unknown}|undefined)?.keywords));
 }

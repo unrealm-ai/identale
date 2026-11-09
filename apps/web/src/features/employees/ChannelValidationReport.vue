@@ -5,6 +5,7 @@ import { NAlert, NTag } from 'naive-ui';
 import type { ChannelCheck, ChannelValidation } from './channel-validation';
 import {checkTone,checkLabel,checkCategory,tagTone} from './channel-validation-state';
 defineProps<{ report: ChannelValidation }>();
+const checkReason = (provider: ChannelValidation['provider'], check: ChannelCheck) => provider === 'feishu' && check.id === 'bot_identity' && check.status !== 'pass' && ['parse', 'required_field'].includes(check.reason ?? '') ? '未取得可信的机器人 open_id。请在飞书应用中启用机器人能力并重新验证；App ID 不能替代机器人 open_id，也不能靠首条消息补齐。' : reasons[check.reason ?? 'prerequisite'];
 const labels: Record<ChannelCheck['id'], string> = { scope_inventory: '应用权限清单', credentials: '应用凭据', bot_identity: '机器人身份', directory_identity: '目录应用 / 企业身份', directory_scope: '通讯录可见范围', department_read: '部门读取', user_name: '成员姓名读取', group_history: '群历史资源读取', meeting_materials: '会议材料资源读取' };
 const reasons: Record<string, string> = {
   prerequisite: '前置检查未通过，尚未验证', authentication: '凭据认证失败，请核对当前应用的凭据', denied: '厂商明确拒绝访问；同时核对权限与数据范围',
@@ -20,11 +21,11 @@ const reasons: Record<string, string> = {
 <template>
   <section class="channel-validation-report" aria-label="渠道分层验证结果" aria-live="polite">
     <NAlert :type="report.canContinue ? 'success' : 'error'" :role="report.canContinue ? 'status' : 'alert'">{{ report.canContinue ? (report.provider==='wecom'?'机器人配置检查通过。凭据认证以创建后长连接结果为准。':'必要读取已通过。') : '必要检查尚未全部通过，请处理后重试。' }}</NAlert>
-    <ul v-if="!report.canContinue" class="validation-issues"><li v-for="check in report.checks.filter(c=>c.required && c.status!=='pass')" :key="check.id"><strong>{{labels[check.id]}}</strong>：{{reasons[check.reason ?? 'prerequisite']}}</li></ul>
+    <ul v-if="!report.canContinue" class="validation-issues"><li v-for="check in report.checks.filter(c=>c.required && c.status!=='pass')" :key="check.id"><strong>{{labels[check.id]}}</strong>：{{checkReason(report.provider, check)}}</li></ul>
     <details class="validation-diagnostics"><summary>查看验证明细</summary><ChannelPermissionBlocks v-if="report.provider!=='wecom'" :provider="report.provider" :report="report"/>
     <div v-for="check in report.checks.filter(c=>report.provider!=='wecom'||['credentials','bot_identity'].includes(c.id))" :key="check.id" class="validation-check channel-status-block" :data-check="check.id" :data-tone="checkTone(check)">
       <div class="check-title"><strong>{{ labels[check.id] }}</strong><span>{{ checkCategory(check) }}</span><NTag size="small" :type="tagTone(checkTone(check))" :data-tone="checkTone(check)">{{ checkLabel(check) }}</NTag></div>
-      <p v-if="check.status !== 'pass'">{{ reasons[check.reason ?? 'prerequisite'] }}</p>
+      <p v-if="check.status !== 'pass'">{{ checkReason(report.provider, check) }}</p>
       <p v-if="check.scopeDisclosure?.departments === false">部门入口未披露，仅使用厂商明确返回的授权入口验证，不补猜根部门。</p>
       <p v-if="check.scopeDisclosure?.users === false">直接用户入口未披露；可从明确授权的部门验证成员姓名，不代表没有可见用户。</p>
       <small v-if="check.field">字段 {{ check.field.path }} · 预期 {{ check.field.expected }} · 实际 {{ check.field.actualType }}{{ check.field.itemCount === undefined ? '' : ` · ${check.field.itemCount} 项` }}</small>

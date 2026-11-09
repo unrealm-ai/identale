@@ -32,7 +32,7 @@ export interface ChannelAccessPolicy { sourceId: string; mode: ChannelAccessMode
 export interface DirectoryAccess { channelPolicies?: ChannelAccessPolicy[]; allowGroupMembers?: boolean; allow: DirectoryAccessRule[]; deny: DirectoryAccessRule[]; revision: number }
 export const providerLabel = (provider: DirectoryProvider): string => ({ feishu: '飞书', dingtalk: '钉钉', wecom: '企业微信' })[provider];
 export const directoryStatusLabel = (connection: DirectoryConnection): string => ({
-  verified:'机器人已验证',pending_verification:connection.provider==='feishu'?'等待机器人身份验证':'等待首条消息',invalid:'连接失效',disabled:'已停用',
+  verified:'机器人已验证',pending_verification:connection.provider==='feishu'?(connection.botId?'等待首条消息确认租户':'机器人身份不完整'):'等待首条消息',invalid:'连接失效',disabled:'已停用',
 })[connection.status];
 
 export interface PackageChannelPolicy { sourceId: string; legacyAllowCheck?: true; mode: 'inherit' | 'allowlist' | 'denylist'; allow: DirectoryAccessRule[]; deny: DirectoryAccessRule[] }

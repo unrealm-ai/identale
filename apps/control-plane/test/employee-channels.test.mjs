@@ -203,3 +203,27 @@ test('replacement verification failure and concurrent revision do not reset the 
  const current=f.service.settings('w','e','feishu','u',{enabled:false,expectedRevision:c.revision});release();await assert.rejects(saving,code('channel_configuration_changed'));
  assert.equal(f.repository.byId(c.id).sourceId,c.sourceId);assert.equal(f.repository.byId(c.id).revision,current.revision);assert.equal(f.repository.byId(c.id).enabled,false);assert.deepEqual(f.capabilities.getDirectoryAccess('w','e'),policy);
 });
+
+test('Feishu first inbound requires API bot and matching directory identity without overwriting display ID',async t=>{
+ const f=setup(t);f.options.verifyApplication=async()=>({identity:{appId:'app',tenantId:'display',tenantIdNamespace:'display_id'},botId:'bot',directoryStatus:'available'});
+ const service=new EmployeeChannelService(f.repository,f.options),c=await service.save('w','e','feishu','u',{appId:'app',appSecret:'fixture',expectedRevision:0});const candidate={appId:'app',botId:'bot',tenantId:'tenant',tenantNamespace:'tenant_key'},before=f.repository.byId(c.id);
+ for(const change of [{appId:'other'},{botId:'other'},{tenantNamespace:'corp_id'},{tenantId:''}])assert.throws(()=>service.observeFirstInbound(c.id,{...candidate,...change}),error=>error.status===403);
+ assert.deepEqual(f.repository.byId(c.id),before);service.observeFirstInbound(c.id,candidate);const after=f.repository.byId(c.id);assert.equal(after.status,'verified');assert.deepEqual(after.identity,before.identity);assert.equal(after.revision,before.revision);assert.equal(after.authRevision,before.authRevision);assert.equal(after.stateVersion,before.stateVersion+1);
+ const rotated=await service.revalidate('w','e','feishu','u',after.revision);assert.equal(rotated.sourceId,c.sourceId);assert.equal(rotated.status,'pending_verification');assert.equal(rotated.inboundVerified,false);assert.deepEqual(f.repository.byId(c.id).previousInstallation,{botId:'bot',tenantId:'tenant'});assert.throws(()=>service.observeFirstInbound(c.id,{...candidate,tenantId:'foreign'}),code('channel_verification_identity_conflict'));service.observeFirstInbound(c.id,candidate);assert.equal(f.repository.byId(c.id).sourceId,c.sourceId);
+});
+
+for(const invalid of ['missing-bot','unexpected-event-tenant','foreign-identity-app','corp-identity','app-identity'])test(`Feishu internal first observation rejects ${invalid}`,async t=>{
+ const f=setup(t),c=await ready(f),old=f.repository.byId(c.id);const next={...old,status:'pending_verification',identity:{appId:'app',tenantId:'display',tenantIdNamespace:'display_id'}};delete next.eventTenantId;
+ if(invalid==='missing-bot')delete next.botId;if(invalid==='unexpected-event-tenant')next.eventTenantId='tenant';if(invalid==='foreign-identity-app')next.identity.appId='foreign';if(invalid==='corp-identity')next.identity.tenantIdNamespace='corp_id';if(invalid==='app-identity')next.identity.tenantIdNamespace='app_id';
+ f.repository.save(next,old);const before=f.repository.byId(c.id);assert.throws(()=>f.service.observeFirstInbound(c.id,{appId:'app',botId:'bot-app',tenantId:'tenant',tenantNamespace:'tenant_key'}),code('channel_verification_invalid'));assert.deepEqual(f.repository.byId(c.id),before);
+});
+
+test('all public challenge writes return automatic and Feishu legacy candidates cannot be confirmed',async t=>{
+ const f=setup(t),c=await ready(f),old=f.repository.byId(c.id),legacy={challengeId:'legacy',challengeText:'identity-verify-00000000-0000-0000-0000-000000000000',expiresAt:f.state.clock+60000,candidate:{id:'candidate',appId:'app',botId:'bot-app',tenantId:'tenant',eventId:'old-event',messageId:'old-message'}};
+ f.repository.save({...old,status:'pending_verification',verification:legacy},old);f.repository.markVerificationEvent(c.id,'old-event','old-message');const before=f.repository.byId(c.id);
+ assert.throws(()=>f.service.startVerification('w','e','feishu','u',{expectedRevision:c.revision}),code('channel_verification_automatic'));assert.throws(()=>f.service.confirmVerification('w','e','feishu','u',{expectedRevision:c.revision,candidateId:'candidate'}),code('channel_verification_automatic'));
+ assert.throws(()=>f.service.recordVerifiedCandidate(c.id,String(c.revision),{...legacy.candidate,challengeText:legacy.challengeText}),code('channel_verification_invalid'));
+ const app=Fastify();await registerEmployeeChannelRoutes(app,f.service,{requireManager:()=> 'u'});t.after(()=>app.close());
+ for(const provider of ['feishu','dingtalk','wecom'])for(const operation of ['start','confirm']){const response=await app.inject({method:'POST',url:`/api/workspaces/w/entities/e/channels/${provider}/verification/${operation}`,payload:{expectedRevision:c.revision,...(operation==='confirm'?{candidateId:'candidate'}:{})}});assert.equal(response.statusCode,409);assert.equal(response.json().error,'channel_verification_automatic');}
+ const read=await app.inject({url:'/api/workspaces/w/entities/e/channels/feishu/verification'});assert.equal(read.statusCode,200);assert.equal(read.json().status,'observed');assert.deepEqual(f.repository.byId(c.id),before);assert.equal(f.service.isVerificationEvent(c.id,'old-event'),true);assert.equal(f.service.isVerificationEvent(c.id,'new-event','old-message'),true);
+});

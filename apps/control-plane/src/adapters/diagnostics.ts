@@ -4,7 +4,7 @@ import {AsyncLocalStorage} from 'node:async_hooks';
 import {randomUUID} from 'node:crypto';
 import {monitorEventLoopDelay} from 'node:perf_hooks';
 import {DiagnosticFileWriter} from './diagnostic-file-writer.js';
-import {diagnosticStages,diagnosticReasons,diagnosticCategories,diagnosticCodes,modelResponseIssues,isModelResponseCapture,safeModelProbeDiagnostic,safeModelRequestDiagnostic,diagnosticOperations,diagnosticEndpoints,diagnosticFailure,httpFailureCategory,type DiagnosticContext,type DiagnosticEvent,type DiagnosticPort,type DiagnosticStage} from '@dentity/application';
+import {diagnosticStages,diagnosticReasons,diagnosticCategories,diagnosticCodes,modelResponseIssues,isModelResponseCapture,safeModelProbeDiagnostic,safeModelRequestDiagnostic,safeDingtalkIdentityDiagnostic,diagnosticOperations,diagnosticEndpoints,diagnosticFailure,httpFailureCategory,type DiagnosticContext,type DiagnosticEvent,type DiagnosticPort,type DiagnosticStage} from '@dentity/application';
 
 /** The bounded file sink is independent of business transactions and conversation journals. */
 export class FileDiagnostics implements DiagnosticPort {
@@ -33,8 +33,10 @@ export class FileDiagnostics implements DiagnosticPort {
    const raw={...this.context(),...event},safe:Record<string,unknown>={version:1,at:new Date(this.now()).toISOString(),instanceId:this.instanceId,pid:process.pid,processRole:'control-plane',loggerVersion:2,nodeVersion:process.version,bootAt:this.bootAt,stage:event.stage,phase:event.phase,...(this.stats.dropped?{droppedEvents:this.stats.dropped}:{}),...(this.stats.writeFailures?{logWriteFailures:this.stats.writeFailures}:{})};
    for(const key of ['traceId','messageId','attemptId','causationId','conversationId','taskId','runId','sessionId','turnId','providerEventRef'] as const){const v=raw[key];if(typeof v==='string'&&/^(?:(?:turn|task-delivery|task-notification):)?(?:[a-f0-9]{64}|[a-f0-9-]{36})$/.test(v))safe[key]=v;}
    if(event.outcome&&['success','failure','queued','duplicate','unknown'].includes(event.outcome))safe.outcome=event.outcome;
+   const identityFailure=event.stage==='ingress.received'&&event.outcome==='failure'&&event.reason==='identity_invalid'&&event.ingressIdentity!==undefined;
+   if(identityFailure){const metadata=safeDingtalkIdentityDiagnostic(event.ingressIdentity);if(metadata)safe.ingressIdentity=metadata;}
    if(['ingress.received','reply.generated','outbox.send','feishu.message'].includes(event.stage)){
-    if(typeof event.text==='string'&&Buffer.byteLength(event.text)<=1024*1024)safe.text=event.text;
+    if(!identityFailure&&typeof event.text==='string'&&Buffer.byteLength(event.text)<=1024*1024)safe.text=event.text;
     if(event.status&&['received','generated','sent','accepted','blocked','failed','unknown','expired','ignored','duplicate'].includes(event.status))safe.status=event.status;
     if(event.reason&&(diagnosticReasons as readonly string[]).includes(event.reason))safe.reason=event.reason;
    }
@@ -56,7 +58,7 @@ export class FileDiagnostics implements DiagnosticPort {
    if(typeof event.rootDepartment==='boolean')safe.rootDepartment=event.rootDepartment;
    if(typeof event.requestId==='string'&&/^[A-Za-z0-9_-]{8,100}$/.test(event.requestId))safe.requestId=event.requestId;
    if(event.stage==='capability.filtered'){for(const key of ['resourceId','packageId','workspaceId','entityId'] as const){const value=event[key];if(typeof value==='string'&&/^[a-zA-Z0-9][a-zA-Z0-9_.:@-]{0,199}$/.test(value))safe[key]=value;}if(event.resourceKind==='skill'||event.resourceKind==='mcp')safe.resourceKind=event.resourceKind;if(event.filterReason==='resource_disabled'||event.filterReason==='package_disabled')safe.filterReason=event.filterReason;}
-   const messageKind=(event.stage==='ingress.received'&&event.messageKind==='receive')||(event.stage==='feishu.message'&&['send_request','send_response'].includes(event.messageKind??''));
+   const messageKind=!identityFailure&&((event.stage==='ingress.received'&&event.messageKind==='receive')||(event.stage==='feishu.message'&&['send_request','send_response'].includes(event.messageKind??'')));
    if(messageKind)safe.messageKind=event.messageKind;
    const messageJson=messageKind&&event.json!==undefined;
    if(messageJson)safe.json=redactMessageJson(event.json);

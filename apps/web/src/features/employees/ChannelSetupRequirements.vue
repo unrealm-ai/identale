@@ -8,7 +8,7 @@ defineProps<{provider:DirectoryProvider}>();
   <h4>需要申请的权限<InfoHint label="权限与可用范围">请在对应应用中授权并限定数据范围。保存配置不代表已获权限；以下验证结果以实际读取为准。</InfoHint></h4>
   <template v-if="provider==='feishu'">
     <ul><li>接收私聊与群 @ 消息、以机器人身份发送消息：<code>im:message.p2p_msg:readonly</code>、<code>im:message.group_at_msg:readonly</code>、<code>im:message:send_as_bot</code></li><li>读取企业、人员姓名及部门：<code>tenant:tenant:readonly</code>、<code>contact:user.base:readonly</code>、<code>contact:user.department:readonly</code>、<code>contact:department.base:readonly</code>、<code>contact:department.organize:readonly</code><InfoHint label="通讯录权限覆盖">已有广义权限覆盖时无需重复申请细粒度项，同时配置可见人员和部门。</InfoHint></li></ul>
-    <p class="field-note">订阅 <code>im.message.receive_v1</code>，使用长连接接收事件；权限修改后按官方要求发布应用。</p>
+    <p class="field-note">订阅 <code>im.message.receive_v1</code>，使用长连接接收事件；权限修改后按官方要求发布应用。官方 API 取得机器人 open_id 与租户 tenant_key 后身份即验证通过；仅缺 tenant_key 时，由当前连接的普通真人私聊或真实群 @ 消息自动确认。缺少可信 open_id 时，需先启用机器人并重新验证。</p>
     <details><summary>可选：群上下文与会议材料权限</summary><p>普通群消息需 <code>im:message.group_msg</code>；群历史基础读取满足 <code>im:message:readonly</code>、<code>im:message</code>、<code>im:message.history:readonly</code> 任一，并确保机器人在目标群中。</p><p>妙记逐字稿：<code>minutes:minutes.transcript:export</code>；已有纪要：<code>minutes:minutes.artifacts:read</code>。需同时拥有具体材料访问权。</p></details>
   </template>
   <template v-else-if="provider==='dingtalk'">

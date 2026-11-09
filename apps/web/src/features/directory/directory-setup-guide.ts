@@ -42,7 +42,7 @@ export const directorySetupGuides: Record<DirectoryProvider, DirectorySetupGuide
     title: '企业微信', consoleUrl: 'https://work.weixin.qq.com/',
     identityNote: '使用独立智能机器人的 BotID / Secret。使用范围按机器人来源独立，不代表公司全量员工。',
     steps: [
-      { id: 'create', title: '创建独立智能机器人', location: '企业微信智能机器人 → API / 长连接配置', paragraphs: [
+      { id: 'create', title: '机器人连接凭据', location: '企业微信智能机器人 → API / 长连接配置', paragraphs: [
         '为每位数字员工创建独立机器人，填写 BotID 和 Secret。服务器使用官方 SDK 主动建立唯一 WebSocket，同一连接收发，无需公网回调地址。',
       ], sources: [{ title: '企业微信官方智能机器人 SDK', url: 'https://github.com/WecomTeam/aibot-node-sdk' }] },
       { id: 'confirm', title: '保存配置并发送首条消息', location: '本员工 → 渠道连接 / 使用范围', paragraphs: [
@@ -54,14 +54,14 @@ export const directorySetupGuides: Record<DirectoryProvider, DirectorySetupGuide
   },
   feishu: {
     title: '飞书', consoleUrl: 'https://open.feishu.cn/app',
-    identityNote: '飞书 open_id 受应用命名空间限制。每个员工使用独立应用和机器人，同一应用同时提供机器人与通讯录能力。display_id 不是 tenant_key；不同应用的人员引用不能互认，应用 token 不代表平台登录用户。',
+    identityNote: 'App ID 标识应用，机器人 open_id 标识该应用内的机器人，二者不同；机器人 open_id 由官方 API 自动读取，无需手填。飞书 open_id 受应用命名空间限制。每个员工使用独立应用和机器人，同一应用同时提供机器人与通讯录能力。display_id 不是 tenant_key；不同应用的人员引用不能互认，应用 token 不代表平台登录用户。',
     steps: [
       {
         id: 'create', title: '创建企业自建应用', location: '飞书开放平台 → 开发者后台 → 企业自建应用',
         paragraphs: ['由具有相应企业权限的管理员确认目标企业并创建自建应用，填写名称和用途。为此员工创建独立应用与机器人，连接属于当前员工。', '若已有此员工独占的机器人应用，可填写同一 App ID，同时开通机器人和通讯录读取能力，分别完成消息与目录权限配置。已有应用必须单独检查通讯录权限，不能由机器人已启用推定可读。'],
         sources: [feishuSources.create],
       },
-      { id: 'messages', title: '启用机器人与长连接接收', location: '应用能力 → 机器人；事件与回调', paragraphs: ['启用此应用的机器人能力，按官方机器人教程配置接收消息、发送消息及必要的事件订阅。配置应用可见范围并由企业管理员审批或发布。', '本页仅填写 App ID 和 App Secret 并保存，等待服务器长连接显示已连接后，在飞书控制台选择“使用长连接接收事件”并保存，再添加 im.message.receive_v1 消息事件。控制台保存需要检测到在线客户端；不需要平台公网域名或入站 URL，无 HTTP 入站兜底。', '通讯录授权与机器人消息权限分别配置。凭据保存后的待验证状态表示真实机器人身份仍未确认。连接在线后发送普通私聊或群 @ 消息，首条通过校验的消息会自动确认身份。连接上线不等于使用授权已齐全。'], sources: [{ title: '飞书配置长连接事件订阅', url: 'https://open.feishu.cn/document/server-docs/event-subscription-guide/event-subscription-configure-/request-url-configuration-case' }, { title: '机器人接入官方教程', url: 'https://open.feishu.cn/document/client-docs/bot-v3/obtain-bot-info' }] },
+      { id: 'messages', title: '启用机器人与长连接接收', location: '应用能力 → 机器人；事件与回调', paragraphs: ['启用此应用的机器人能力，按官方机器人教程配置接收消息、发送消息及必要的事件订阅。配置应用可见范围并由企业管理员审批或发布。', '本页仅填写 App ID 和 App Secret 并保存，等待服务器长连接显示已连接后，在飞书控制台选择“使用长连接接收事件”并保存，再添加 im.message.receive_v1 消息事件。控制台保存需要检测到在线客户端；不需要平台公网域名或入站 URL，无 HTTP 入站兜底。', '通讯录授权与机器人消息权限分别配置。官方 API 已取得可信机器人 open_id 与租户 tenant_key 时，身份直接验证通过。仅缺 tenant_key 才等待首条消息：当前长连接在线后发送普通真人私聊或真实群 @ 消息，系统自动确认租户，并按现有使用范围处理同一条消息，首发者不会自动获得使用权。缺少可信机器人 open_id 时，先启用机器人能力并重新验证，不能靠消息补齐。连接上线不等于使用授权已齐全。'], sources: [{ title: '飞书配置长连接事件订阅', url: 'https://open.feishu.cn/document/server-docs/event-subscription-guide/event-subscription-configure-/request-url-configuration-case' }, { title: '机器人接入官方教程', url: 'https://open.feishu.cn/document/client-docs/bot-v3/obtain-bot-info' }] },
       {
         id: 'permissions', title: '最小化授权通讯录与组织关系', location: '应用 → 权限管理 / 通讯录权限范围；版本管理与发布',
         paragraphs: ['按官方部门和用户接口要求，开放读取必要人员基本信息、部门信息与成员所属部门的权限。若需要上级、部门负责人等组织字段，再检查对应字段权限及接口支持；不要为本功能申请无关手机号、证件信息或通讯录写入权限。', '为应用设定必要的通讯录可见范围，由企业管理员按控制台要求审批、发布并确认生效。应用可用范围与通讯录数据授权不能相互替代；界面菜单及权限名称以当前控制台为准。'],
@@ -69,7 +69,7 @@ export const directorySetupGuides: Record<DirectoryProvider, DirectorySetupGuide
         sources: [feishuSources.scope, feishuSources.department, feishuSources.user],
       },
       {
-        id: 'credentials', title: '安全填写凭据并验证来源', location: '飞书应用 → 凭证与基础信息；本页 → 渠道连接',
+        id: 'credentials', title: '机器人连接凭据', location: '飞书应用 → 凭证与基础信息；本页 → 渠道连接',
         paragraphs: ['从官方应用管理获取 App ID 和 App Secret，仅在本页专用凭据表单填写，点击“验证并保存渠道连接”。密钥只写入、不回显，提交后输入框清空；不要放进聊天、员工人设、截图或代码仓库。', '服务端使用应用凭据验证访问身份及授权范围，不接受手填企业标识。应用 token 不是个人登录凭据，不能用于证明某位渠道人员已登录平台。机器人验证成功后，在员工使用授权中按需查询目录并选择引用。'],
         sources: [feishuSources.token],
       }, selectionStep, rotateStep,
@@ -93,7 +93,7 @@ export const directorySetupGuides: Record<DirectoryProvider, DirectorySetupGuide
         sources: [dingtalkSources.permissions, dingtalkSources.scope, dingtalkSources.department, dingtalkSources.user, dingtalkSources.demo],
       },
       {
-        id: 'credentials', title: '安全验证应用凭据，不冒认企业身份', location: '钉钉应用 → 应用信息；本页 → 渠道连接',
+        id: 'credentials', title: '机器人连接凭据', location: '钉钉应用 → 应用信息；本页 → 渠道连接',
         paragraphs: ['从官方应用信息获取 AppKey / Client ID 与 AppSecret / Client Secret，在本页应用 ID 和应用密钥表单填写，点击“验证并保存渠道连接”。密钥只写入、不回显，提交后清空；不要分享密钥或长期 token。', '应用 accessToken 不代表当前平台用户或任意个人。当前返回来源为 app_scoped 或 app_id 时仅验证该应用，不能把它标作“corpId 已验证”，也不能自行填写企业 ID 来绕过来源验证。'],
         notes: ['同一企业的不同应用也不能直接共用本应用的人员引用。更换应用会产生新来源并使旧规则失效；本期不做跨应用身份共享，不由名称、企业声明或客户端自报 ID 推定。'],
         sources: [dingtalkSources.token],

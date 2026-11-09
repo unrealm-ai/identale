@@ -3,6 +3,25 @@ export const diagnosticStages = ['diagnostic.health','capability.filtered','ingr
 export type DiagnosticStage = typeof diagnosticStages[number];
 export const diagnosticCategories = ['authentication','configuration','permission','not_found','parameters','rate_limit','provider','network','timeout','parse','storage','conflict','canceled','unknown'] as const;
 export type DiagnosticCategory = typeof diagnosticCategories[number];
+/** Fixed observations only. These fields never contain provider identities or callback data. */
+export const dingtalkIdentityErrors=['ingress_bot_mismatch','ingress_robot_mismatch','ingress_tenant_mismatch','ingress_tenant_namespace_mismatch','ingress_app_mismatch','ingress_sender_tenant_mismatch','ingress_sender_identity_invalid','invalid_ingress_object','invalid_ingress_id','invalid_ingress_timestamp','invalid_ingress_text','invalid_ingress_json','invalid_ingress_mentions','ingress_too_large','unsupported_dingtalk_frame','unsupported_dingtalk_topic','unsupported_conversation_kind','unknown'] as const;
+export const dingtalkIdentityFields=['chatbotUserId','robotCode','chatbotCorpId','appId','appKey','senderCorpId','senderStaffId','tenantNamespace','eventId','messageId','conversationId'] as const;
+export const ingressIdentityStates=['missing','match','mismatch','present','unknown','invalid'] as const;
+export interface DingtalkIdentityDiagnostic {
+ channel:'dingtalk';error:typeof dingtalkIdentityErrors[number];conversationKind:'private'|'group'|'unknown';mentioned:'yes'|'no'|'unknown'|'invalid';
+ fields:Record<typeof dingtalkIdentityFields[number],typeof ingressIdentityStates[number]>;
+}
+/** Reconstruct every nested field; untyped callers cannot extend the log whitelist. */
+export function safeDingtalkIdentityDiagnostic(value:unknown):DingtalkIdentityDiagnostic|undefined {
+ try{
+  if(!value||typeof value!=='object'||Array.isArray(value))return;
+  const v=value as Record<string,unknown>,f=v['fields'],channel=v['channel'],error=v['error'],conversationKind=v['conversationKind'],mentioned=v['mentioned'];
+  if(channel!=='dingtalk'||!(dingtalkIdentityErrors as readonly unknown[]).includes(error)||!['private','group','unknown'].includes(conversationKind as string)||!['yes','no','unknown','invalid'].includes(mentioned as string)||!f||typeof f!=='object'||Array.isArray(f))return;
+  const fields={} as DingtalkIdentityDiagnostic['fields'];
+  for(const key of dingtalkIdentityFields){const state=(f as Record<string,unknown>)[key];if(!(ingressIdentityStates as readonly unknown[]).includes(state))return;fields[key]=state as typeof ingressIdentityStates[number];}
+  return{channel:'dingtalk',error:error as DingtalkIdentityDiagnostic['error'],conversationKind:conversationKind as DingtalkIdentityDiagnostic['conversationKind'],mentioned:mentioned as DingtalkIdentityDiagnostic['mentioned'],fields};
+ }catch{return;}
+}
 export const diagnosticCodes = ['mock_authentication_failed','invalid_api_key','mock_model_not_found','model_not_found','mock_rule_not_matched','rate_limit_exceeded','unsupported_thinking','unsupported_reasoning_effort','invalid_completion_request','model_parameters_incompatible','model_response_invalid','model_credential_unavailable'] as const;
 /** Response shape only: never provider text, arguments, tool names, or credentials. */
 export const modelResponseIssues = ['empty_reply','payload_size','payload_json','choice_missing','finish_length','finish_reason','content_type','tool_calls_type','tool_call_shape','tool_name_canonical','tool_name_unknown','tool_not_available','tool_arguments_json','usage'] as const;
@@ -42,6 +61,8 @@ export const diagnosticReasons=['identity_invalid','usage_denied','platform_fail
 export interface DiagnosticEvent {modelRequest?:ModelRequestDiagnostic;modelProbe?:ModelProbeDiagnostic;modelResponse?:import('./model-response-diagnostic.js').ModelResponseCapture;state?:string;metrics?:Readonly<Record<string,number>>;resourceId?:string;resourceKind?:'skill'|'mcp';packageId?:string;workspaceId?:string;entityId?:string;filterReason?:'resource_disabled'|'package_disabled'}
 export interface DiagnosticEvent extends Partial<DiagnosticContext>,Partial<DiagnosticFailure> {stage:DiagnosticStage;phase:'start'|'end'|'point';outcome?:'success'|'failure'|'queued'|'duplicate'|'unknown';durationMs?:number;queueMs?:number;sourceAt?:number;receivedAt?:number;text?:string;status?:'received'|'generated'|'sent'|'accepted'|'blocked'|'failed'|'unknown'|'expired'|'ignored'|'duplicate';reason?:typeof diagnosticReasons[number]}
 export interface DiagnosticEvent {
+ /** Only normalization failures may include these reconstructed, fixed DingTalk observations. */
+ ingressIdentity?:DingtalkIdentityDiagnostic;
  /** Only Feishu receive / actual message send request and response may carry complete message JSON. */
  messageKind?:'receive'|'send_request'|'send_response';
  json?:unknown;

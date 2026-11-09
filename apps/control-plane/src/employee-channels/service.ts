@@ -135,7 +135,7 @@ export class EmployeeChannelService {
   * unchanged so the same authenticated runner can admit this message and reply. */
  observeFirstInbound(id:string,candidate:ChannelIngressCandidate):void{
   const old=this.repository.byId(id)??fail(404,'channel_connection_not_found');
-  if(!old.enabled||old.status!=='pending_verification'||old.provider==='feishu'||candidate.appId!==old.appId||
+  if(!old.enabled||old.status!=='pending_verification'||candidate.appId!==old.appId||
      !validId(candidate.botId)||!validId(candidate.tenantId))
    fail(403,'channel_verification_invalid');
   const expectedBot=old.botId??old.previousInstallation?.botId;
@@ -143,7 +143,16 @@ export class EmployeeChannelService {
   if(expectedBot&&candidate.botId!==expectedBot||expectedTenant&&candidate.tenantId!==expectedTenant||
      old.robotCode&&candidate.robotCode!==old.robotCode)
    fail(403,'channel_verification_identity_conflict');
-  if(old.provider==='dingtalk'){
+  if(old.provider==='feishu'){
+   // The current credentials must already have established bot.open_id through
+   // bot/v3/info. A live event can fill only the missing tenant_key.
+   if(!old.botId||old.eventTenantId!==undefined||candidate.tenantNamespace!=='tenant_key'||
+      old.identity.appId!==old.appId||!['display_id','tenant_key'].includes(old.identity.tenantIdNamespace))
+    fail(403,'channel_verification_invalid');
+   if(old.identity.tenantIdNamespace==='tenant_key'&&old.identity.tenantId!==candidate.tenantId||
+      old.previousInstallation&&(old.previousInstallation.botId!==candidate.botId||old.previousInstallation.tenantId!==candidate.tenantId))
+    fail(403,'channel_verification_identity_conflict');
+  }else if(old.provider==='dingtalk'){
    if(candidate.tenantNamespace!=='corp_id'||!validId(candidate.robotCode)||
       old.identity.tenantIdNamespace==='corp_id'&&old.identity.tenantId!==candidate.tenantId)
     fail(403,'channel_verification_invalid');
@@ -255,23 +264,23 @@ export class EmployeeChannelService {
    return false;
   }catch(error){this.options.diagnostics?.event({stage:'authorization',phase:'point',outcome:'failure',...diagnosticFailure(error)});this.invalidate(r,error);return'unknown';}
  }
- /** Starts an explicit admin-owned installation verification, never triggered by an arbitrary callback. */
+ /** Legacy DingTalk compatibility helper; public onboarding uses first inbound. */
  startVerification(w:string,e:string,p:DirectoryProvider,actor:string,input:{expectedRevision:number}){
   const old=this.require(w,e,p);
-  if(p==='wecom')fail(409,'channel_verification_automatic');if(old.revision!==input.expectedRevision)fail(409,'channel_configuration_changed');if(!old.enabled||old.status!=='pending_verification')fail(409,'channel_verification_not_pending');
+  if(p!=='dingtalk')fail(409,'channel_verification_automatic');if(old.revision!==input.expectedRevision)fail(409,'channel_configuration_changed');if(!old.enabled||old.status!=='pending_verification')fail(409,'channel_verification_not_pending');
   const challengeId=randomUUID(),verification={challengeId,challengeText:`identity-verify-${randomUUID()}`,expiresAt:this.now()+600000};
   const r={...old,verification,revision:old.revision+1,updatedBy:actor};this.write(r,old,actor,'verification_started');return{...verification,revision:r.revision};
  }
  verification(w:string,e:string,p:DirectoryProvider){const r=this.require(w,e,p),v=r.verification;if(!v||v.expiresAt<=this.now())return{status:'not_started'};return{status:v.candidate?'observed':'waiting',challengeId:v.challengeId,challengeText:v.challengeText,expiresAt:v.expiresAt,revision:r.revision,...(v.candidate?{candidateId:v.candidate.id,botId:v.candidate.botId,tenantId:v.candidate.tenantId,robotCode:v.candidate.robotCode}:{})};}
- /** Server-only: call only after the provider adapter authenticates the actual challenge message. */
+ /** Legacy server-only candidate handling. Feishu no longer accepts candidates. */
  recordVerifiedCandidate(id:string,expectedVersion:string,input:{appId:string;botId:string;tenantId:string;robotCode?:string;challengeText:string;eventId:string;messageId:string}){
   const old=this.repository.byId(id)??fail(404,'channel_connection_not_found');const v=old.verification;
-  if(String(old.revision)!==expectedVersion||!old.enabled||old.status==='invalid'||old.status==='disabled'||!v||v.expiresAt<=this.now()||input.appId!==old.appId||input.challengeText!==v.challengeText||!validId(input.eventId)||!validId(input.messageId)||!validId(input.botId)||!validId(input.tenantId)||(old.botId!==undefined&&old.botId!==input.botId)||input.robotCode!==undefined&&!validId(input.robotCode))fail(403,'channel_verification_invalid');
+  if(old.provider==='feishu'||String(old.revision)!==expectedVersion||!old.enabled||old.status==='invalid'||old.status==='disabled'||!v||v.expiresAt<=this.now()||input.appId!==old.appId||input.challengeText!==v.challengeText||!validId(input.eventId)||!validId(input.messageId)||!validId(input.botId)||!validId(input.tenantId)||(old.botId!==undefined&&old.botId!==input.botId)||input.robotCode!==undefined&&!validId(input.robotCode))fail(403,'channel_verification_invalid');
   if(v!.candidate){if(v!.candidate.botId!==input.botId||v!.candidate.tenantId!==input.tenantId||v!.candidate.robotCode!==input.robotCode)fail(409,'channel_verification_candidate_conflict');this.repository.markVerificationEvent(old.id,input.eventId,input.messageId);return;}
   const r={...old,verification:{...v!,candidate:{id:randomUUID(),eventId:input.eventId,messageId:input.messageId,appId:input.appId,botId:input.botId,tenantId:input.tenantId,...(input.robotCode?{robotCode:input.robotCode}:{})}}};this.write(r,old,'authenticated-ingress','verification_candidate_observed');
  }
  confirmVerification(w:string,e:string,p:DirectoryProvider,actor:string,input:{expectedRevision:number;candidateId:string}){
-  if(p==='wecom')fail(409,'channel_verification_automatic');
+  if(p!=='dingtalk')fail(409,'channel_verification_automatic');
   const old=this.require(w,e,p),v=old.verification,c=v?.candidate;if(old.revision!==input.expectedRevision)fail(409,'channel_configuration_changed');if(!old.enabled||old.status==='invalid'||old.status==='disabled'||!v||v.expiresAt<=this.now()||!c||c.id!==input.candidateId)fail(409,'channel_verification_required');
   if(p==='dingtalk'&&old.robotCode&&c!.robotCode&&old.robotCode!==c!.robotCode)fail(409,'channel_unbind_required');
   const {verification:_verification,previousInstallation:_previous,...base}=old;const moved=!!old.previousInstallation&&(old.previousInstallation.botId!==c!.botId||old.previousInstallation.tenantId!==c!.tenantId);const r:EmployeeChannelRecord={...base,...(moved?{sourceId:randomUUID(),context:{historyEnabled:false,meetingRefs:[]}}:{}),botId:c!.botId,eventTenantId:c!.tenantId,...(c!.robotCode?{robotCode:c!.robotCode}:{}),revision:old.revision+1,status:'verified',identityEvidence:'authenticated_event_confirmed',inboundVerified:true,lastError:null,updatedBy:actor};this.write(r,old,actor,'verification_confirmed');return this.dto(r,true);

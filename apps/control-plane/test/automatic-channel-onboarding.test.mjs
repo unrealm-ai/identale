@@ -25,7 +25,7 @@ const person=id=>({userid:id,name:'Fixture Member',departments:[id==='member'?'E
 async function setup(t){
  const dir=await mkdtemp(join(tmpdir(),'automatic-channel-')),store=new Store(join(dir,'test.sqlite'));
  let now=1800000000000;
- const state={directoryDenied:false,searchDenied:false,searchTimeout:false,wrongSchema:false,removed:false,calls:[]};
+ const state={feishuTenantKey:true,directoryDenied:false,searchDenied:false,searchTimeout:false,wrongSchema:false,removed:false,calls:[]};
  const http=createServer(async(req,res)=>{
   let body='';
   for await(const chunk of req)body+=chunk;
@@ -38,7 +38,7 @@ async function setup(t){
   else if(route==='/auth/scopes'||route.startsWith('/topapi/'))response=state.directoryDenied?{errcode:60011}:{errcode:0,auth_org_scopes:{authed_dept:[1],authed_user:['member']}};
   else if(route==='/open-apis/auth/v3/tenant_access_token/internal')response={code:0,tenant_access_token:'feishu-token',expire:7200};
   else if(route==='/open-apis/bot/v3/info')response={code:0,bot:{open_id:'feishu-bot'}};
-  else if(route==='/open-apis/tenant/v2/tenant/query')response={code:0,data:{tenant:{tenant_key:'feishu-tenant',display_id:'display'}}};
+  else if(route==='/open-apis/tenant/v2/tenant/query')response={code:0,data:{tenant:{...(state.feishuTenantKey?{tenant_key:'feishu-tenant'}:{}),display_id:'display'}}};
   else if(route==='/open-apis/contact/v3/scopes')response={code:0,data:{department_ids:[],user_ids:['member'],group_ids:[],has_more:false}};
   else if(route.startsWith('/open-apis/')&&route.includes('scopes'))response={code:0,data:{scopes:[]}};
   else if(route.includes('scope'))response={code:0,data:{department_ids:[],user_ids:['member'],group_ids:[]}};
@@ -380,4 +380,11 @@ test('U02 source writes keep other channels and existing implicit all remains al
  const legacy=f.capabilities.getDirectoryAccess('w','e').channelPolicies.find(p=>p.sourceId===c.sourceId);
  assert.equal(legacy.mode,'all');assert.equal(legacy.allowGroupMembers,false);
  assert.equal(JSON.parse(f.store.one('SELECT channel_policies_json FROM entity_directory_policies WHERE entity_id=?','e').channel_policies_json).some(p=>p.sourceId===c.sourceId),false,'reading legacy configuration never rewrites it');
+});
+
+test('Feishu real HTTP application verification pins bot.open_id before first live event fills missing tenant_key',async t=>{
+ const f=await setup(t);f.state.feishuTenantKey=false;const c=await f.save('feishu');assert.equal(c.status,'pending_verification');assert.equal(c.botId,'feishu-bot');assert.equal(c.tenantId,'display');assert.equal(c.tenantIdNamespace,'display_id');assert.ok(f.state.calls.some(c=>c.route==='/open-apis/bot/v3/info'));
+ f.policy(c,[{sourceId:c.sourceId,kind:'channel_user',subjectId:channelSubject('channel_user','member','open_id',c.appId),conversationKinds:['private','group']}]);const live=await f.transport.current(c.id),before=f.repository.byId(c.id);
+ const raw={schema:'2.0',header:{event_id:'first-feishu-event',event_type:'im.message.receive_v1',app_id:c.appId,tenant_key:'feishu-tenant'},event:{sender:{sender_id:{open_id:'member'},sender_type:'user',tenant_key:'feishu-tenant'},message:{message_id:'first-feishu-message',chat_id:'chat',chat_type:'p2p',message_type:'text',create_time:'1800000000000',content:JSON.stringify({text:'Fixture request'}),mentions:[]}}};
+ assert.equal(await live.sink.onEvent(raw),'accepted');assert.equal(await live.sink.onEvent(raw),'duplicate');assert.equal(f.count(),1);const after=f.repository.byId(c.id);assert.equal(after.eventTenantId,'feishu-tenant');assert.equal(after.botId,'feishu-bot');assert.equal(after.status,'verified');assert.equal(after.identityEvidence,'authenticated_first_message');assert.equal(after.revision,before.revision);assert.equal(after.authRevision,before.authRevision);assert.equal(after.stateVersion,before.stateVersion+1);assert.deepEqual(after.identity,before.identity);assert.equal((await f.transport.current(c.id)).session.generation,live.session.generation);
 });
