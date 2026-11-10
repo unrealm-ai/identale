@@ -39,7 +39,7 @@ async function mount(t, name, initial, handler = async () => { throw new Error('
     assert.ok(String(url).startsWith('/api/'), 'Only relative local fixture API routes are permitted');
     const request = { url: String(url), method: options.method ?? 'GET', body: options.body ? JSON.parse(options.body) : undefined };
     requests.push(request);
-    const result = name==='settings'&&request.url.endsWith('/group-sharing')?{revision:0,rules:[]}:name==='settings'&&request.url.endsWith('/group-sharing/status')?{appliedRevision:0}:name==='settings' && request.url === '/api/business-resources/configuration' ? {configured:false,reason:'business_oauth_not_configured'} : name === 'settings' && request.method==='GET' && request.url.endsWith('/directory-access')
+    const result = name==='settings'&&request.url.endsWith('/registration')?{registration:null,preset:{name:'合成员工',description:''},permissions:{version:'v1',scopes:[],events:[]}}:name==='settings'&&request.url.endsWith('/group-sharing')?{revision:0,rules:[]}:name==='settings'&&request.url.endsWith('/group-sharing/status')?{appliedRevision:0}:name==='settings' && request.url === '/api/business-resources/configuration' ? {configured:false,reason:'business_oauth_not_configured'} : name === 'settings' && request.method==='GET' && request.url.endsWith('/directory-access')
       ? {allow:[],deny:[],allowGroupMembers:false,revision:0}
       : name === 'settings' && request.url.endsWith('/runtime-status')
       ? await (runtimeHandler ? runtimeHandler(request) : { observedAt: 1792756800000, employee: { channels: latestConnections } })
@@ -48,7 +48,7 @@ async function mount(t, name, initial, handler = async () => { throw new Error('
     return new Response(JSON.stringify(result?.data ?? result), { status: typeof result?.status === 'number' ? result.status : 200, headers: { 'content-type': 'application/json' } });
   };
   document.body.innerHTML = '<div id="app"></div>';
-  const app = createApp({ render: () => h(components[name], props) }); app.mount('#app'); await flush();if(name==='settings'&&initial.canManage){await until(()=>!!document.querySelector('.connection-list'));const b=[...document.querySelectorAll('.connection-list button')].find(b=>b.textContent.trim()==='查看此连接')??[...document.querySelectorAll('.connection-list button')].find(b=>b.textContent.trim()==='添加渠道连接');if(b){b.click();await flush();}const details=document.querySelector('.channel-guide-toggle');if(details)details.open=true;}if(name==='wizard'){const b=[...document.querySelectorAll('button')].find(b=>b.textContent.trim()==='展开渠道、工作能力与自动运行配置');if(b){b.click();await flush();}} if(name==='settings'&&document.querySelector('.channel-guide-dots button[data-step=validate]'))await channelCard('validate');
+  const app = createApp({ render: () => h(components[name], props) }); app.mount('#app'); await flush();if(name==='settings'&&initial.canManage){await until(()=>!!document.querySelector('.connection-list'));const b=[...document.querySelectorAll('.connection-list button')].find(b=>b.textContent.trim()==='查看此连接')??[...document.querySelectorAll('.connection-list button')].find(b=>b.textContent.trim()==='添加渠道连接');if(b){b.click();await flush();}const manual=[...document.querySelectorAll('button')].find(b=>b.textContent.trim()==='手动接入');if(manual){manual.click();await flush();}const details=document.querySelector('.channel-guide-toggle');if(details)details.open=true;}if(name==='wizard'){const b=[...document.querySelectorAll('button')].find(b=>b.textContent.trim()==='展开渠道、工作能力与自动运行配置');if(b){b.click();await flush();}} if(name==='settings'&&document.querySelector('.channel-guide-dots button[data-step=validate]'))await channelCard('validate');
   t.after(() => { app.unmount(); document.body.innerHTML = ''; });
   return { props, requests, app, events };
 }
@@ -188,7 +188,7 @@ test('explicit unbind asks confirmation and releases the current CAS binding bef
   assert.equal(env.requests.some(r => r.method === 'DELETE'), false);
   await click('解除渠道绑定'); await click('确认解除绑定'); await until(() => text().includes('渠道绑定已解除'));
   assert.deepEqual(env.requests.find(r => r.method === 'DELETE').body, { expectedRevision: 1 });
-  input('渠道应用 ID', 'replacement-app'); input('渠道应用密钥', 'replacement-fixture-secret'); await click('验证并保存渠道连接');
+  await click('手动接入'); input('渠道应用 ID', 'replacement-app'); input('渠道应用密钥', 'replacement-fixture-secret'); await click('验证并保存渠道连接');
   await until(() => env.requests.some(r => r.method === 'PUT')); assert.equal(env.requests.find(r => r.method === 'PUT').body.expectedRevision, 0);
 });
 
@@ -237,7 +237,7 @@ test('Feishu context settings preserve enabled status with CAS and remove static
     current = connection({ revision: 2, context: { historyEnabled: false, groupListenEnabled:request.body.groupListenEnabled, meetingRefs: [] } }); return current;
   });
   await until(() => !!document.querySelector('.channel-context-form'));
-  assert.deepEqual(new Set(env.requests.map(r=>r.url)),new Set([`/api${base}/channels`,`/api${base}/runtime-status`,`/api${base}/directory-access`,`/api${base}/group-sharing`,`/api${base}/group-sharing/status`,'/api/business-resources/configuration'])); await click('群上下文范围');assert.ok(text().includes('资料引用'));await click('群上下文范围');assert.ok(document.querySelector('.channel-context-form textarea[aria-label="群聊触发关键词"]'));assert.ok(text().includes('普通群消息接收权限尚未验证'));
+  assert.deepEqual(new Set(env.requests.map(r=>r.url)),new Set([`/api${base}/channels`,`/api${base}/channels/feishu/registration`,`/api${base}/runtime-status`,`/api${base}/directory-access`,`/api${base}/group-sharing`,`/api${base}/group-sharing/status`,'/api/business-resources/configuration'])); await click('群上下文范围');assert.ok(text().includes('资料引用'));await click('群上下文范围');assert.ok(document.querySelector('.channel-context-form textarea[aria-label="群聊触发关键词"]'));assert.ok(text().includes('普通群消息接收权限尚未验证'));
   document.querySelector('.channel-context-form .n-checkbox').click();
   await click('保存'); await until(() => env.requests.some(item => item.method === 'PUT'));
   assert.deepEqual(env.requests.find(item => item.method === 'PUT').body, { enabled: true, expectedRevision: 1, groupListenEnabled: true, groupTriggerKeywords:[] });
@@ -324,7 +324,7 @@ test('DingTalk submits only supported credentials and switching back clears secr
   input('渠道应用 ID', 'ding-fixture'); input('渠道应用密钥', 'ding-fixture-secret'); await click('验证并保存渠道连接');
   const saved = env.requests.find(item => item.method === 'PUT'); assert.ok(saved.url.endsWith('/dingtalk')); assert.deepEqual(saved.body, { appId: 'ding-fixture', appSecret: 'ding-fixture-secret', expectedRevision: 0, replaceSource: false });
   input('渠道应用密钥', 'unsent-ding-secret');
-  await providerTab('飞书');await click('放弃策略修改并切换');
+  await providerTab('飞书');await click('放弃策略修改并切换');await click('手动接入');
   assert.equal(document.querySelector('input[aria-label="渠道应用密钥"]').value, '');
   assert.equal(document.querySelector('input[aria-label="回调加密密钥"]'), null); assert.equal(document.querySelector('input[aria-label="回调校验 Token"]'), null);
 });

@@ -5,22 +5,25 @@ import { DirectoryError } from '@dentity/application';
 import { createDirectoryAdapter } from '../adapters/directory/index.js';
 import { DirectoryCredentialVault, type SealedDirectoryCredential } from '../directory/secrets.js';
 import { EmployeeApplicationTransport } from './provider.js';
+import { ChannelBindingConflict } from './repository.js';
 import { EmployeeChannelError, type EmployeeChannelService } from './service.js';
 import type { EmployeeChannelOptions, VerifiedEmployeeApplication } from './types.js';
 import { failedCheck, validationOf, type ChannelValidation } from './validation.js';
 
-import { FEISHU_REGISTRATION_PERMISSIONS, LEGACY_FEISHU_REGISTRATION_PROFILE, missingRegistrationPermissions,
+import { FEISHU_CONTACT_RANGE_SCOPE, FEISHU_REGISTRATION_PERMISSIONS, LEGACY_FEISHU_REGISTRATION_PROFILE, missingRegistrationPermissions,
   registrationPermissionGroups, type FeishuRegistrationProfile } from './feishu-registration-permissions.js';
 export { FEISHU_REGISTRATION_PERMISSIONS } from './feishu-registration-permissions.js';
 
 type State = 'starting' | 'awaiting_confirmation' | 'credentials_saved' | 'checking' |
   'needs_attention' | 'connected' | 'cancelled' | 'expired' | 'denied' | 'failed' | 'interrupted';
+type ContactRange = { status: 'waiting_permission' | 'applying' | 'applied' | 'failed' | 'uncertain' | 'skipped'; updatedAt: number; error?: string };
 type Registration = {
   id: string; workspaceId: string; entityId: string; actorId: string; operationId: string;
   state: State; updatedAt: number; expiresAt: number; name: string; description: string;
   appId?: string; secret?: SealedDirectoryCredential; error?: string;
   missingScopes?: string[]; validation?: ChannelValidation;
   profile?: FeishuRegistrationProfile; checkAttempts?: number; nextCheckAt?: number;
+  contactRange?: ContactRange;
   connectionId?: string; autoRetryBlocked?: boolean; permissionCheckedAt?: number;
 };
 type Live = { controller: AbortController; timer: ReturnType<typeof setTimeout>; url?: string };
@@ -81,6 +84,9 @@ export class FeishuAppRegistration {
   }
   private reconcile(r: Registration) {
     if (pending(r) && !this.live.has(r.id)) this.settle(r, 'interrupted', 'feishu_registration_interrupted');
+    if (r.contactRange?.status === 'applying' && !this.checking.has(r.id)) {
+      r.contactRange = { status: 'uncertain', updatedAt: this.now(), error: 'feishu_contact_range_outcome_unknown' }; this.write(r);
+    }
     if (r.state === 'checking' && !this.checking.has(r.id)) {
       r.state = 'needs_attention'; r.error = 'feishu_registration_verification_interrupted'; this.write(r);
     }
@@ -93,6 +99,8 @@ export class FeishuAppRegistration {
       current?.appId === r.appId && current.enabled && current.status === 'verified' &&
       current.botId && current.directoryStatus === 'available' && current.validation?.canContinue &&
       !missingRegistrationPermissions(this.requested(r), current.validation).length) {
+      if (this.contactRangePending(r) && !r.connectionId)
+        r.contactRange = { status: 'skipped', updatedAt: this.now(), error: 'feishu_contact_range_binding_unconfirmed' };
       r.state = 'connected'; r.validation = current.validation; r.connectionId = current.id;
       delete r.secret; delete r.error; delete r.missingScopes; this.write(r);
     }
@@ -108,6 +116,7 @@ export class FeishuAppRegistration {
     return { preset, permissions: this.profile, registration: r ? {
       id: r.id, state: r.state, updatedAt: r.updatedAt, profileVersion: this.requested(r).version, requestedPermissions: this.requested(r),
       permissionGroups: registrationPermissionGroups(this.requested(r), r.validation),
+      ...(r.contactRange ? { contactRange: r.contactRange } : {}),
       ...(r.permissionCheckedAt !== undefined ? { permissionCheckedAt: r.permissionCheckedAt } : {}),
       autoCheck: { eligible, inProgress: this.checking.has(r.id), nextCheckAt: eligible ? r.nextCheckAt ?? this.now() : null },
       credentialSaved: !!r.secret || r.state === 'connected',
@@ -134,6 +143,7 @@ export class FeishuAppRegistration {
     if (this.live.size >= 32) fail(429, 'feishu_registration_busy');
     const r: Registration = { id: randomUUID(), workspaceId: w, entityId: e, actorId: a,
       operationId: operation, profile: structuredClone(this.profile), name: preset.name, description: preset.description, state: 'starting',
+      ...(this.profile.contactRange === 'all' ? { contactRange: { status: 'waiting_permission' as const, updatedAt: this.now() } } : {}),
       updatedAt: this.now(), expiresAt: this.now() + 10 * 60_000 };
     this.store.run('INSERT INTO feishu_app_registrations VALUES(?,?,?,?,?,?)', r.id, w, e, a, operation, JSON.stringify(r));
     const controller = new AbortController();
@@ -212,8 +222,44 @@ export class FeishuAppRegistration {
     const current = this.channels.repository.byProvider(r.workspaceId, r.entityId, 'feishu');
     if (r.state === 'connected') return !!current && current.appId === r.appId &&
       (!r.connectionId || current.id === r.connectionId) && current.enabled && current.status === 'verified' &&
-      registrationPermissionGroups(this.requested(r), r.validation).some(group => group.status !== 'granted');
+      (this.contactRangePending(r) || registrationPermissionGroups(this.requested(r), r.validation).some(group => group.status !== 'granted'));
     return !!r.secret && !!r.appId && !current && ['credentials_saved', 'needs_attention'].includes(r.state);
+  }
+  private contactRangePending(r: Registration) {
+    return this.requested(r).contactRange === 'all' && !!r.contactRange &&
+      ['waiting_permission', 'failed'].includes(r.contactRange.status);
+  }
+  /** Only records explicitly marked at creation may expand their own application's scope.
+   * Historical registrations, manual connections and uncertain writes never enter this path. */
+  private async ensureContactRange(r: Registration, report: ChannelValidation | undefined,
+    transport: EmployeeApplicationTransport, guard: () => void) {
+    if (!this.contactRangePending(r)) return;
+    guard();
+    const rows = report?.checks.find(check => check.id === 'scope_inventory')?.scopeInventory
+      ?.filter(row => row.scope === FEISHU_CONTACT_RANGE_SCOPE && row.identity === 'tenant') ?? [];
+    if (!rows.length || rows.some(row => row.status !== 'granted')) {
+      r.contactRange = { status: 'waiting_permission', updatedAt: this.now() }; this.write(r); return;
+    }
+    let dispatched = false;
+    try {
+      await transport.expandContactRange(() => {
+        guard();
+        r.contactRange = { status: 'applying', updatedAt: this.now() }; this.write(r);
+        dispatched = true;
+      });
+      guard();
+      r.contactRange = { status: 'applied', updatedAt: this.now() }; this.write(r);
+    } catch (error) {
+      if (this.closed) return;
+      const definite = !dispatched || error instanceof DirectoryError &&
+        ['authentication_failed', 'authorization_denied'].includes(error.code);
+      r.contactRange = { status: definite ? 'failed' : 'uncertain', updatedAt: this.now(),
+        error: error instanceof DirectoryError ? error.code : error instanceof EmployeeChannelError ? error.code : 'feishu_contact_range_update_failed' };
+      this.write(r);
+      // Binding / actor changes and invalid credentials must still halt this check.
+      guard();
+      if (error instanceof DirectoryError && error.code === 'authentication_failed') throw error;
+    }
   }
   private deferCheck(r: Registration) {
     const delay = [5000, 10000, 20000, 30000, 60000][Math.min(r.checkAttempts ?? 0, 4)]!;
@@ -235,9 +281,10 @@ export class FeishuAppRegistration {
         const configuration = this.channels.ingressConfiguration(binding.id);
         if (!configuration || !('appSecret' in configuration.credentials)) fail(409, 'feishu_registration_connection_changed');
         const secret = { appSecret: configuration!.credentials.appSecret! };
+        const transport = new EmployeeApplicationTransport('feishu', binding.appId, secret, this.options);
         const report = this.options.verifyApplication
           ? (await this.options.verifyApplication('feishu', binding.appId, secret)).validation
-          : await new EmployeeApplicationTransport('feishu', binding.appId, secret, this.options).inspectPermissions();
+          : await transport.inspectPermissions();
         const current = this.extensionBinding(r);
         if (current.authRevision !== binding.authRevision || current.sourceId !== binding.sourceId || current.revision !== binding.revision)
           fail(409, 'feishu_registration_connection_changed');
@@ -248,6 +295,11 @@ export class FeishuAppRegistration {
         r.validation = { version: 1, provider: 'feishu', checkedAt: (r.validation ?? binding.validation)?.checkedAt ?? 0, canContinue: r.validation?.canContinue ?? true,
           checks: [...checks.filter(check => check.id !== 'scope_inventory'),
             report?.checks.find(check => check.id === 'scope_inventory') ?? { id: 'scope_inventory', required: false, supported: true, status: 'unverified', reason: 'inventory_unavailable' }] };
+        await this.ensureContactRange(r, report, transport, () => {
+          const latest = this.extensionBinding(r);
+          if (latest.authRevision !== binding.authRevision || latest.sourceId !== binding.sourceId || latest.revision !== binding.revision)
+            fail(409, 'feishu_registration_connection_changed');
+        });
         // Scope inspection returns sanitized failure evidence instead of throwing.
         // Authentication failure must pause automatic retries just like token failure.
         if (r.validation.checks.find(check => check.id === 'scope_inventory')?.reason === 'authentication') {
@@ -277,6 +329,10 @@ export class FeishuAppRegistration {
     if (this.closed || this.read(r.id)?.state !== 'checking') fail(409, 'feishu_registration_interrupted');
     this.authorize(r.workspaceId, r.entityId, r.actorId);
     if (this.channels.repository.byProvider(r.workspaceId, r.entityId, 'feishu')) fail(409, 'feishu_registration_connection_changed');
+    // An app manually connected to any other employee/workspace is no longer
+    // available to this registration. Recheck after token reads, before PATCH.
+    try { this.channels.repository.assertAvailable({ provider: 'feishu', appId: r.appId! }); }
+    catch (error) { if (error instanceof ChannelBindingConflict) fail(409, 'channel_connection_conflict'); throw error; }
   }
   private validateRequired(r: Registration, verified: VerifiedEmployeeApplication) {
       const report = verified.validation;
@@ -291,6 +347,18 @@ export class FeishuAppRegistration {
     try {
       this.current(r);
       const appSecret = this.vault.open(r.secret!, this.scope(r));
+      if (this.contactRangePending(r)) {
+        const transport = new EmployeeApplicationTransport('feishu', r.appId!, { appSecret }, this.options);
+        const report = this.options.verifyApplication
+          ? (await this.options.verifyApplication('feishu', r.appId!, { appSecret })).validation
+          : await transport.inspectPermissions();
+        this.current(r);
+        if (report) r.validation = report;
+        if (report?.checks.find(check => check.id === 'scope_inventory')?.reason === 'authentication')
+          throw new EmployeeChannelError(409, 'authentication_failed', report);
+        await this.ensureContactRange(r, report, transport, () => this.current(r));
+        this.current(r);
+      }
       const directory = this.options.adapterFactory?.('feishu', { appId: r.appId!, appSecret }) ?? createDirectoryAdapter('feishu', { appId: r.appId!, appSecret, ...(this.options.fetch ? { fetch: this.options.fetch } : {}), ...(this.options.now ? { now: this.options.now } : {}) });
       const verified = this.options.verifyApplication ? await this.options.verifyApplication('feishu', r.appId!, { appSecret }) : await new EmployeeApplicationTransport('feishu', r.appId!, { appSecret }, this.options).verify(directory);
       this.current(r);

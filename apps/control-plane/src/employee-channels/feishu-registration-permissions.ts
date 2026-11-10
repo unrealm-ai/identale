@@ -5,7 +5,7 @@ export interface FeishuPermissionGroup {
   id: string; label: string; required: boolean; identity: 'tenant' | 'user'; scopes: string[]; note?: string; scopeNotes?: Record<string, string>;
 }
 export interface FeishuRegistrationProfile {
-  version: string; scopes: string[]; userScopes: string[]; events: string[]; groups: FeishuPermissionGroup[];
+  version: string; contactRange?: 'all'; scopes: string[]; userScopes: string[]; events: string[]; groups: FeishuPermissionGroup[];
 }
 /** Preserve the exact already-confirmed v1 request for old saved registrations. */
 export const LEGACY_FEISHU_REGISTRATION_PERMISSIONS = {
@@ -99,9 +99,14 @@ const extensionGroups: FeishuPermissionGroup[] = [
     note: '传统审批应用权限可能覆盖整个企业的审批数据，也包括同意、拒绝等审批决定。这里只预申请，业务工具尚未实现；实际使用仍需核验具体审批单、操作者和动作授权。不能把应用权限视为个人 OAuth。',
   },
 ];
-const groups = [...structuredClone(LEGACY_FEISHU_REGISTRATION_PROFILE.groups), ...extensionGroups];
+export const FEISHU_CONTACT_RANGE_SCOPE = 'application:application.contacts_range:write';
+const groups = [...structuredClone(LEGACY_FEISHU_REGISTRATION_PROFILE.groups), ...extensionGroups, {
+  id: 'contact-range', label: '通讯录范围管理（全员）', required: false, identity: 'tenant' as const,
+  scopes: [FEISHU_CONTACT_RANGE_SCOPE],
+  note: '仅本次自动创建的新应用：此权限获批后，系统会将该应用的通讯录权限范围设为全部员工，线上立即生效。此管理权限可能允许修改企业内其他应用，但 Identale 只操作本次新建应用；不修改机器人可用范围或员工使用名单。',
+}];
 export const FEISHU_REGISTRATION_PERMISSIONS: FeishuRegistrationProfile = {
-  version: 'conversation-business-v2',
+  version: 'conversation-business-v3', contactRange: 'all',
   scopes: [...new Set(groups.filter(group => group.identity === 'tenant').flatMap(group => group.scopes))],
   userScopes: [...new Set(groups.filter(group => group.identity === 'user').flatMap(group => group.scopes))],
   events: [...LEGACY_FEISHU_REGISTRATION_PERMISSIONS.events], groups,

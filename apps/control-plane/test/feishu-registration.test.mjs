@@ -177,7 +177,7 @@ test('server employee metadata and exact application-only permissions drive SDK 
   await accept(f);
 });
 
-test('approved v2 profile preserves all explicitly requested scopes and sends the full grouped manifest', async t => {
+test('approved v3 profile preserves all explicitly requested scopes and sends the full grouped manifest', async t => {
   const explicitlyRequested = [
     'contact:contact.base:readonly', 'contact:department.base:readonly', 'im:chat:read', 'im:chat:readonly',
     'im:chat.access_event.bot_p2p_chat:read', 'im:chat.announcement:read', 'im:chat.members:read',
@@ -191,12 +191,14 @@ test('approved v2 profile preserves all explicitly requested scopes and sends th
     'directory:employee:search',
   ];
   const profile = FEISHU_REGISTRATION_PERMISSIONS, f = fixture(t, {profile});
-  assert.equal(profile.version, 'conversation-business-v2');
+  assert.equal(profile.version, 'conversation-business-v3');
+  assert.equal(profile.contactRange, 'all');
+  assert.ok(profile.scopes.includes('application:application.contacts_range:write'));
   for (const scope of explicitlyRequested) assert.ok(profile.scopes.includes(scope), scope);
   assert.deepEqual(profile.userScopes, []);
   assert.deepEqual(profile.groups.filter(group => group.required).flatMap(group => group.scopes), requiredScopes);
   assert.deepEqual(profile.groups.map(group => group.id), [
-    'conversation-directory', 'messages-groups', 'organization', 'documents', 'base', 'calendar', 'tasks', 'meetings-minutes', 'approvals',
+    'conversation-directory', 'messages-groups', 'organization', 'documents', 'base', 'calendar', 'tasks', 'meetings-minutes', 'approvals', 'contact-range',
   ]);
   assert.deepEqual(new Set(profile.scopes), new Set(profile.groups.flatMap(group => group.scopes)));
   f.start();
@@ -1184,5 +1186,242 @@ for (const phase of [1, 2]) {
     assert.equal(f.status().error, undefined);
     assert.equal(f.state.sdk.length, 1);
     assertPrivate(f);
+  });
+}
+
+const contactRangeScope = 'application:application.contacts_range:write';
+function scopeProfile() {
+  return {...structuredClone(legacyProfile), version: 'synthetic-contact-range-v3', contactRange: 'all',
+    scopes: [...requiredScopes, contactRangeScope],
+    groups: [...structuredClone(legacyProfile.groups), {id: 'contact-range', label: 'Directory scope management', required: false, identity: 'tenant', scopes: [contactRangeScope]}]};
+}
+function contactRangeFixture(t, {granted = true, patch, token, profile = scopeProfile()} = {}) {
+  const f = fixture(t, {profile});
+  f.state.granted = granted; f.state.providerCalls = [];
+  f.state.verify = appId => {
+    const result = verified(appId, f.state.clock);
+    inventory(result).push({scope: contactRangeScope, identity: 'tenant', status: f.state.granted ? 'granted' : 'denied'});
+    return result;
+  };
+  f.options.fetch = async (url, init) => {
+    const path = new URL(url).pathname;
+    assert.equal(new URL(url).origin, 'https://open.feishu.cn');
+    assert.equal(init.redirect, 'error');
+    f.state.providerCalls.push({path, method: init.method, body: JSON.parse(init.body ?? '{}')});
+    if (path === '/open-apis/auth/v3/tenant_access_token/internal') {
+      assert.equal(init.method, 'POST'); assert.deepEqual(JSON.parse(init.body), {app_id: credentials.client_id, app_secret: secret});
+      return token ? token() : new Response(JSON.stringify({code: 0, tenant_access_token: 'synthetic-token', expire: 7200}));
+    }
+    assert.equal(path, `/open-apis/application/v6/applications/${credentials.client_id}/contacts_range`);
+    assert.equal(init.method, 'PATCH'); assert.equal(init.headers.authorization, 'Bearer synthetic-token');
+    assert.deepEqual(JSON.parse(init.body), {contacts_range_type: 'all'});
+    return patch ? patch() : new Response(JSON.stringify({code: 0}));
+  };
+  f.patches = () => f.state.providerCalls.filter(call => call.method === 'PATCH');
+  return f;
+}
+
+test('new registration applies all contact range before directory validation and never repeats after restart', async t => {
+  const f = contactRangeFixture(t);
+  const verify = f.state.verify;
+  f.state.verify = (appId, call) => {
+    if (call > 1) assert.equal(f.patches().length, 1, 'scope update precedes initial full directory validation');
+    return verify(appId);
+  };
+  f.start(); await accept(f); await settledCheck(f);
+  assert.equal(f.status().contactRange.status, 'applied');
+  assert.equal(f.status().autoCheck.eligible, false);
+  assert.equal(f.patches().length, 1);
+  const bound = f.connection();
+  f.retry(); await settledCheck(f);
+  assert.equal(f.patches().length, 1);
+  f.restart(); f.retry(); await settledCheck(f);
+  assert.equal(f.patches().length, 1); assert.deepEqual(f.connection(), bound);
+  assertPrivate(f);
+});
+
+test('late management approval expands only this newly connected app without rebinding or changing usage rules', async t => {
+  const f = contactRangeFixture(t, {granted: false});
+  f.start(); await accept(f); await settledCheck(f);
+  const bound = f.connection(), audit = f.store.all('SELECT * FROM employee_channel_audit');
+  assert.equal(f.status().contactRange.status, 'waiting_permission');
+  assert.equal(f.patches().length, 0);
+  assert.equal(f.status().autoCheck.eligible, true);
+  f.state.granted = true; f.state.clock = f.status().autoCheck.nextCheckAt;
+  f.retry(true); await settledCheck(f);
+  assert.equal(f.status().contactRange.status, 'applied'); assert.equal(f.patches().length, 1);
+  assert.equal(f.status().autoCheck.eligible, false);
+  assert.deepEqual(f.connection(), bound); assert.deepEqual(f.store.all('SELECT * FROM employee_channel_audit'), audit);
+  assertPrivate(f);
+});
+
+for (const outcome of ['unknown', 'user-only', 'conflicting']) {
+  test(`${outcome} management scope never permits an all-contact write`, async t => {
+    const f = contactRangeFixture(t);
+    f.state.verify = appId => {
+      const result = verified(appId, f.state.clock);
+      inventory(result).push({scope: contactRangeScope, identity: outcome === 'user-only' ? 'user' : 'tenant', status: outcome === 'unknown' ? 'unverified' : 'granted'});
+      if (outcome === 'conflicting') inventory(result).push({scope: contactRangeScope, identity: 'tenant', status: 'denied'});
+      return result;
+    };
+    f.start(); await accept(f); await settledCheck(f); f.retry(); await settledCheck(f);
+    assert.equal(f.status().contactRange.status, 'waiting_permission'); assert.equal(f.state.providerCalls.length, 0);
+  });
+}
+
+for (const profile of [legacyProfile, {...scopeProfile(), version: 'conversation-business-v2', contactRange: undefined}]) {
+  test(`${profile.version} records stay read-only even when provider grants management scope`, async t => {
+    const f = contactRangeFixture(t, {profile});
+    f.start(); await accept(f); await settledCheck(f); f.restart(); f.retry(); await settledCheck(f);
+    assert.equal(f.status().contactRange, undefined); assert.equal(f.state.providerCalls.length, 0);
+  });
+}
+
+test('upgrading a persisted v2 registration never adds the all-contact operation', async t => {
+  const profile = {...scopeProfile(), version: 'conversation-business-v2'}; delete profile.contactRange;
+  const f = contactRangeFixture(t, {profile});
+  f.start(); await accept(f); await settledCheck(f);
+  f.profile = scopeProfile(); f.restart(); f.retry(); await settledCheck(f);
+  assert.equal(f.status().profileVersion, 'conversation-business-v2'); assert.equal(f.status().contactRange, undefined);
+  assert.equal(f.state.providerCalls.length, 0);
+});
+
+test('same-app manual completion cannot adopt a pending registration range operation', async t => {
+  const f = contactRangeFixture(t, {granted: false});
+  f.state.verify = appId => {const result = verified(appId, f.state.clock); inventory(result)[0].status = 'denied'; return result;};
+  f.start(); f.state.sdk[0].resolve({...credentials}); await until(() => f.status().state, 'needs_attention'); await settledCheck(f);
+  f.state.verify = appId => verified(appId, f.state.clock);
+  await f.channels.save('w', 'e', 'feishu', 'u', {appId: credentials.client_id, appSecret: secret, expectedRevision: 0});
+  assert.equal(f.status().state, 'connected'); assert.equal(f.status().contactRange.status, 'skipped');
+  f.state.granted = true; f.retry(); await settledCheck(f); assert.equal(f.state.providerCalls.length, 0);
+});
+
+test('definite range rejection remains retryable without disabling the valid base connection', async t => {
+  let reject = true;
+  const f = contactRangeFixture(t, {patch: () => new Response(JSON.stringify(reject ? {code: 99991672, msg: secret} : {code: 0}), {status: reject ? 403 : 200})});
+  f.start(); await accept(f); await settledCheck(f);
+  assert.equal(f.status().contactRange.status, 'failed'); assert.equal(f.status().contactRange.error, 'authorization_denied');
+  assert.equal(f.status().autoCheck.eligible, true);
+  const bound = f.connection(); reject = false; f.state.clock = f.status().autoCheck.nextCheckAt;
+  f.retry(true); await settledCheck(f);
+  assert.equal(f.status().contactRange.status, 'applied'); assert.equal(f.patches().length, 2);
+  assert.deepEqual(f.connection(), bound); assertPrivate(f);
+});
+
+test('uncertain PATCH result is persisted and never automatically or manually rewritten', async t => {
+  const f = contactRangeFixture(t, {patch: () => { throw new Error(secret + verificationUrl); }});
+  f.start(); await accept(f); await settledCheck(f);
+  assert.equal(f.status().contactRange.status, 'uncertain'); assert.equal(f.status().autoCheck.eligible, false);
+  assert.equal(f.patches().length, 1); f.restart(); f.retry(); await settledCheck(f);
+  assert.equal(f.status().contactRange.status, 'uncertain'); assert.equal(f.patches().length, 1); assertPrivate(f);
+});
+
+test('closing during PATCH preserves uncertain outcome after restart instead of writing twice', async t => {
+  const gate = deferred(), f = contactRangeFixture(t, {patch: async () => {await gate.promise; return new Response(JSON.stringify({code: 0}));}});
+  f.start(); f.state.sdk[0].resolve({...credentials}); await until(() => f.patches().length, 1);
+  assert.equal(f.status().contactRange.status, 'applying'); f.restart();
+  assert.equal(f.status().contactRange.status, 'uncertain'); gate.resolve(); await tick(); await tick();
+  f.retry(); await until(() => f.status().state, 'connected'); await settledCheck(f);
+  assert.equal(f.patches().length, 1); assert.equal(f.status().contactRange.status, 'uncertain');
+});
+
+for (const connected of [false, true]) {
+  for (const change of ['role-revoked', 'employee-disabled', 'manual-binding']) {
+    test(`${connected ? 'connected' : 'initial'} scope write fences ${change} while its token is in flight`, async t => {
+      const gate = deferred(); let waiting = false;
+      const f = contactRangeFixture(t, {granted: !connected, token: async () => {waiting = true; await gate.promise; return new Response(JSON.stringify({code: 0, tenant_access_token: 'synthetic-token', expire: 7200}));}});
+      f.start();
+      if (connected) {await accept(f); await settledCheck(f); f.state.granted = true; f.retry();}
+      else f.state.sdk[0].resolve({...credentials});
+      await until(() => waiting, true);
+      if (change === 'role-revoked') f.store.run("UPDATE members SET role='member' WHERE id='m'");
+      if (change === 'employee-disabled') f.store.run("UPDATE entities SET lifecycle_enabled=0 WHERE id='e'");
+      if (change === 'manual-binding') {
+        const current = f.connection();
+        await f.channels.save('w', 'e', 'feishu', 'u', {appId: 'cli_manual', appSecret: 'synthetic-manual', expectedRevision: current?.revision ?? 0, ...(current ? {replaceSource: true} : {})});
+      }
+      gate.resolve(); await settledCheck(f); assert.equal(f.patches().length, 0);
+    });
+  }
+}
+
+test('concurrent retries share a single range write and GET never starts it', async t => {
+  const gate = deferred(), f = contactRangeFixture(t, {granted: false, patch: async () => {await gate.promise; return new Response(JSON.stringify({code: 0}));}});
+  f.start(); await accept(f); await settledCheck(f); f.state.granted = true;
+  f.state.clock = f.status().autoCheck.nextCheckAt;
+  for (let i = 0; i < 3; i++) f.status();
+  assert.equal(f.state.providerCalls.length, 0);
+  f.retry(true); await until(() => f.patches().length, 1);
+  f.retry(true); f.retry(false); f.status(); assert.equal(f.patches().length, 1);
+  gate.resolve(); await settledCheck(f); assert.equal(f.status().contactRange.status, 'applied');
+});
+
+test('production transport expands approved new app before real directory adapter reads with synthetic HTTP only', async t => {
+  const f = fixture(t, {profile: scopeProfile()}), calls = [];
+  delete f.options.verifyApplication; delete f.options.adapterFactory;
+  let expanded = false;
+  const json = data => new Response(JSON.stringify(data), {headers: {'content-type': 'application/json'}});
+  const envelope = data => json({code: 0, data});
+  f.options.fetch = async (url, init = {}) => {
+    const target = new URL(url), path = target.pathname;
+    assert.equal(target.origin, 'https://open.feishu.cn'); assert.equal(init.redirect, 'error');
+    calls.push({path, method: init.method});
+    if (path === '/open-apis/auth/v3/tenant_access_token/internal') return json({code: 0, tenant_access_token: 'synthetic-token', expire: 7200});
+    if (path.endsWith('/contacts_range')) {
+      assert.equal(path, `/open-apis/application/v6/applications/${credentials.client_id}/contacts_range`);
+      assert.equal(init.method, 'PATCH'); assert.deepEqual(JSON.parse(init.body), {contacts_range_type: 'all'});
+      assert.equal(init.headers.authorization, 'Bearer synthetic-token'); expanded = true; return json({code: 0});
+    }
+    assert.equal(init.method, 'GET');
+    if (path === '/open-apis/application/v6/scopes') return envelope({scopes: f.profile.scopes.map(scope_name => ({scope_name, scope_type: 'tenant', grant_status: 1}))});
+    if (path === '/open-apis/bot/v3/info') return json({code: 0, bot: {open_id: 'synthetic-bot'}});
+    if (path === '/open-apis/tenant/v2/tenant/query') return envelope({tenant: {tenant_key: 'synthetic-tenant'}});
+    assert.equal(expanded, true, 'directory checks must see the newly applied range');
+    if (path === '/open-apis/contact/v3/scopes') return envelope({department_ids: ['od_synthetic'], user_ids: ['ou_synthetic'], has_more: false});
+    if (path === '/open-apis/contact/v3/departments/od_synthetic') return envelope({department: {open_department_id: 'od_synthetic', name: 'Synthetic department', parent_department_id: '0'}});
+    if (path === '/open-apis/contact/v3/users/ou_synthetic') return envelope({user: {open_id: 'ou_synthetic', name: 'Synthetic person', department_ids: ['od_synthetic']}});
+    assert.fail('Unexpected route ' + path);
+  };
+  f.start(); await accept(f); await settledCheck(f);
+  assert.equal(f.status().contactRange.status, 'applied');
+  assert.equal(calls.filter(call => call.method === 'PATCH').length, 1);
+  assert.equal(f.status().autoCheck.eligible, false); assertPrivate(f);
+});
+
+for (const [workspace, entity] of [['w', 'e2'], ['other', 'oe']]) {
+  for (const phase of ['before-check', 'during-token']) {
+    test(`manual same-app binding in ${workspace === 'w' ? 'same' : 'other'} workspace fences scope write ${phase}`, async t => {
+      const gate = deferred(); let waiting = false;
+      const f = contactRangeFixture(t, {token: async () => {waiting = true; await gate.promise; return new Response(JSON.stringify({code: 0, tenant_access_token: 'synthetic-token', expire: 7200}));}});
+      f.start();
+      if (phase === 'during-token') {f.state.sdk[0].resolve({...credentials}); await until(() => waiting, true);}
+      await f.channels.save(workspace, entity, 'feishu', 'u', {appId: credentials.client_id, appSecret: secret, expectedRevision: 0});
+      const manual = f.repository.byProvider(workspace, entity, 'feishu');
+      if (phase === 'before-check') f.state.sdk[0].resolve({...credentials});
+      else gate.resolve();
+      await until(() => f.status().state, 'needs_attention'); await settledCheck(f);
+      assert.equal(f.status().error, 'channel_connection_conflict');
+      assert.equal(f.status().autoCheck.eligible, false); assert.equal(f.patches().length, 0);
+      f.retry(); await settledCheck(f); assert.equal(f.patches().length, 0);
+      assert.deepEqual(f.repository.byProvider(workspace, entity, 'feishu'), manual);
+    });
+  }
+}
+
+for (const phase of ['token', 'patch']) {
+  test(`range ${phase} authentication failure pauses automatic writes and explicit retry recovers`, async t => {
+    let rejected = true;
+    const authFailure = () => new Response(JSON.stringify({code: 99991663, msg: secret}), {status: 401});
+    const f = contactRangeFixture(t, {
+      ...(phase === 'token' ? {token: () => rejected ? authFailure() : new Response(JSON.stringify({code: 0, tenant_access_token: 'synthetic-token', expire: 7200}))}
+        : {patch: () => rejected ? authFailure() : new Response(JSON.stringify({code: 0}))}),
+    });
+    f.start(); f.state.sdk[0].resolve({...credentials}); await until(() => f.status().state, 'needs_attention'); await settledCheck(f);
+    assert.equal(f.status().error, 'authentication_failed'); assert.equal(f.status().contactRange.status, 'failed');
+    assert.equal(f.status().autoCheck.eligible, false); assert.equal(f.connection(), undefined);
+    const count = f.state.providerCalls.length; f.state.clock += 120_000; f.retry(true); await settledCheck(f);
+    assert.equal(f.state.providerCalls.length, count);
+    rejected = false; f.retry(); await until(() => f.status().state, 'connected'); await settledCheck(f);
+    assert.equal(f.status().contactRange.status, 'applied'); assertPrivate(f);
   });
 }

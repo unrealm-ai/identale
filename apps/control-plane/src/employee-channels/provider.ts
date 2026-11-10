@@ -23,6 +23,15 @@ export class EmployeeApplicationTransport {
   await inspectFeishuScopes(this.http,token,checks);
   return validationReport(this.provider,checks,this.http.now);
  }
+ /** Setup-only write. The caller must fence the new registration immediately before dispatch. */
+ async expandContactRange(beforeWrite:()=>void){
+  if(this.provider!=='feishu')throw new DirectoryError('unsupported');
+  const token=await this.accessToken();
+  beforeWrite();
+  const result=await this.http.request('https://open.feishu.cn',`/open-apis/application/v6/applications/${encodeURIComponent(this.appId)}/contacts_range`,'PATCH',{contacts_range_type:'all'},{authorization:`Bearer ${token}`});
+  // This endpoint may acknowledge success with no data object.
+  if(result.code!==0)feishuEnvelope(result);
+ }
  async verify(directory:DirectoryPort):Promise<VerifiedEmployeeApplication>{
   const checks=channelChecks(this.provider);
   const token=await validationStep(this.provider,checks,'credentials',()=>this.accessToken());

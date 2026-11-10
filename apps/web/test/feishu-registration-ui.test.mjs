@@ -284,3 +284,82 @@ test('server approval impact and unverified scope notes are visible without impl
   assert.match(details.textContent, /授权待确认/); assert.doesNotMatch(details.textContent, /授权已生效|个人 OAuth/);
   assert.match(text(), /飞书可能忽略未识别权限.*未返回或未知不计为已授权/);
 });
+
+test('new all-contact setup discloses its effect and renders outcomes independently of permission grants', async t => {
+  const state = envelope('connected', {credentialSaved: true, appId: 'cli_synthetic', contactRange: {status: 'waiting_permission', updatedAt: 1}});
+  state.registration.requestedPermissions = {...state.permissions, version: 'conversation-business-v3', contactRange: 'all'};
+  const env = await mount(t, 'registration', {base, active: true, boundAppId: 'cli_synthetic'}, async () => state);
+  assert.match(text(), /通讯录范围管理权限获批后，系统自动设为全部员工，线上立即生效/);
+  assert.match(text(), /等待通讯录范围管理权限获批/);
+  for (const [status, pattern] of [
+    ['applying', /正在将本次新应用的通讯录范围设为全员/],
+    ['applied', /飞书已确认本次新应用的全员通讯录范围设置/],
+    ['failed', /全员通讯录范围设置未完成，请检查授权后复查/],
+    ['uncertain', /更新结果未确认.*不会自动重复写入/],
+    ['skipped', /不再自动修改通讯录范围/],
+  ]) {
+    state.registration.contactRange.status = status; await click('刷新创建状态');
+    assert.match(document.querySelector('[aria-label="通讯录范围设置状态"]').textContent, pattern);
+  }
+  assert.equal(env.requests.filter(req => req.method === 'POST').length, 0);
+});
+
+test('old registration does not inherit the newest profile contact-range promise', async t => {
+  const state = envelope('connected', {credentialSaved: true, appId: 'cli_synthetic', requestedPermissions: {version: 'conversation-business-v2', scopes: [], events: []}});
+  state.permissions.contactRange = 'all';
+  await mount(t, 'registration', {base, active: true, boundAppId: 'cli_synthetic'}, async () => state);
+  assert.equal(document.querySelector('[aria-label="通讯录范围设置状态"]'), null);
+  assert.doesNotMatch(text(), /系统自动设为全部员工/);
+});
+
+
+test('first view keeps permission groups collapsed and the create action before details', async t => {
+  const state = envelope();
+  state.permissions = { version: 'synthetic-v3', contactRange: 'all', scopes: ['approval:instance'], events: ['synthetic.event'], groups: [{ id: 'approval', label: '合成审批权限组', required: false, identity: 'tenant', scopes: ['approval:instance'] }] };
+  const env = await mount(t, 'registration', { base, active: true, showManualSwitch: true }, async () => state);
+  const details = document.querySelector('.registration-details');
+  assert.equal(details.open, false);
+  assert.ok(document.querySelector('.registration-permission-groups').closest('.registration-details'));
+  assert.ok(document.querySelector('.registration-actions').compareDocumentPosition(details) & Node.DOCUMENT_POSITION_FOLLOWING);
+  assert.match(document.querySelector('.registration-impact').textContent, /业务资料读写和企业审批操作/);
+  assert.equal(button('手动接入').disabled, false);
+  assert.equal([...document.querySelectorAll('button')].some(b => b.textContent.trim() === '刷新创建状态'), false);
+  assert.ok(env.requests.every(r => r.method === 'GET'));
+});
+
+test('manual switch remains locked during requests, uncertain starts, cancellation failure and returned credentials', async t => {
+  let state = envelope(), failCancel = true, failStart = false, release;
+  const held = new Promise(resolve => { release = resolve; }); t.after(() => release());
+  const switches = [];
+  const env = await mount(t, 'registration', { base, active: true, showManualSwitch: true, onManualRequested: () => switches.push(true) }, async req => {
+    if (req.method === 'POST' && req.url.endsWith('/cancel')) {
+      if (failCancel) throw new Error('Synthetic cancellation response lost');
+      return state = envelope('cancelled');
+    }
+    if (req.method === 'POST') {
+      await held;
+      if (failStart) throw new Error('Synthetic creation response lost');
+      return state = envelope('awaiting_confirmation', { verificationUrl: 'https://accounts.feishu.cn/confirm' });
+    }
+    return state;
+  });
+  button('创建飞书应用').click(); await flush();
+  assert.equal(button('手动接入').disabled, true); button('手动接入').click(); assert.equal(switches.length, 0);
+  release(); await until(() => text().includes('等待在飞书确认创建'));
+  assert.equal(button('手动接入').disabled, true);
+  await click('取消等待'); assert.equal(button('手动接入').disabled, true); assert.match(text(), /无法连接服务或响应格式异常/);
+  failCancel = false; await click('取消等待'); assert.equal(button('手动接入').disabled, false);
+  assert.match(text(), /停止等待不代表撤销飞书侧操作/);
+  failStart = true; await click('创建飞书应用'); assert.equal(button('手动接入').disabled, true);
+  await click('刷新创建状态'); assert.equal(button('手动接入').disabled, true, 'an unresolved operation must not unlock the manual path');
+  state = envelope('needs_attention', { credentialSaved: true, appId: 'cli_synthetic' });
+  await click('刷新创建状态'); assert.equal(button('手动接入').disabled, true);
+  assert.equal([...document.querySelectorAll('button')].some(b => b.textContent.trim() === '取消等待'), false);
+  assert.equal(switches.length, 0);
+});
+
+test('a cancellation racing with saved credentials does not enable manual entry', async t => {
+  let state = envelope('awaiting_confirmation', { verificationUrl: 'https://accounts.feishu.cn/confirm' });
+  await mount(t, 'registration', { base, active: true, showManualSwitch: true }, async req => req.url.endsWith('/cancel') ? state = envelope('checking', { credentialSaved: true, appId: 'cli_synthetic' }) : state);
+  await click('取消等待'); assert.equal(button('手动接入').disabled, true); assert.match(text(), /应用已创建，请继续完成当前连接检查/);
+});

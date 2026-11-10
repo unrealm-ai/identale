@@ -1026,7 +1026,7 @@ test('work entry editing preserves channel fields, handles version conflicts and
  const created=await env.call('POST',employeeBase+'/triggers',{name:'自动化原任务',type:'schedule',enabled:false,allowedActions:['create_task'],config:{cron:'0 9 * * *',timezone:'Asia/Shanghai',description:'Synthetic isolated task',businessKey:{mode:'empty'}}});assert.equal(created.statusCode,200,created.body);const row=created.json();
  await env.mount(`/?ws=${owner.workspace.id}&view=settings&entity=${entity.id}`);await until(()=>!button('返回员工列表').disabled);await click('渠道接入');
  const tabs=[...document.querySelectorAll('[role=tablist][aria-label="渠道供应商"] [role=tab]')];assert.equal(tabs.some(t=>t.textContent.includes('自动化任务')),false);assert.equal(visible(document.querySelector('.trigger-settings')),false);
- input('input[aria-label="渠道应用 ID"]','synthetic-edit-app');input('input[aria-label="渠道应用密钥"]','synthetic-edit-secret');
+ await click('手动接入');input('input[aria-label="渠道应用 ID"]','synthetic-edit-app');input('input[aria-label="渠道应用密钥"]','synthetic-edit-secret');
  const before=env.requests.length;await click('自动运行');assert.equal(document.querySelector('.employee-section-tabs [role=tab][aria-selected=true]').textContent.trim(),'触发器');
  assert.match(document.querySelector('.trigger-settings').textContent,/自动化原任务/);await click('编辑 自动化原任务');
  assert.ok([...document.querySelectorAll('.employee-section-tabs [role=tab]')].filter(t=>['渠道','模型'].includes(t.textContent.trim())).every(t=>t.getAttribute('aria-disabled')==='true'));assert.equal(button('返回员工列表').disabled,true);

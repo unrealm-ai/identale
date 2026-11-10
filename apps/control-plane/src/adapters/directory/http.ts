@@ -72,7 +72,7 @@ export function scopeRevision(departmentIds:readonly string[],userIds:readonly D
   return {...scope,revision:createHash('sha256').update(JSON.stringify(scope)).digest('hex')};
 }
 export type DirectoryOrigin='https://open.feishu.cn'|'https://api.dingtalk.com'|'https://oapi.dingtalk.com'|'https://qyapi.weixin.qq.com';
-/** Reads and credential exchange only. Errors never include URL, body, token or provider messages. */
+/** Bounded provider HTTP, including explicit setup writes. Errors never include URL, body, token or provider messages. */
 export class DirectoryHttp {
   readonly now:()=>number;
   readonly maxScopePages:number;
@@ -85,7 +85,7 @@ export class DirectoryHttp {
     this.timeoutMs=options.timeoutMs??15000;this.maxResponseBytes=options.maxResponseBytes??4*1024*1024;this.maxScopePages=options.maxScopePages??100;
     if(!Number.isInteger(this.timeoutMs)||this.timeoutMs<1||this.timeoutMs>60000||!Number.isInteger(this.maxResponseBytes)||this.maxResponseBytes<1||this.maxResponseBytes>32*1024*1024||!Number.isInteger(this.maxScopePages)||this.maxScopePages<1||this.maxScopePages>1000)throw new DirectoryError('invalid_response');
   }
-  async request(origin:DirectoryOrigin,path:string,method:'GET'|'POST',body?:unknown,headers:Record<string,string>={},authentication=false):Promise<Record<string,unknown>>{
+  async request(origin:DirectoryOrigin,path:string,method:'GET'|'POST'|'PATCH',body?:unknown,headers:Record<string,string>={},authentication=false):Promise<Record<string,unknown>>{
     const url=new URL(path,origin);
     if(url.origin!==origin||!path.startsWith('/')||path.startsWith('//')||url.username||url.password||url.hash)throw new DirectoryError('invalid_response');
     const controller=new AbortController();const timer=setTimeout(()=>controller.abort(),this.timeoutMs);timer.unref();

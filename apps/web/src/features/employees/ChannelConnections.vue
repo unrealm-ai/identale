@@ -17,6 +17,7 @@ import { directoryStatusLabel } from '../directory/types';
 import type { DirectoryConnection, DirectoryProvider, DirectoryIdentityEvidence } from '../directory/types';
 const props = withDefaults(defineProps<{ base: string; canManage: boolean; disabled?: boolean; active?: boolean }>(), { active: true });
 const emit = defineEmits<{ busyChanged: [value: boolean]; sessionExpired: []; changed: [];rebound:[];dirtyChanged:[boolean] }>();
+const feishuManual = ref(false);
 const sharingBusy=ref(false),sharingDirty=ref(false),registrationBusy=ref(false);
 const sharingEditor=ref<InstanceType<typeof GroupSharingSettings>|null>(null);
 const selectedConnection=ref(false),policyBusy=ref(false),policyDirty=ref(false),confirmPolicySwitch=ref(false);
@@ -39,6 +40,8 @@ const displayConnections = computed(() => connections.value.map(item => {
 }));
 const evidenceLabel = (value: DirectoryConnection['identityEvidence']) => ({ provider_api: '厂商 API 身份证据', authenticated_event_confirmed: '管理员确认的已认证事件', authenticated_first_message: '首条真实消息自动确认', app_credentials_only: '仅应用凭据', admin_asserted: '管理员同企业声明（非厂商证明）' })[value] ?? '尚无身份验证证据';
 const connection = computed(() => connections.value.find(item => item.provider === provider.value));
+const showManualSetup = computed(() => provider.value !== 'feishu' || !!connection.value || feishuManual.value);
+const showAutomaticSetup = computed(() => !!connection.value || !feishuManual.value);
 const historyEnabled = ref(false),keywordText=ref('');
 const contextDirty=computed(()=>historyEnabled.value!==(connection.value?.context?.groupListenEnabled??false)||keywordText.value!==(connection.value?.context?.groupTriggerKeywords??[]).join('\n'));
 const appId = ref(''), appSecret = ref(''), replaceSource = ref(false);
@@ -54,8 +57,8 @@ let controller = new AbortController();
 watch(() => busy.value || directoryBusy.value || policyBusy.value || sharingBusy.value || registrationBusy.value, value => emit('busyChanged', value), { flush: 'sync' });
 watch(unsaved,v=>emit('dirtyChanged',v),{flush:'sync'});
 function clearSecrets() { appSecret.value = ''; }
-watch(provider, () => { clearSecrets(); appId.value = connection.value?.appId ?? ''; replaceSource.value = false; notice.value = ''; error.value = ''; report.value = null; });
-watch(connection, value => { historyEnabled.value = value?.context?.groupListenEnabled ?? false;keywordText.value=(value?.context?.groupTriggerKeywords??[]).join('\n'); appId.value = value?.appId ?? ''; clearSecrets(); replaceSource.value = false; });
+watch(provider, () => { feishuManual.value = false; clearSecrets(); appId.value = connection.value?.appId ?? ''; replaceSource.value = false; notice.value = ''; error.value = ''; report.value = null; });
+watch(connection, value => { if (!value) feishuManual.value = false; historyEnabled.value = value?.context?.groupListenEnabled ?? false;keywordText.value=(value?.context?.groupTriggerKeywords??[]).join('\n'); appId.value = value?.appId ?? ''; clearSecrets(); replaceSource.value = false; });
 async function run(action: (signal: AbortSignal) => Promise<void>) {
   if (channelLocked.value) return; const signal = controller.signal; busy.value = true; error.value = ''; notice.value = '';
   try { await action(signal); } catch (cause) { if (!signal.aborted) { if (cause instanceof ChannelValidationFailure && cause.validation) { report.value = cause.validation; error.value = ''; } else error.value = errorMessage(cause); if (cause instanceof ApiError && cause.status === 401) emit('sessionExpired'); } }
@@ -113,7 +116,7 @@ async function saveContext() {
     if (!signal.aborted) { await read(signal);notice.value = '已保存。';emit('changed'); }
   });
 }
-watch(() => props.base, () => { controller.abort(); controller = new AbortController(); busy.value = false; loaded.value = false; report.value = null; notice.value = ''; error.value = ''; connections.value = []; runtimeSnapshot.value = null;policyDirty.value=false;policyBusy.value=false;sharingBusy.value=false;sharingDirty.value=false;confirmPolicySwitch.value=false;pendingPolicySwitch=undefined; clearSecrets(); void load(); }, { immediate: true });
+watch(() => props.base, () => { controller.abort(); controller = new AbortController(); busy.value = false; loaded.value = false; feishuManual.value = false; report.value = null; notice.value = ''; error.value = ''; connections.value = []; runtimeSnapshot.value = null;policyDirty.value=false;policyBusy.value=false;sharingBusy.value=false;sharingDirty.value=false;confirmPolicySwitch.value=false;pendingPolicySwitch=undefined; clearSecrets(); void load(); }, { immediate: true });
 onUnmounted(() => { controller.abort(); clearSecrets();emit('dirtyChanged',false); emit('busyChanged', false); });
 </script>
 <template>
@@ -141,9 +144,12 @@ onUnmounted(() => { controller.abort(); clearSecrets();emit('dirtyChanged',false
         </section>
         <ChannelCapabilities v-if="connection" :capabilities="connection.capabilities" :provider="provider" @session-expired="emit('sessionExpired')"/>
         <template v-if="canManage">
-          <FeishuRegistration v-if="provider==='feishu'" :base="base" :active="active !== false && selectedConnection && loaded" :disabled="disabled || busy || directoryBusy || policyBusy || sharingBusy || unsaved" :bound-app-id="connection?.appId" @busy-changed="registrationBusy=$event" @session-expired="emit('sessionExpired')" @changed="registrationChanged"/>
-          <section class="form-section channel-setup" aria-label="渠道接入配置">
-            <header class="form-section-heading"><h3>机器人连接凭据</h3><a :href="provider==='feishu'?'https://open.feishu.cn/app':provider==='dingtalk'?'https://open-dev.dingtalk.com/':'https://work.weixin.qq.com/wework_admin/frame'" target="_blank" rel="noopener noreferrer">打开官方后台 ↗</a></header>
+          <FeishuRegistration v-if="provider==='feishu'" v-show="showAutomaticSetup" :show-manual-switch="!connection" :manual-switch-disabled="channelLocked" @manual-requested="feishuManual=true" :base="base" :active="active !== false && selectedConnection && loaded && showAutomaticSetup" :disabled="disabled || busy || directoryBusy || policyBusy || sharingBusy || unsaved" :bound-app-id="connection?.appId" @busy-changed="registrationBusy=$event" @session-expired="emit('sessionExpired')" @changed="registrationChanged"/>
+          <NAlert v-if="provider==='feishu' && !connection && !feishuManual && unsaved" type="info">手动凭据草稿已保留。请切回手动接入，保存或清空草稿后再创建应用。</NAlert>
+          <NAlert v-if="notice && !showManualSetup" type="info" role="status">{{notice}}</NAlert>
+          <section v-if="showManualSetup" class="form-section channel-setup" aria-label="渠道接入配置">
+            <header class="form-section-heading manual-setup-heading"><h3>机器人连接凭据</h3><NButton v-if="provider==='feishu' && !connection" size="small" quaternary :disabled="channelLocked" @click="feishuManual=false">返回自动创建</NButton><a v-else :href="provider==='feishu'?'https://open.feishu.cn/app':provider==='dingtalk'?'https://open-dev.dingtalk.com/':'https://work.weixin.qq.com/wework_admin/frame'" target="_blank" rel="noopener noreferrer">打开官方后台 ↗</a></header>
+            <p v-if="provider==='feishu' && !connection" class="field-note">已有飞书应用？填写凭据即可关联。<a href="https://open.feishu.cn/app" target="_blank" rel="noopener noreferrer">打开官方后台 ↗</a></p>
             <NForm class="channel-connection-form settings-form" @submit.prevent>
               <NFormItem :label="provider==='wecom'?'BotID':provider==='dingtalk'?'Client ID（AppKey）':'App ID'"><NInput v-model:value="appId" :disabled="channelLocked||!loaded" :input-props="{'aria-label':'渠道应用 ID',autocomplete:'off'}"/></NFormItem>
               <NFormItem :label="provider==='wecom'?'Secret':provider==='dingtalk'?'Client Secret（AppSecret）':'App Secret'"><NInput v-model:value="appSecret" type="password" :disabled="channelLocked||!loaded" :input-props="{'aria-label':'渠道应用密钥',autocomplete:'new-password'}"/></NFormItem>
@@ -194,7 +200,7 @@ onUnmounted(() => { controller.abort(); clearSecrets();emit('dirtyChanged',false
 .channel-actions{display:flex;flex-wrap:wrap;gap:10px;padding-top:4px}
 .channel-connections p{overflow-wrap:anywhere}
 .connection-status p{margin:6px 0}
-.channel-setup{display:grid;gap:16px}
+.manual-setup-heading{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:12px;align-items:start}.channel-setup{display:grid;gap:16px}
 .channel-setup .settings-form{margin:0}
 .channel-setup .field-note{margin:0}
 .optional-directory{display:grid;justify-items:start;gap:12px}
