@@ -168,7 +168,7 @@ test('deployment-approved resources travel as safe metadata and participate in r
 
 test('independent WeCom identity bindings project to runtime memory and refresh with channel revision',async t=>{
  const f=await fixture(t);f.platform.run('INSERT INTO wecom_identity_bindings VALUES(?,?,?,?,?,?)','synthetic-wecom','source-A',1,'directory-user','callback-user',null);
- f.platform.run('DELETE FROM combined_schema_migrations WHERE version=2');
+ f.platform.run('DELETE FROM combined_schema_migrations WHERE version>=2');
  new Store(f.platform.databasePath).close();
  const poller=new ConfigurationPoller({store:f.runtime,baseUrl:'http://127.0.0.1:9999',token,fetch:f.fetch,now:f.clock});
  assert.equal(await poller.poll(),true,JSON.stringify(poller.status));
@@ -196,7 +196,7 @@ test('verification challenges use bounded pages, remain memory-only and never pr
 });
 test('challenge paging rejects changed generations and preserves prior coherent configuration',async t=>{
  const f=await fixture(t);seedChallenges(f.platform,101);let mutate=false;
- f.platform.run('DELETE FROM combined_schema_migrations WHERE version=2');
+ f.platform.run('DELETE FROM combined_schema_migrations WHERE version>=2');
  new Store(f.platform.databasePath).close();
  const poller=new ConfigurationPoller({store:f.runtime,baseUrl:'http://127.0.0.1:9999',token,fetch:async(...args)=>{const response=await f.fetch(...args);if(mutate&&String(args[0]).endsWith('challenge-page')){mutate=false;f.platform.run("DELETE FROM wecom_member_challenges WHERE request_id='request-0'");}return response;},now:f.clock});
  assert.equal(await poller.poll(),true);const before=poller.status.epoch;
@@ -206,7 +206,7 @@ test('challenge paging rejects changed generations and preserves prior coherent 
 });
 test('challenge paging rejects corrupt pages without partial apply',async t=>{
  const f=await fixture(t);seedChallenges(f.platform,101);
- f.platform.run('DELETE FROM combined_schema_migrations WHERE version=2');
+ f.platform.run('DELETE FROM combined_schema_migrations WHERE version>=2');
  new Store(f.platform.databasePath).close();
  const poller=new ConfigurationPoller({store:f.runtime,baseUrl:'http://127.0.0.1:9999',token,fetch:async(...args)=>{const response=await f.fetch(...args);if(String(args[0]).endsWith('challenge-page')){const page=await response.json();page.rows[0].user_id='tampered';return new Response(JSON.stringify(page));}return response;},now:f.clock});
  assert.equal(await poller.poll(),false);assert.equal(poller.ready,false);poller.stop();
@@ -219,7 +219,7 @@ test('V2 removes retired directory storage before runtime configuration export',
  f.platform.db.exec(RETAINED_LEGACY_SCHEMA.find(o=>o.type==='index').sql);
  f.platform.run("INSERT INTO employee_channel_directory_credentials VALUES('retired','w','wecom','corp','agent',1,'RETIRED_PRIVATE_RECORD')");
  f.platform.run("UPDATE employee_channel_connections SET directory_credential_id='retired' WHERE id='ch'");
- f.platform.run('DELETE FROM combined_schema_migrations WHERE version=2');
+ f.platform.run('DELETE FROM combined_schema_migrations WHERE version>=2');
  new Store(f.platform.databasePath).close();
  const poller=new ConfigurationPoller({store:f.runtime,baseUrl:'http://127.0.0.1:9999',token,fetch:f.fetch,now:f.clock});
  assert.equal(await poller.poll(),true,JSON.stringify(poller.status));
@@ -229,4 +229,24 @@ test('V2 removes retired directory storage before runtime configuration export',
  assert.equal(f.runtime.all('PRAGMA temp.table_info(employee_channel_connections)').some(c=>c.name==='directory_credential_id'),false);
  assert.equal(f.platform.one("SELECT 1 FROM sqlite_master WHERE name='employee_channel_directory_credentials'"),undefined);
  assert.equal(f.platform.one("SELECT app_id FROM employee_channel_connections WHERE id='ch'").app_id,'app');
+});
+
+test('same-bot revalidation projects moved identities coherently without restoring old challenges',async t=>{
+ const f=await fixture(t);
+ const {EmployeeChannelService}=await import('../dist/employee-channels/service.js');
+ const {withIdentityDelta}=await import('../dist/employee-channels/wecom-identity-bindings.js');
+ const {weComCallbackUserId}=await import('../dist/employee-channels/wecom-bot-contacts.js');
+ const service=new EmployeeChannelService(f.channels,{masterKey:key});
+ const c=await service.save('w','e','wecom','u',{appId:'fixture-bot',appSecret:'fixture-secret'});
+ service.observeFirstInbound(c.id,{appId:c.appId,botId:c.appId,tenantId:c.appId,tenantNamespace:'app_id'});
+ const old=f.channels.byId(c.id);
+ f.channels.save(withIdentityDelta({...old,wecomContactIdentityRevision:old.authRevision},{exact:['person'],maps:[]}),old);
+ const version=service.currentBindingVersion(c.id),poller=new ConfigurationPoller({store:f.runtime,baseUrl:'http://127.0.0.1:9999',token,fetch:f.fetch,now:f.clock});t.after(()=>poller.stop());
+ assert.equal(await poller.poll(),true);const runtimeRepository=new EmployeeChannelRepository(f.runtime);
+ assert.equal(weComCallbackUserId(runtimeRepository.byId(c.id),'person'),'person');
+ await service.revalidate('w','e','wecom','u',f.channels.byId(c.id).revision);
+ assert.equal(await poller.poll(),true);const pending=runtimeRepository.byId(c.id);
+ assert.equal(pending.status,'pending_verification');assert.equal(pending.authRevision,old.authRevision+1);assert.equal(weComCallbackUserId(pending,'person'),'person');
+ service.observeFirstInbound(c.id,{appId:c.appId,botId:c.appId,tenantId:c.appId,tenantNamespace:'app_id'});
+ assert.equal(await poller.poll(),true);assert.equal(runtimeRepository.byId(c.id).status,'verified');assert.equal(service.currentBindingVersion(c.id),version);
 });

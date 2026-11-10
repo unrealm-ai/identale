@@ -73,3 +73,33 @@ test('a new repository process view resolves durable evidence without a search c
  const f=await fixture(t);f.bind('a','callback-a');f.store.run('DELETE FROM wecom_bot_contacts');
  const reopened=new Store(f.file);try{const repository=new EmployeeChannelRepository(reopened),r=repository.byId(f.c.id);assert.equal(weComCallbackUserId(r,'a'),'callback-a');assert.equal(weComSearchUserId(r,'callback-a'),'a');assert.equal(reopened.one('SELECT count(*) n FROM wecom_bot_contacts').n,0);}finally{reopened.close();}
 });
+
+for(const operation of ['revalidate','rotate'])test(`same bot ${operation} preserves bindings only behind fresh authenticated ingress`,async t=>{
+ const f=await fixture(t);f.bind('a','callback-a');const original=f.current();
+ const {resolveHumanTarget}=await import('../dist/human-target.js');
+ const target={kind:'wecom_directory',connectionId:original.id,provider:'wecom',appId:original.appId,tenantId:original.eventTenantId,sourceId:original.sourceId,authRevision:original.authRevision,directoryUserId:'a',identityNamespace:'user_id'};
+ const version=f.channels.currentBindingVersion(original.id);
+ for(let i=0;i<2;i++){
+  const before=f.current();
+  if(operation==='revalidate')await f.channels.revalidate('w','e','wecom','u',before.revision);
+  else await f.channels.save('w','e','wecom','u',{appId:before.appId,appSecret:'new-secret-'+i,expectedRevision:before.revision});
+  assert.equal(f.channels.currentBindingVersion(original.id),undefined);
+  assert.equal(await f.channels.resolveBinding(original.id),undefined);
+  assert.throws(()=>resolveHumanTarget(f.channels,'w','e',target),/human_recipient_configuration_changed/);
+  assert.equal(f.store.one('SELECT count(*) n FROM wecom_identity_bindings').n,1);
+  assert.equal(f.repository.save({...before},before),false);
+  const pending=f.current();assert.equal(f.repository.save({...pending,status:'invalid',lastError:'credential_rejected'},pending),true);
+  assert.equal(await f.channels.resolveBinding(original.id),undefined);
+  assert.throws(()=>resolveHumanTarget(f.channels,'w','e',target),/human_recipient_configuration_changed/);
+  const invalid=f.current();assert.equal(f.repository.save({...invalid,status:'pending_verification'},invalid),true);
+ }
+ assert.throws(()=>f.channels.observeFirstInbound(original.id,{appId:original.appId,botId:'wrong',tenantId:original.appId,tenantNamespace:'app_id'}),/channel_verification_identity_conflict/);
+ f.channels.observeFirstInbound(original.id,{appId:original.appId,botId:original.appId,tenantId:original.appId,tenantNamespace:'app_id'});
+ assert.equal(weComCallbackUserId(f.current(),'a'),'callback-a');
+ assert.equal(resolveHumanTarget(f.channels,'w','e',target).userId,'callback-a');
+ assert.equal(f.channels.currentBindingVersion(original.id),version);
+ const current=f.current();await f.channels.save('w','e','wecom','u',{appId:'other-bot',appSecret:'other-secret',expectedRevision:current.revision,replaceSource:true});
+ assert.equal(f.store.one('SELECT count(*) n FROM wecom_identity_bindings').n,0);
+ f.channels.observeFirstInbound(original.id,{appId:'other-bot',botId:'other-bot',tenantId:'other-bot',tenantNamespace:'app_id'});
+ assert.throws(()=>resolveHumanTarget(f.channels,'w','e',target),/human_recipient_configuration_changed/);
+});

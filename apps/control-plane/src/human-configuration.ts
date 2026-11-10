@@ -18,7 +18,7 @@ export function registerHumanConfiguration(app:FastifyInstance,store:Store,chann
     let selectedId:string|undefined;if(selector?.subjectId){try{const p=JSON.parse(selector.subjectId);if(p[0]==='channel_user'&&p[1]==='user_id'&&p[2]===c.appId)selectedId=p[3];}catch{}}else if(selector?.target?.kind==='wecom_directory')selectedId=selector.target.directoryUserId;else if(selector?.target?.kind==='channel')selectedId=weComSearchUserId(c,selector.target.userId);const found=selectedId?channels.botContacts.get(c,selectedId):undefined;const contacts=selector?(found?[found]:[]):channels.botContacts.recent(c).slice(0,50);
     const savedTargets=existing.map(x=>x.target).filter(target=>target.kind!=='web'&&target.connectionId===c.id&&target.provider==='wecom'&&target.appId===c.appId&&target.tenantId===c.eventTenantId&&target.identityNamespace==='user_id');
     for(const target of savedTargets){
-     const searchId=target.kind==='wecom_directory'&&target.sourceId===c.sourceId&&target.authRevision===c.authRevision?target.directoryUserId:target.kind==='channel'?weComSearchUserId(c,target.userId):undefined;
+     const searchId=target.kind==='wecom_directory'&&target.sourceId===c.sourceId?target.directoryUserId:target.kind==='channel'?weComSearchUserId(c,target.userId):undefined;
      const contact=searchId?channels.botContacts.get(c,searchId):undefined;
      if(!selector&&contact&&!contacts.some(person=>person.user_id===contact.user_id))contacts.push(contact);
     }

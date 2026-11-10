@@ -83,7 +83,7 @@ test('search failure is not disguised as cached success and late credentials can
  const f=await fixture(t),c=await f.ready();await f.seed(c,['a']);f.state.beforeSearch=async()=>{throw Error('provider unavailable');};
  await assert.rejects(f.search(c,['a']),/unavailable/);assert.equal(f.count(c),1);
  f.state.beforeSearch=async()=>{f.state.beforeSearch=undefined;await f.channels.save('w','e','wecom','u',{appId:c.appId,appSecret:'new-secret',expectedRevision:f.current(c).revision});};
- await assert.rejects(f.search(c,['a']),/channel_configuration_changed/);assert.equal(f.count(c),0);
+ await assert.rejects(f.search(c,['a']),/channel_configuration_changed/);assert.equal(f.count(c),1);
 });
 
 test('selected profiles, pending verification and bindings survive search age and SQLite reopen without external recheck',async t=>{
@@ -100,12 +100,12 @@ for(const change of ['workspace','entity','bot','application','namespace','sourc
  await assert.rejects(f.channels.botContacts.verifyRecipient(foreign,'callback-member'),/authorization_denied/);
 });
 
-for(const change of ['revalidate','credentials','replacement','unbind'])test(`${change} clears selected profiles and fences stale selection tokens`,async t=>{
+for(const change of ['revalidate','credentials','replacement','unbind'])test(`${change} preserves same-bot profiles but fences stale selection tokens`,async t=>{
  const f=await fixture(t),c=await f.ready();const person=(await f.seed(c,['member'])).items[0];const before=f.current(c);
  if(change==='revalidate')await f.channels.revalidate('w','e','wecom','u',before.revision);
  else if(change==='unbind')f.channels.unbind('w','e','wecom','u',{expectedRevision:before.revision});
  else await f.channels.save('w','e','wecom','u',{appId:change==='replacement'?'synthetic-replacement':c.appId,appSecret:'rotated-synthetic',expectedRevision:before.revision,...(change==='replacement'?{replaceSource:true}:{})});
- assert.equal(f.count(c),0);assert.equal(f.channels.botContacts.get(before,'member'),undefined);assert.throws(()=>f.select(c,person));assert.equal(f.count(c),0);
+ const expected=['revalidate','credentials'].includes(change)?1:0;assert.equal(f.count(c),expected);assert.equal(f.channels.botContacts.get(before,'member'),undefined);assert.throws(()=>f.select(c,person));assert.equal(f.count(c),expected);
 });
 
 test('selected people are pageable beyond 500; no arbitrary count or selection-age limit',async t=>{

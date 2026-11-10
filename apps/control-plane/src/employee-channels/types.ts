@@ -10,6 +10,7 @@ export interface EmployeeChannelRecord {
  status:'verified'|'pending_verification'|'invalid'|'disabled';enabled:boolean;identityEvidence?:'provider_api'|'authenticated_event_confirmed'|'authenticated_first_message'|'app_credentials_only'|'admin_asserted';inboundVerified?:boolean;directoryStatus:'available'|'unavailable';lastError:string|null;
  credential:SealedDirectoryCredential;createdBy:string;updatedBy:string;
  /** Credential-scoped, per-person exact search/callback identity evidence. Legacy revision alone proves nobody. */
+ wecomBindingRevision?:number;
  wecomContactIdentityRevision?:number;
  wecomVerifiedContactIds?:string[];
  wecomContactMappings?:WeComContactMapping[];

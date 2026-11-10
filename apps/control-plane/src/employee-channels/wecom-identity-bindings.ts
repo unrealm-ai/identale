@@ -1,5 +1,9 @@
 import type {Store} from '../store.js';
 import type {EmployeeChannelRecord,WeComContactMapping} from './types.js';
+// Only credential renewal may carry established identities across credential epochs.
+const renewals=new WeakSet<EmployeeChannelRecord>();
+export function preserveWeComIdentities(r:EmployeeChannelRecord){renewals.add(r);return r;}
+export function preservesWeComIdentities(r:EmployeeChannelRecord){return renewals.has(r);}
 const stores=new WeakMap<EmployeeChannelRecord,Store>();
 export function identityStore(r:EmployeeChannelRecord){return stores.get(r);}
 export function identityScope(r:EmployeeChannelRecord){return [r.id,r.sourceId,r.authRevision] as const;}
@@ -19,6 +23,10 @@ export function attachIdentityBindings(store:Store,r:EmployeeChannelRecord):Empl
 }
 export function writeIdentityBindings(store:Store,r:EmployeeChannelRecord,previous?:EmployeeChannelRecord){
  if(r.provider!=='wecom')return;
+ if(previous&&renewals.has(r)&&r.sourceId===previous.sourceId&&r.appId===previous.appId){
+  store.run('UPDATE wecom_identity_bindings SET auth_revision=? WHERE connection_id=? AND source_id=? AND auth_revision=?',r.authRevision,...identityScope(previous));
+  return;
+ }
  if(previous&&(r.sourceId!==previous.sourceId||r.authRevision!==previous.authRevision||r.wecomContactIdentityRevision!==r.authRevision))store.run('DELETE FROM wecom_identity_bindings WHERE connection_id=?',r.id);
  if(r.wecomContactIdentityRevision!==r.authRevision)return;
  const delta=identityDelta(r);

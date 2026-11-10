@@ -80,7 +80,7 @@ export class WeComBotContacts {
     for(const {target} of JSON.parse(saved?.rules_json??'[]') as {target:HumanTarget}[]){
       if(target.kind==='web'||target.connectionId!==r.id||target.provider!=='wecom'||target.appId!==r.appId||target.tenantId!==r.eventTenantId||target.identityNamespace!=='user_id')continue;
       const reference=target.kind==='wecom_directory'?target:target.directoryReference;
-      if(reference){if(reference.sourceId===r.sourceId&&reference.authRevision===r.authRevision)ids.add(reference.directoryUserId);}
+      if(reference){if(reference.sourceId===r.sourceId)ids.add(reference.directoryUserId);}
       else if(target.kind==='channel'){const id=weComSearchUserId(r,target.userId);if(id&&weComCallbackUserId(r,id)===target.userId)ids.add(id);}
     }
     return [...ids];

@@ -10,7 +10,7 @@ export function resolveHumanTarget(channels:EmployeeChannelService,workspaceId:s
  if(!reference)return target.kind==='wecom_directory'?undefined:target;
  if(target.kind==='web')throw new TaskError(409,'human_recipient_configuration_changed');
  const current=channels.repository.byId(target.connectionId);
- if(!current||!usesWeComBotSearch(current)||!current.enabled||current.status!=='verified'||current.workspaceId!==workspaceId||current.entityId!==entityId||current.appId!==target.appId||target.provider!=='wecom'||target.identityNamespace!=='user_id'||current.eventTenantId!==target.tenantId||current.sourceId!==reference.sourceId||current.authRevision!==reference.authRevision)throw new TaskError(409,'human_recipient_configuration_changed');
+ if(!current||!usesWeComBotSearch(current)||!current.enabled||current.status!=='verified'||current.workspaceId!==workspaceId||current.entityId!==entityId||current.appId!==target.appId||target.provider!=='wecom'||target.identityNamespace!=='user_id'||current.eventTenantId!==target.tenantId||current.sourceId!==reference.sourceId)throw new TaskError(409,'human_recipient_configuration_changed');
  const callback=weComCallbackUserId(current,reference.directoryUserId),userId=callback&&weComSearchUserId(current,callback)===reference.directoryUserId?callback:undefined;
  if(!userId){if(target.kind==='channel')throw new TaskError(409,'human_recipient_configuration_changed');return;}
  if(target.kind==='channel'){if(target.userId!==userId)throw new TaskError(409,'human_recipient_configuration_changed');return target;}
