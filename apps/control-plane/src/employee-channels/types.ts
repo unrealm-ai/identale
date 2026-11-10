@@ -10,6 +10,7 @@ export interface EmployeeChannelRecord {
  status:'verified'|'pending_verification'|'invalid'|'disabled';enabled:boolean;identityEvidence?:'provider_api'|'authenticated_event_confirmed'|'authenticated_first_message'|'app_credentials_only'|'admin_asserted';inboundVerified?:boolean;directoryStatus:'available'|'unavailable';lastError:string|null;
  credential:SealedDirectoryCredential;createdBy:string;updatedBy:string;
  /** Credential-scoped, per-person exact search/callback identity evidence. Legacy revision alone proves nobody. */
+ wecomBindingRevision?:number;
  wecomContactIdentityRevision?:number;
  wecomVerifiedContactIds?:string[];
  wecomContactMappings?:WeComContactMapping[];
@@ -29,6 +30,7 @@ export interface ResolvedEmployeeChannelBinding {
 export interface EmployeeChannelCredential {appSecret:string}
 export interface VerifiedEmployeeApplication {identity:DirectoryIdentity;botId?:string;eventTenantId?:string;directoryStatus:'available'|'unavailable';validation?:ChannelValidation;authorizedScope?:import('@dentity/application').DirectoryAuthorizedScope}
 export interface EmployeeChannelOptions {
+ registerFeishuApp?:typeof import('@larksuiteoapi/node-sdk').registerApp;
  diagnostics?:import('@dentity/application').DiagnosticPort;
  masterKey?:Uint8Array;fetch?:typeof fetch;now?:()=>number;
  adapterFactory?:(provider:DirectoryProvider,credentials:{appId:string;appSecret:string})=>DirectoryPort;

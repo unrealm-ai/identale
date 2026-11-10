@@ -7,6 +7,7 @@ export interface DirectorySyncPart {partId:string;kind:DirectorySyncPartKind;sta
 export interface DirectorySyncPartSummary {total:number;succeeded:number;failed:number;blocked:number;running:number}
 export interface DirectorySyncTask {
  id:string;workspaceId:string;entityId:string;entityName:string;connectionId:string;provider:DirectoryProvider;appId:string;
+ progress?:{userCount:number;departmentCount:number};
  memberConnectionIds?:readonly string[];version:number;enabled:boolean;periodMs:number;nextScheduledAt:number|null;running:boolean;
  lastStartedAt:number|null;lastFinishedAt:number|null;lastSuccessAt:number|null;
  lastResult:'never'|'success'|'failure'|'invalidated';lastError:DirectorySyncError|null;

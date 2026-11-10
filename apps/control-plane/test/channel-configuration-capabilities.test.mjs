@@ -28,7 +28,8 @@ test('channel and business support remain independent from online and directory 
   assert.equal(result.keywordTriggers.supported,false);
   assert.notEqual(result.meetingRead.availability,'available');
   assert.notEqual(result.documentRead.availability,'available');
-  assert.equal(result.directoryRead.availability,'available');
+  assert.equal(result.directoryRead.availability,provider==='wecom'?'unknown':'available');
+  if(provider==='wecom')assert.match(result.directoryRead.reason,/不支持部门或全量目录/);
   assert.equal(result.media.outbound.private.file.supported,true);
   if(provider==='dingtalk')assert.equal(result.media.inbound.group.file.supported,false);
  }

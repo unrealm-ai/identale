@@ -5,6 +5,7 @@ import type{HumanConfirmation,HumanTarget}from'../human-confirmation.js';
 import{recipientCandidate}from'../human-recipient-router.js';
 import type{Store}from'../store.js';
 import type{EmployeeChannelRecord}from'../employee-channels/types.js';
+import{attachIdentityBindings}from'../employee-channels/wecom-identity-bindings.js';
 import{usesWeComBotSearch,weComCallbackUserId,weComSearchUserId}from'../employee-channels/wecom-bot-contacts.js';
 import type{WorkItemConfiguration}from'./configuration.js';
 import type{WorkItemsService}from'./service.js';
@@ -26,7 +27,7 @@ function recipientView(store:Store,workspaceId:string,entityId:string,target:Hum
  const directoryKey=(sourceId:string,authRevision:number,directoryUserId:string)=>recipientHash(['wecom_directory',target.connectionId,target.appId,target.tenantId,target.identityNamespace,sourceId,authRevision,directoryUserId]);
  let recipientKey=target.kind==='wecom_directory'?directoryKey(target.sourceId,target.authRevision,target.directoryUserId):recipientHash(['channel',target.connectionId,target.provider,target.appId,target.tenantId,target.identityNamespace,target.userId]);
  if(target.provider==='wecom'){
-  const record=store.one<{record_json:string}>('SELECT record_json FROM employee_channel_connections WHERE id=? AND workspace_id=? AND entity_id=?',target.connectionId,workspaceId,entityId),current=record?JSON.parse(record.record_json)as EmployeeChannelRecord:undefined;
+  const record=store.one<{record_json:string}>('SELECT record_json FROM employee_channel_connections WHERE id=? AND workspace_id=? AND entity_id=?',target.connectionId,workspaceId,entityId),current=record?attachIdentityBindings(store,JSON.parse(record.record_json)as EmployeeChannelRecord):undefined;
   const valid=!!current&&usesWeComBotSearch(current)&&current.enabled&&current.status==='verified'&&current.workspaceId===workspaceId&&current.entityId===entityId&&current.id===target.connectionId&&current.appId===target.appId&&current.eventTenantId===target.tenantId&&target.identityNamespace==='user_id'&&(!reference||current.sourceId===reference.sourceId&&current.authRevision===reference.authRevision);
   let searchId:string|undefined,verified=false;
   if(valid&&current){

@@ -18,7 +18,7 @@ export function useEmployeeWizard(props: EntityWizardProps, emit: EntityWizardEm
   const name = ref(''), description = ref(''), ownWebUse = ref(true), mode = ref<ChatMode>('real');
   const modelBusy = ref(false), modelEditorDirty=ref(false), creating = ref(false);
   const busy = computed(() => creating.value || modelBusy.value);
-  const modelDraft = ref<EmployeeModelDraft>(null), accessDraft = ref<EmployeeAccessDraft>({ packages: [], webAccess:{allowMemberIds:[props.workspace.memberId],denyMemberIds:[]},directoryAccess:{allow:[],deny:[],allowGroupMembers:false} });
+  const modelDraft = ref<EmployeeModelDraft>(null), accessDraft = ref<EmployeeAccessDraft>({ packages: [], webAccess:{allowMemberIds:[props.workspace.memberId],denyMemberIds:[]},directoryAccess:{allow:[],deny:[],allowGroupMembers:true} });
   const scopeDirty=computed(()=>accessDraft.value.webAccess?.allowWorkspaceMembers===true||avatarPreset.value!==initialAvatar||executionThinkingLevel.value!=='medium');
   const created = ref<Entity | null>(null), error = ref(''), uncertain = ref(false), confirmClose = ref(false);
   const controller = new AbortController(), operationId = crypto.randomUUID();

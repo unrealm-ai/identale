@@ -8,12 +8,12 @@ export const PLATFORM_TABLES = [
   'model_profiles', 'model_catalog', 'entity_model_bindings', 'workspace_model_defaults',
   'model_selection_epochs', 'model_catalog_migrations', 'skill_resource_versions',
   'skill_resource_state', 'workspace_mcp_versions', 'workspace_mcp_state',
-  'employee_channel_connections', 'employee_channel_verification_events',
-  'employee_channel_audit', 'employee_channel_directory_credentials',
-  'wecom_bot_contacts', 'wecom_member_verification_requests',
+  'employee_channel_connections', 'employee_channel_verification_events', 'wecom_identity_bindings',
+  'employee_channel_audit', 'employee_channel_directory_credentials', 'feishu_app_registrations',
+  'wecom_bot_contacts', 'wecom_member_verification_requests', 'wecom_member_challenges',
   'channel_observation_receipts',
   'directory_sync_tasks', 'directory_snapshot_users', 'directory_snapshot_aliases',
-  'directory_alias_projection_meta', 'directory_snapshot_departments',
+  'directory_alias_projection_meta', 'directory_snapshot_departments', 'directory_snapshot_search', 'directory_snapshot_memberships', 'directory_snapshot_scope',
   'directory_sync_history', 'directory_sync_part_state', 'directory_sync_history_parts',
   'trigger_bindings', 'trigger_credentials','employee_human_rules','employee_group_sharing_rules','workspace_work_item_settings',
 ] as const;
@@ -51,7 +51,7 @@ const ownership = new Map<string, StorageOwner>([
   ...PLATFORM_TABLES.map(name => [name, 'platform'] as const),
   ...RUNTIME_TABLES.map(name => [name, 'runtime'] as const),
 ]);
-export function tableOwner(name: string): StorageOwner | undefined { return ownership.get(name); }
+export function tableOwner(name: string): StorageOwner | undefined { return name==='platform_schema_migrations'?'platform':name==='runtime_schema_migrations'?'runtime':ownership.get(name); }
 
 /** Split only the top-level table definitions, respecting literals and quoted identifiers. */
 function definitions(sql: string): {head: string; parts: string[]; tail: string} {

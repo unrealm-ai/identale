@@ -24,7 +24,7 @@ const person=id=>({userid:id,name:'Fixture Member',departments:[id==='member'?'E
 
 async function setup(t){
  const dir=await mkdtemp(join(tmpdir(),'automatic-channel-')),store=new Store(join(dir,'test.sqlite'));
- let now=1800000000000;
+ let now=1800000000000;const cleanup=[];
  const state={feishuTenantKey:true,directoryDenied:false,searchDenied:false,searchTimeout:false,wrongSchema:false,removed:false,sessionRows:[{chat_id:'member',chat_type:'single',chat_name:'Fixture Member',last_msg_time:1800000000},{chat_id:'other',chat_type:'single',chat_name:'Fixture Member',last_msg_time:1800000000}],sendFailure:false,onVerificationSend:undefined,diagnostics:[],calls:[]};
  const http=createServer(async(req,res)=>{
   let body='';
@@ -65,7 +65,7 @@ async function setup(t){
  await new Promise(resolve=>http.listen(0,'127.0.0.1',resolve));
  store.run("INSERT INTO users VALUES('u','owner','Owner','active')");
  store.run("INSERT INTO workspaces VALUES('w','Fixture','u','active'),('other','Other','u','active')");
- store.run("INSERT INTO members VALUES('m','w','u','owner','active'),('om','other','u','owner','active')");
+ store.run("INSERT INTO members(id,workspace_id,user_id,role,status) VALUES('m','w','u','owner','active'),('om','other','u','owner','active')");
  store.run("INSERT INTO entities(id,workspace_id,name,owner_member_id,created_by_member_id,own_web_use,web_use_user_id,interaction_runtime) VALUES('e','w','Employee','m','m',1,'u','builtin-interaction'),('e2','w','Second','m','m',1,'u','builtin-interaction'),('oe','other','Other','om','om',1,'u','builtin-interaction')");
  const options={masterKey:Buffer.alloc(32,7),now:()=>now,diagnostics:{event:event=>state.diagnostics.push(event)},fetch:(url,init)=>{
   const parsed=new URL(url);
@@ -73,9 +73,14 @@ async function setup(t){
   return fetch('http://127.0.0.1:'+http.address().port+parsed.pathname+parsed.search,init);
  }};
  const repository=new EmployeeChannelRepository(store),channels=new EmployeeChannelService(repository,options);
+ // Onboarding admission consults only pre-existing local directory facts, never the channel HTTP fixture.
+ channels.setDirectorySnapshots({directory:connectionId=>({
+  getUser:async id=>{const c=repository.byId(connectionId);if(!c||c.provider==='wecom'||!['member','other'].includes(id.id))throw Error('snapshot_user_missing');return{id,displayName:'Fixture Member',status:'active',aliases:[],departmentIds:c.provider==='dingtalk'?['1']:[],departmentMembershipsKnown:true,primaryDepartmentId:{status:'unknown'},directManager:{status:'unknown'},dottedLineManagers:{status:'unknown'}};},
+  getDepartment:async id=>({id,namespace:'department_id',displayName:'Engineering',parentId:{status:'known',value:null},leaders:{status:'unknown'}})
+ })});
  const capabilities=new CapabilityConfigService(store,[],channels,undefined,undefined,undefined,()=>now);
  channels.setAccessCheck((...args)=>capabilities.authorizeChannel(...args));
- const transport=ingressFixture(),inbox=new SqliteMessageLoopRepository(store);
+ const transport=ingressFixture(),inbox=new SqliteMessageLoopRepository(store,()=>now);
  const loop=new ChannelMessageLoop(inbox,channels,{}, {},()=>now);
  const supervisor=new ChannelIngressSupervisor(channels,loop,transport.factory,()=>now);
  await supervisor.start();
@@ -83,14 +88,15 @@ async function setup(t){
  await registerEmployeeChannelRoutes(app,channels,{requireManager:request=>{if(request.headers['x-test-manager']==='no')throw Object.assign(Error('forbidden'),{statusCode:403});return'u';}});
  registerHumanConfiguration(app,store,channels,()=>{},capabilities);
  const drafts=new EmployeeChannelCreationDrafts(channels,options);
- t.after(async()=>{drafts.close();capabilities.close();await supervisor.stop();await app.close();await new Promise(resolve=>http.close(resolve));store.close();await rm(dir,{recursive:true,force:true});});
+ t.after(async()=>{for(const close of cleanup)await close();drafts.close();capabilities.close();await supervisor.stop();inbox.close();await app.close();await new Promise(resolve=>http.close(resolve));store.close();await rm(dir,{recursive:true,force:true});});
  const save=(provider,appId=provider+'-app',entity='e',workspace='w',appSecret='fixture-secret')=>channels.save(workspace,entity,provider,'u',{appId,appSecret,expectedRevision:0});
  const search=(words=['member'])=>app.inject({method:'POST',url:path+'/channels/wecom/member-search',payload:{keywords:words}});
+ const select=async(words=['member'])=>{const response=await search(words);assert.equal(response.statusCode,200,response.body);const c=repository.byProvider('w','e','wecom');for(const p of response.json().items){const selected=await app.inject({method:'POST',url:path+'/channels/wecom/member-selection',payload:{sourceId:c.sourceId,userId:p.externalId,selectionToken:p.selectionToken}});assert.equal(selected.statusCode,200,selected.body);}return response;};
  const rule=(c,id='member',kind='channel_user')=>({sourceId:c.sourceId,kind,subjectId:channelSubject(kind,id,kind==='department'?'department_id':'user_id',c.appId),conversationKinds:['private','group']});
- const policy=(c,allow=[rule(c)],deny=[])=>capabilities.patchDirectoryAccess('w','e',{sourceId:c.sourceId,allow,...(c.provider==='wecom'?{deny,mode:'allowlist'}:{}),expectedRevision:capabilities.getDirectoryAccess('w','e').channelPolicies.find(p=>p.sourceId===c.sourceId).revision});
+ const policy=(c,allow=[rule(c)],deny=[])=>capabilities.patchDirectoryAccess('w','e',{sourceId:c.sourceId,allow,deny,mode:'allowlist',expectedRevision:capabilities.getDirectoryAccess('w','e').channelPolicies.find(p=>p.sourceId===c.sourceId).revision});
  const receive=async(c,event)=>{const live=await transport.current(c.id);return live.sink.onEvent(event);};
  const count=()=>store.one("SELECT count(*) n FROM channel_inbox WHERE lane<>'' AND status<>'rejected'").n;
- return {store,state,repository,channels,capabilities,supervisor,transport,app,drafts,save,search,rule,policy,receive,count,advance:ms=>now+=ms};
+ return {cleanup,store,state,repository,channels,capabilities,supervisor,transport,app,drafts,save,search,select,rule,policy,receive,count,advance:ms=>now+=ms};
 }
 function ding(id='first',patch={}){
  return {type:'CALLBACK',headers:{topic:'/v1.0/im/bot/messages/get',messageId:'event-'+id},data:JSON.stringify({
@@ -136,7 +142,7 @@ test('C02 invalid credentials, transport failure and duplicate binding',async t=
 test('I01 first authorized private or directed group message is admitted on the live generation',async t=>{
  for(const provider of ['dingtalk','wecom'])for(const group of [false,true])await t.test(provider+(group?' group':' private'),async t=>{
   const f=await setup(t),c=await f.save(provider),live=await f.transport.current(c.id);
-  if(provider==='wecom')await f.search();
+  if(provider==='wecom')await f.select();
   f.policy(c);
   const event=provider==='dingtalk'?ding('first',group?{conversationType:'2',isInAtList:true}:{}):wecom(c,'first',group?{chattype:'group',chatid:'room'}:{});
   assert.equal(await live.sink.onEvent(event),'accepted');assert.equal(f.count(),1);
@@ -194,8 +200,9 @@ test('I07 revalidation fences old runner, rechecks identity and never enables a 
  const f=await setup(t),c=await f.save('dingtalk'),live=await f.transport.current(c.id);f.policy(c);
  await live.sink.onEvent(ding());await f.supervisor.stop();
  const clock=()=>1800000000000;
- const resumed=new ChannelIngressSupervisor(f.channels,new ChannelMessageLoop(new SqliteMessageLoopRepository(f.store),f.channels,{},{},clock),f.transport.factory,clock);
- t.after(()=>resumed.stop());await resumed.start();
+ const resumedInbox=new SqliteMessageLoopRepository(f.store,clock);
+ const resumed=new ChannelIngressSupervisor(f.channels,new ChannelMessageLoop(resumedInbox,f.channels,{},{},clock),f.transport.factory,clock);
+ f.cleanup.push(async()=>{await resumed.stop();resumedInbox.close();});await resumed.start();
  assert.equal(f.repository.byId(c.id).status,'verified');
  const next=await f.channels.revalidate('w','e','dingtalk','u',c.revision);
  await assert.rejects(live.sink.onEvent(ding('old')),/channel_ingress_generation_expired|channel_ingress_owner_lost/);
@@ -226,13 +233,13 @@ test('S02 empty, permission failure, forged, expired and cross-source candidates
  assert.throws(()=>f.policy(c),/invalid_member_search_candidate/);
  f.state.searchDenied=true;assert.equal((await f.search()).json().error,'authorization_denied');f.state.searchDenied=false;
  f.state.searchTimeout=true;assert.equal((await f.search()).json().error,'channel_member_search_timeout');f.state.searchTimeout=false;
- await f.search();const second=await f.save('wecom','other-bot','e2');
+ const candidate=(await f.search()).json().items[0];const second=await f.save('wecom','other-bot','e2');
  assert.throws(()=>f.channels.validateRules('w','e2',[f.rule(second)]),/invalid_member_search_candidate/);
  assert.throws(()=>f.channels.validateRules('other','oe',[f.rule(c)]),/directory_source_not_found/);
- f.advance(600001);assert.throws(()=>f.policy(c),/invalid_member_search_candidate/);
+ f.advance(30*60_000);assert.throws(()=>f.channels.selectWeComMember('w','e',{sourceId:c.sourceId,userId:candidate.externalId,selectionToken:candidate.selectionToken}),/invalid_member_search_candidate/);
 });
 test('A01 bot search gates authorization until an authenticated exact match and deny wins',async t=>{
- const f=await setup(t),c=await f.save('wecom');await f.search(['member','other']);
+ const f=await setup(t),c=await f.save('wecom');await f.select(['member','other']);
  f.policy(c,[f.rule(c),f.rule(c,'other')],[f.rule(c)]);
  f.capabilities.patchDirectoryAccess('w','e',{sourceId:c.sourceId,mode:'denylist',expectedRevision:f.capabilities.getDirectoryAccess('w','e').channelPolicies.find(p=>p.sourceId===c.sourceId).revision});
  assert.throws(()=>f.channels.validateRules('w','e',[f.rule(c,'1','department')]),/channel_directory_rule_unsupported/);
@@ -244,7 +251,7 @@ test('A01 bot search gates authorization until an authenticated exact match and 
  assert.equal(f.count(),1);
 });
 test('A02 candidate, approved recipient and speaker lookup require current exact source',async t=>{
- const f=await setup(t),c=await f.save('wecom');await f.search();f.policy(c);
+ const f=await setup(t),c=await f.save('wecom');await f.select();f.policy(c);
  assert.equal((await f.app.inject(path+'/human-confirmation')).json().candidates.filter(i=>i.target.kind==='wecom_directory').length,0);
  await f.receive(c,wecom(c));
  const candidate=(await f.app.inject(path+'/human-confirmation')).json().candidates.find(i=>i.target.kind==='wecom_directory');
@@ -259,7 +266,7 @@ test('A02 candidate, approved recipient and speaker lookup require current exact
  const b=await f.channels.resolveBinding(c.id),actor={kind:'human',externalId:'member',idNamespace:'user_id',applicationId:c.appId,identityEvidence:'channel_verified'};
  assert.deepEqual(await f.channels.describeActor(b,actor),{displayName:'Fixture Member'});
  assert.deepEqual(await f.channels.describeActor(b,{...actor,externalId:'different'}),{});
- f.state.removed=true;await assert.rejects(f.channels.assertWeComPrivateRecipient(c.id,'member'),/authorization_denied/);
+ f.state.removed=true;const before=f.state.calls.length;await f.channels.assertWeComPrivateRecipient(c.id,'member');assert.equal(f.state.calls.length,before,'recipient identity checks are local; provider delivery owns account availability');
 });
 test('R01 upgrade retains existing identity, old challenge dedupe and Feishu behavior',async t=>{
  const f=await setup(t),c=await f.save('dingtalk');
@@ -277,7 +284,7 @@ function request(c,id='member'){return {workspaceId:'w',entityId:'e',requesterKi
 const packageInput={name:'Fixture package',enabled:true,mode:'inherit',userPolicyMode:'inherit',allowMemberIds:[],denyMemberIds:[],resourceIds:[]};
 test('P01 all and empty denylist need no search while nonempty lists fail closed until mapped',async t=>{
  const f=await setup(t),c=await f.save('wecom');
- assert.equal(f.capabilities.getDirectoryAccess('w','e').channelPolicies[0].mode,'allowlist');
+ assert.equal(f.capabilities.getDirectoryAccess('w','e').channelPolicies[0].mode,'denylist');
  assert.equal(f.capabilities.getDirectoryAccess('w','e').channelPolicies[0].allowGroupMembers,true);
  change(f,c,'all');
  assert.equal(await f.receive(c,wecom(c,'first',{from:{userid:'external-or-unknown'}})),'accepted');
@@ -286,14 +293,14 @@ test('P01 all and empty denylist need no search while nonempty lists fail closed
  change(f,c,'allowlist',{allow:[]});await f.receive(c,wecom(c,'empty-allow'));assert.equal(f.count(),1);
  change(f,c,'denylist',{deny:[]});assert.equal(await f.receive(c,wecom(c,'unmapped-empty-deny')),'accepted');assert.equal(f.count(),2);
  assert.equal(f.state.calls.some(c=>c.route.includes('/cli/')),false);
- await f.search();change(f,c,'denylist',{deny:[f.rule(c)]});
+ await f.select();change(f,c,'denylist',{deny:[f.rule(c)]});
  await f.receive(c,wecom(c,'unmapped-nonempty-deny',{from:{userid:'stranger'}}));assert.equal(f.count(),2);
  change(f,c,'denylist',{deny:[]});
- await f.search();assert.equal(await f.receive(c,wecom(c,'mapped-deny')),'accepted');
+ await f.select();assert.equal(await f.receive(c,wecom(c,'mapped-deny')),'accepted');
  change(f,c,'allowlist');await f.receive(c,wecom(c,'mapped-empty-allow'));assert.equal(f.count(),3);
 });
 test('P02 source revisions, dormant lists, expiry and package intersection',async t=>{
- const f=await setup(t),c=await f.save('wecom');await f.search(['member','other']);f.policy(c,[f.rule(c)],[f.rule(c,'other')]);
+ const f=await setup(t),c=await f.save('wecom');await f.select(['member','other']);f.policy(c,[f.rule(c)],[f.rule(c,'other')]);
  await f.receive(c,wecom(c,'denied-person-evidence',{from:{userid:'other'}}));
  await f.receive(c,wecom(c));const b=await f.channels.resolveBinding(c.id),scope=request(c);
  const legacyLists={allow:[f.rule(c)],deny:[f.rule(c)]};
@@ -319,7 +326,7 @@ test('P03 empty package denylist inherits without mapping but nonempty lists fai
  assert.equal((await f.capabilities.executionPackages(request(c),b.connection,'private')).length,1);
  assert.equal(f.state.calls.some(c=>c.route.includes('/cli/')),false);
  assert.equal(f.repository.byId(c.id).wecomContactIdentityRevision,undefined);
- await f.search();
+ await f.select();
  f.capabilities.save('w','e',{...packageInput,userPolicyMode:'denylist',directoryAccess:{allow:[],deny:[f.rule(c)]}},pkg.id);
  assert.equal((await f.capabilities.executionPackages(request(c,'stranger'),b.connection,'private')).length,0);
  f.capabilities.save('w','e',{...packageInput,userPolicyMode:'allowlist',directoryAccess:{allow:[],deny:[]}},pkg.id);
@@ -327,7 +334,7 @@ test('P03 empty package denylist inherits without mapping but nonempty lists fai
  f.capabilities.save('w','e',packageInput,pkg.id);assert.equal((await f.capabilities.executionPackages(request(c),b.connection,'private')).length,1);
 });
 test('P04 saved lists survive candidate eviction and PUT keeps other provider policy independent',async t=>{
- const f=await setup(t),c=await f.save('wecom'),d=await f.save('dingtalk');await f.search();
+ const f=await setup(t),c=await f.save('wecom'),d=await f.save('dingtalk');await f.select();
  const saved=f.capabilities.saveDirectoryAccess('w','e',{channelPolicies:[{sourceId:c.sourceId,mode:'allowlist',allow:[f.rule(c)],deny:[]}]});
  let pkg=f.capabilities.save('w','e',{...packageInput,userPolicyMode:'allowlist',directoryAccess:{allow:[f.rule(c)],deny:[]}});
  const revision=saved.channelPolicies.find(p=>p.sourceId===c.sourceId).revision;f.policy(d);
@@ -344,7 +351,8 @@ test('P04 saved lists survive candidate eviction and PUT keeps other provider po
 for(const provider of ['feishu','dingtalk','wecom'])test('U01 '+provider+' defaults, source CAS, inherited group and deny priority',async t=>{
  const f=await setup(t),c=await f.save(provider);
  const policy=()=>f.capabilities.getDirectoryAccess('w','e').channelPolicies.find(p=>p.sourceId===c.sourceId);
- assert.deepEqual({mode:policy().mode,allow:policy().allow,deny:policy().deny,group:policy().allowGroupMembers},{mode:'allowlist',allow:[],deny:[],group:true});
+ assert.deepEqual({mode:policy().mode,allow:policy().allow,deny:policy().deny,group:policy().allowGroupMembers},{mode:'denylist',allow:[],deny:[],group:true});
+ f.capabilities.patchDirectoryAccess('w','e',{sourceId:c.sourceId,mode:'allowlist',expectedRevision:policy().revision});
  if(provider==='dingtalk')assert.equal(await f.receive(c,ding('group-default',{conversationType:'2',isInAtList:true})),'accepted');
  if(provider==='wecom')assert.equal(await f.receive(c,wecom(c,'group-default',{chattype:'group',chatid:'room'})),'accepted');
  const binding=await f.channels.resolveBinding(c.id),namespace=provider==='feishu'?'open_id':'user_id';assert.ok(binding);
@@ -357,7 +365,7 @@ for(const provider of ['feishu','dingtalk','wecom'])test('U01 '+provider+' defau
  assert.equal(f.capabilities.list('w','e').find(p=>p.id===pack.id).directoryAccess.channelPolicies.find(p=>p.sourceId===c.sourceId).mode,'inherit');
  assert.deepEqual((await f.capabilities.usableChannel(groupScope,binding.connection,'group')).map(p=>p.id),[pack.id]);
  await assert.rejects(f.capabilities.usableChannel(privateScope,binding.connection,'private'),/entity_use_forbidden/);
- if(provider==='wecom'){await f.search();await f.receive(c,wecom(c,'mapped',{chattype:'group',chatid:'room'}));}
+ if(provider==='wecom'){await f.select();await f.receive(c,wecom(c,'mapped',{chattype:'group',chatid:'room'}));}
  const person={sourceId:c.sourceId,kind:'channel_user',subjectId:channelSubject('channel_user','member',namespace,c.appId),conversationKinds:['private','group']};
  for(const mode of ['allowlist','all','denylist']){
   const old=policy().revision;
@@ -428,7 +436,7 @@ for(const legacyStatus of ['verified','pending_verification'])test('legacy DingT
 
 
 test('WeCom exact evidence is per person: another match cannot clear an unresolved deny or notification target',async t=>{
- const f=await setup(t),c=await f.save('wecom');await f.search(['member','other']);
+ const f=await setup(t),c=await f.save('wecom');await f.select(['member','other']);
  change(f,c,'all',{deny:[f.rule(c,'other')]});
  await f.receive(c,wecom(c,'known-member'));assert.equal(f.count(),0);
  assert.deepEqual(f.repository.byId(c.id).wecomVerifiedContactIds,['member']);
@@ -449,9 +457,11 @@ test('WeCom exact evidence is per person: another match cannot clear an unresolv
  assert.equal(await f.channels.matches('w',f.rule(c,'other'),request(c),binding.connection,'private'),false);
 });
 test('WeCom legacy global identity flag never grants a member and package deny remains fail closed',async t=>{
- const f=await setup(t),c=await f.save('wecom');await f.search(['member','other']);change(f,c,'all');
+ const f=await setup(t),c=await f.save('wecom');await f.select(['member','other']);change(f,c,'all');
  assert.equal(await f.receive(c,wecom(c,'legacy')),'accepted');
  const current=f.repository.byId(c.id),{wecomVerifiedContactIds:_ids,...legacy}=current;
+ // This fixture models a legacy global flag without relational identity evidence.
+ f.store.run('DELETE FROM wecom_identity_bindings WHERE connection_id=?',c.id);
  f.repository.save({...legacy,wecomContactIdentityRevision:c.authRevision},current);
  const binding=await f.channels.resolveBinding(c.id);
  assert.equal(await f.channels.matches('w',f.rule(c),request(c),binding.connection,'private'),'unknown');
@@ -463,7 +473,7 @@ test('WeCom legacy global identity flag never grants a member and package deny r
  assert.equal(await f.capabilities.authorizeChannel(request(c),binding.connection,'private'),true);
  assert.deepEqual(await f.capabilities.usableChannel(request(c),binding.connection,'private'),[]);
  const next=await f.channels.revalidate('w','e','wecom','u',c.revision);
- assert.equal(f.repository.byId(c.id).wecomVerifiedContactIds,undefined);
+ assert.deepEqual(f.repository.byId(c.id).wecomVerifiedContactIds,['member']);
  assert.equal(next.memberSearchIdentityVerified,false);
 });
 
@@ -472,7 +482,7 @@ const memberVerificationPath=path+'/channels/wecom/member-verification';
 const verificationSendCalls=f=>f.state.calls.filter(c=>c.route==='/cli/message/aibot/send');
 const startMemberVerification=(f,c,userId='member',requestId=randomUUID())=>f.app.inject({method:'POST',url:memberVerificationPath,payload:{userId,sourceId:c.sourceId,requestId}});
 const memberVerificationStatus=(f,c,userId='member')=>f.app.inject(memberVerificationPath+'?'+new URLSearchParams({userId,sourceId:c.sourceId}));
-async function prepareMemberVerification(t){const f=await setup(t),c=await f.save('wecom');await f.search(['member','other']);f.policy(c);await f.receive(c,wecom(c,'callback-initial',{from:{userid:'callback-member'}}));return {f,c};}
+async function prepareMemberVerification(t){const f=await setup(t),c=await f.save('wecom');await f.select(['member','other']);f.policy(c);await f.receive(c,wecom(c,'callback-initial',{from:{userid:'callback-member'}}));return {f,c};}
 test('WeCom administrator-relay challenge binds different IDs for whitelist, blacklist, package, human target and private recipient',async t=>{
  const {f,c}=await prepareMemberVerification(t);
  const sent=await startMemberVerification(f,c);assert.equal(sent.statusCode,200,sent.body);assert.equal(sent.json().status,'pending');
@@ -528,7 +538,7 @@ test('WeCom code rejects expired, replaced-credential and missing receiver cases
  await f.receive(c,wecom(c,'expired-token',{from:{userid:'callback-member'},text:{content:phrase}}));assert.equal((await memberVerificationStatus(f,c)).json().status,'expired');assert.equal(f.repository.byId(c.id).wecomContactMappings,undefined);
  const currentPhrase=(await startMemberVerification(f,c)).json().phrase;await f.channels.revalidate('w','e','wecom','u',c.revision);
  f.advance(11_000);await f.supervisor.tick();await f.receive(c,wecom(c,'rotated-token',{from:{userid:'callback-member'},text:{content:currentPhrase}}));assert.equal(f.repository.byId(c.id).wecomContactMappings,undefined);
- await f.receive(c,wecom(c,'normal-after-rotation',{from:{userid:'callback-member'}}));await f.search();f.state.sessionRows=[];
+ await f.receive(c,wecom(c,'normal-after-rotation',{from:{userid:'callback-member'}}));await f.select();f.state.sessionRows=[];
  let response=await startMemberVerification(f,c);assert.equal(response.statusCode,200,response.body);assert.equal(response.json().status,'pending');
  f.channels.setMemberVerificationReceiver(async()=>false);f.advance(30_001);await f.supervisor.tick();
  response=await f.app.inject({method:'POST',url:memberVerificationPath,payload:{userId:'member',sourceId:c.sourceId,requestId:randomUUID(),replace:true}});assert.equal(response.statusCode,409);assert.equal(response.json().error,'member_verification_receiver_not_ready');assert.equal(verificationSendCalls(f).length,0);

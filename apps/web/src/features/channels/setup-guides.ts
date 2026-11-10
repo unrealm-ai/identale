@@ -99,7 +99,7 @@ export const setupGuides: readonly SetupGuide[] = [
     currentLimitations: ['智能机器人使用官方 SDK 主动 WebSocket，同一连接收发，无 HTTP 回调 URL。', '首条通过校验的真实消息自动确认机器人，无需人工验证。', '当前不支持群历史、话题历史或会议材料；本地验证不代表企业租户真实收发已通过。'],
     capabilities: [
       { title: '智能机器人消息', detail: '每员工独立 BotID / Secret；传输在线、身份验证与使用授权分别检查。' },
-      { title: '成员搜索与使用范围', detail: '新建默认空白名单、群内可用；可搜索成员设置白名单或黑名单。' },
+      { title: '成员搜索与使用范围', detail: '新建数字员工首次接入默认全员 + 空黑名单、群内可用；可搜索成员设置白名单或黑名单。' },
       { title: '群历史与会议材料', detail: '当前不支持，不提供相应开关。' },
     ],
     steps: directorySetupGuides.wecom.steps,

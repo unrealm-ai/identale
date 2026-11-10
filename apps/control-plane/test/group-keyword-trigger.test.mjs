@@ -26,7 +26,7 @@ async function diagnosticFixture(t){const root=mkdtempSync(join(tmpdir(),'identi
 async function fixture(t,{model,history=false,meeting=false,describeActor,diagnostics,memory=false,unconfigured=false,groupLive=false}={}){
  const dir=mkdtempSync(join(tmpdir(),'identity-channel-loop-'));let now=1800000000000;
  const store=new Store(join(dir,'app.sqlite'));
- store.run("INSERT INTO users VALUES('manager','manager','Manager','active')");store.run("INSERT INTO workspaces VALUES('w','WS','manager','active')");store.run("INSERT INTO members VALUES('manager-member','w','manager','owner','active')");store.run("INSERT INTO entities(id,workspace_id,name,owner_member_id,created_by_member_id,own_web_use,web_use_user_id,interaction_runtime) VALUES('e','w','Helper','manager-member','manager-member',1,'manager','builtin-interaction')");
+ store.run("INSERT INTO users VALUES('manager','manager','Manager','active')");store.run("INSERT INTO workspaces VALUES('w','WS','manager','active')");store.run("INSERT INTO members(id,workspace_id,user_id,role,status) VALUES('manager-member','w','manager','owner','active')");store.run("INSERT INTO entities(id,workspace_id,name,owner_member_id,created_by_member_id,own_web_use,web_use_user_id,interaction_runtime) VALUES('e','w','Helper','manager-member','manager-member',1,'manager','builtin-interaction')");
  const journal=new JsonlJournal({root:join(dir,'records'),ownerId:'fixture',serialize:fn=>store.transaction(fn)}),conversations=new SqliteConversationRepository(store,journal,()=>now);conversations.initialize(0);
  const groups=groupLive?new SqliteGroupContext(store):undefined;
  const denied=new Set(),models=[],commands=[],sent=[],queries=[];let version='1',sendUnknown=false,available=true;

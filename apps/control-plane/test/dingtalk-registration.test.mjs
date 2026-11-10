@@ -23,7 +23,7 @@ async function setup(t,config={}){
  const dir=await mkdtemp(join(tmpdir(),'ding-registration-')),store=new Store(join(dir,'test.sqlite'));
  store.run("INSERT INTO users VALUES('u','owner','Owner','active')");
  store.run("INSERT INTO workspaces VALUES('w','Fixture','u','active')");
- store.run("INSERT INTO members VALUES('m','w','u','owner','active')");
+ store.run("INSERT INTO members(id,workspace_id,user_id,role,status) VALUES('m','w','u','owner','active')");
  store.run("INSERT INTO entities(id,workspace_id,name,owner_member_id,created_by_member_id,own_web_use,web_use_user_id,interaction_runtime) VALUES('e','w','Employee','m','m',1,'u','builtin-interaction')");
  let now=1800000000000;
  const state={calls:[],logs:[],poll:{errcode:0,status:'SUCCESS',client_id:'synthetic-app',client_secret:secret},hold:undefined,verifyHold:undefined,authorized:true,verifications:0};

@@ -66,7 +66,7 @@ onUnmounted(()=>{generation++;controller.abort();emit('dirtyChanged',false);emit
     <NAlert v-if="!available" type="info">当前连接的目录不可用，暂不能新增人员或部门；已有规则保留，可移除。</NAlert><NAlert v-if="restricted" type="warning">已配置额外使用限制，仍会生效。本次保存不会改写已有会话范围。</NAlert>
     <NForm class="directory-access-form" @submit.prevent="save">
       <NRadioGroup :value="mode==='allowlist'?'allowlist':'denylist'" @update:value="v=>mode=v as ChannelAccessMode" :disabled="locked" :aria-label="providerLabel(connection.provider)+'使用范围模式'"><NSpace><NRadio value="allowlist">白名单</NRadio><NRadio value="denylist">全员 + 黑名单</NRadio></NSpace></NRadioGroup>
-      <p class="field-note">新建默认空白名单。切换模式保留两份名单；白名单仅在白名单模式生效，黑名单始终优先。</p>
+      <p class="field-note">新建数字员工首次接入默认全员 + 空黑名单；换绑或解绑后重新接入默认空白名单。切换模式保留两份名单；白名单仅在白名单模式生效，黑名单始终优先。</p>
       <div class="group-use"><NCheckbox v-model:checked="allowGroupMembers" :disabled="locked" aria-label="允许群成员在群内使用">允许群成员在群内使用</NCheckbox><p class="field-note">新建默认打开。群成员可在机器人所在群内按本渠道支持的触发方式使用，不授予私聊或网页使用权；黑名单始终优先。此开关不控制群消息上下文或内容共享。</p></div>
       <DirectoryRulePicker v-if="mode==='allowlist'" employee-scope fixed-source v-model:rules="rules" :subjects="subjects" hide-unavailable-notice :base="base" :label="memberSearch?'允许成员':'允许渠道用户或部门'" :disabled="locked" :readonly="!canManage" @identity-verified="markIdentityVerified" @busy-changed="v=>queries.allow=v" />
       <h4>黑名单（始终优先）</h4>

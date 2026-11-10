@@ -1,7 +1,7 @@
 import type { ThinkingLevel } from '@dentity/contracts';
 export interface AccountUser { id: string; username: string; displayName: string }
 export interface AccountWorkspace { id: string; name: string; memberId: string; role: 'owner' | 'admin' | 'member' }
-export interface AccountInvitation { workspaceId: string; inviterMemberId: string; role: 'admin' | 'member'; expiresAt: number; revoked: boolean; usedBy: string | null }
+export interface AccountInvitation { workspaceId: string; inviterMemberId: string; role: 'admin' | 'member'; expiresAt: number; revoked: boolean; usedBy: string | null; reusable: boolean }
 export interface AccountEntity { avatarPreset?:string|null; enabled?: boolean; lifecycleRevision?: number; id: string; workspaceId: string; name: string; description: string; ownerMemberId: string; createdByMemberId: string; ownWebUse: boolean; webUseUserId: string; interactionRuntime: string; executionThinkingLevel: ThinkingLevel }
 export interface AccountSecurity { id(): string; token(): string; digest(value: string): string }
 export interface PasswordHasher { hash(value: string): Promise<string>; verify(hash: string, value: string): Promise<boolean> }

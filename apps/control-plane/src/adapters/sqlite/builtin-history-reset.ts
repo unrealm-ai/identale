@@ -1,4 +1,5 @@
 import{backup,DatabaseSync}from'node:sqlite';
+import{validateDatabaseVersion}from'../../schema-migrations/catalog.js';
 import{cpSync,mkdirSync,writeFileSync,existsSync,readdirSync,lstatSync}from'node:fs';
 import{resolve,join}from'node:path';
 export interface BuiltinHistoryResetReport{version:2;status:'ready'|'blocked'|'archived'|'already_current';sessions:number;conversations:number;blocked:string[];backupDirectory?:string}
@@ -6,6 +7,7 @@ export interface BuiltinHistoryResetReport{version:2;status:'ready'|'blocked'|'a
 export async function resetLegacyBuiltinHistory(options:{databasePath:string;journalRoot:string;dryRun:boolean;offlineConfirmed?:boolean;backupDirectory?:string}):Promise<BuiltinHistoryResetReport>{
  const path=resolve(options.databasePath);if(!existsSync(path))throw Error('Existing database required');const db=new DatabaseSync(path,{readOnly:options.dryRun});
  try{
+  const role=validateDatabaseVersion(db);if(role==='platform')throw Error('schema_migration_wrong_database_role');
   const has=(name:string)=>!!db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name=?").get(name);
   if(!has('builtin_records'))return{version:2,status:'already_current',sessions:0,conversations:0,blocked:[]};
   const rows=db.prepare("SELECT key,version,json FROM builtin_records WHERE key LIKE 'builtin:session:%' AND json_extract(json,'$.closed')=0 AND json_extract(json,'$.handle.scope.kind')='interaction' AND json_extract(json,'$.handle.sessionId')!=json_extract(json,'$.handle.scope.conversationId')").all();const blocked:string[]=[];
@@ -22,6 +24,7 @@ export async function resetLegacyBuiltinHistory(options:{databasePath:string;jou
   await backup(db,join(backupDirectory,'database.sqlite'));cpSync(options.journalRoot,join(backupDirectory,'builtin-records'),{recursive:true,preserveTimestamps:true});
   writeFileSync(join(backupDirectory,'manifest.json'),JSON.stringify({version:2,databasePath:path,journalRoot:resolve(options.journalRoot),createdAt:new Date().toISOString(),sessionKeys:rows.map(r=>r['key']),conversationIds:[...ids],journalFiles:files,restore:'With identity stopped, restore database.sqlite to databasePath and the saved builtin-records directory to journalRoot as one consistent pair. Preserve the current files separately first; do not mix WAL files from another database snapshot.'},null,2),{mode:0o600});
   db.exec('BEGIN IMMEDIATE');try{
+   validateDatabaseVersion(db);
    for(const row of rows){const live=db.prepare('SELECT version,json FROM builtin_records WHERE key=?').get(row['key']!);if(!live||live['version']!==row['version']||live['json']!==row['json'])throw Error('Reset input changed; repeat offline dry-run');}
    db.exec('CREATE TABLE IF NOT EXISTS conversation_context_resets(conversation_id TEXT PRIMARY KEY,epoch INTEGER NOT NULL,reason TEXT NOT NULL,at INTEGER NOT NULL)');
    for(const row of rows){const value=JSON.parse(String(row['json']));db.prepare('UPDATE builtin_records SET version=version+1,json=? WHERE key=?').run(JSON.stringify({...value,closed:true,supersededBy:value.handle.scope.conversationId,resetReason:'legacy_test_context_reset'}),row['key']!);}

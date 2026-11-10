@@ -140,24 +140,63 @@ test('login wrong/unknown use uniform error; logout, expiration and revocation d
   assert.equal((await call('GET', '/api/auth/me', undefined, third.headers['set-cookie'].split(';')[0])).statusCode, 401);
 });
 
-test('invited registration joins exactly one space; replay and invalid invitation never fall back', async t => {
-  const { db, call, register } = await setup(t);
+test('new member and admin invitations are reusable through their configured expiry', async t => {
+  const { db, call, register, advance, restart } = await setup(t);
+  const day = 86400000;
   const alice = await register('alice');
-  const invite = (await call('POST', `/api/workspaces/${alice.workspace.id}/invitations`, {}, alice.cookie)).json();
+  const url = `/api/workspaces/${alice.workspace.id}/invitations`;
+  const create = body => call('POST', url, body, alice.cookie);
+  const inspect = token => call('POST', '/api/invitations/inspect', { token });
+  const invite = (await create({})).json();
   assert.equal(invite.role, 'member');
-  assert.equal((await call('POST', '/api/invitations/inspect', { token: invite.token })).json().workspace.id, alice.workspace.id);
-  const bob = await register('bob', { invitationToken: invite.token });
-  assert.equal(bob.workspace.id, alice.workspace.id); assert.equal(bob.workspace.role, 'member');
-  assert.equal(db.prepare('SELECT count(*) AS n FROM workspaces').get().n, 1);
+  assert.equal(invite.expiresAt, 1800000000000 + day);
   assert.notEqual(db.prepare('SELECT token_hash FROM invitations').get().token_hash, invite.token);
-  const replay = await call('POST', '/api/auth/register', { username: 'charlie', password, invitationToken: invite.token });
-  assert.equal(replay.statusCode, 400);
-  assert.equal(db.prepare("SELECT count(*) AS n FROM users WHERE username='charlie'").get().n, 0);
-  assert.equal((await call('POST', '/api/invitations/accept', { token: invite.token }, bob.cookie)).statusCode, 400);
-  const fresh = (await call('POST', `/api/workspaces/${alice.workspace.id}/invitations`, {}, alice.cookie)).json();
-  const concurrent = await Promise.all(['charlie', 'david'].map(username => call('POST', '/api/auth/register', { username, password, invitationToken: fresh.token })));
+  for (const hours of [0, 1.5, 180 * 24 + 1]) {
+    const invalid = await create({ expiresInHours: hours });
+    assert.equal(invalid.statusCode, 400);
+    assert.equal(invalid.json().error, 'invalid_expiry');
+  }
+  const admin = (await create({ role: 'admin', expiresInHours: 180 * 24 })).json();
+  assert.equal(admin.expiresAt, 1800000000000 + 180 * day);
+  for (const { token, role } of [invite, admin]) {
+    const joined = await Promise.all([`${role}-one`, `${role}-two`].map(username => register(username, { invitationToken: token })));
+    for (const user of joined) {
+      assert.equal(user.workspace.id, alice.workspace.id);
+      assert.equal(user.workspace.role, role);
+    }
+    const repeated = await call('POST', '/api/invitations/accept', { token }, joined[0].cookie);
+    assert.equal(repeated.json().workspace.memberId, joined[0].workspace.memberId);
+    assert.equal((await inspect(token)).json().workspace.id, alice.workspace.id);
+  }
+  assert.equal(db.prepare('SELECT count(*) AS n FROM workspaces').get().n, 1);
+  assert.equal(db.prepare('SELECT count(*) AS n FROM members').get().n, 5);
+  assert.equal(db.prepare("SELECT count(*) AS n FROM audit WHERE action='invitation.accepted'").get().n, 4);
+  assert.equal(db.prepare('SELECT count(*) AS n FROM invitations WHERE used_by IS NOT NULL').get().n, 0);
+  await restart();
+  advance(180 * day - 1);
+  assert.equal((await inspect(invite.token)).statusCode, 400);
+  assert.equal((await inspect(admin.token)).statusCode, 200);
+  advance(1);
+  assert.equal((await inspect(admin.token)).statusCode, 400);
+  const expired = await call('POST', '/api/auth/register', { username: 'late-guest', password, invitationToken: admin.token });
+  assert.equal(expired.statusCode, 400);
+  assert.equal(db.prepare('SELECT count(*) AS n FROM users').get().n, 5);
+});
+
+test('upgrading stored invitations preserves used links and single-use concurrency', async t => {
+  const { db, call, register, restart } = await setup(t);
+  const owner = await register('legacy-invite-owner');
+  const url = `/api/workspaces/${owner.workspace.id}/invitations`;
+  const used = (await call('POST', url, { role: 'admin' }, owner.cookie)).json();
+  const unused = (await call('POST', url, {}, owner.cookie)).json();
+  db.prepare("UPDATE invitations SET used_by=? WHERE role='admin'").run(owner.user.id);
+  db.exec('DROP TABLE combined_schema_migrations; ALTER TABLE invitations DROP COLUMN reusable');
+  await restart();
+  assert.equal((await call('POST', '/api/invitations/inspect', { token: used.token })).statusCode, 400);
+  const concurrent = await Promise.all(['legacy-one', 'legacy-two'].map(username => call('POST', '/api/auth/register', { username, password, invitationToken: unused.token })));
   assert.deepEqual(concurrent.map(r => r.statusCode).sort(), [201, 400]);
-  assert.equal(db.prepare('SELECT count(*) AS n FROM users').get().n, 3);
+  assert.equal((await call('POST', '/api/invitations/inspect', { token: unused.token })).statusCode, 400);
+  assert.equal(db.prepare('SELECT count(*) AS n FROM users').get().n, 2);
   assert.equal(db.prepare('SELECT count(*) AS n FROM workspaces').get().n, 1);
 });
 
@@ -170,6 +209,8 @@ test('existing account invitation does not upgrade membership; admin cannot invi
   assert.equal(joined.statusCode, 200); assert.equal(joined.json().workspace.role, 'member');
   const elevated = (await call('POST', url, { role: 'admin' }, owner.cookie)).json();
   assert.equal((await call('POST', '/api/invitations/accept', { token: elevated.token }, guest.cookie)).json().workspace.role, 'member');
+  const anotherGuest = await register('another-guest');
+  assert.equal((await call('POST', '/api/invitations/accept', { token: elevated.token }, anotherGuest.cookie)).json().workspace.role, 'admin');
   assert.equal((await call('POST', url, { role: 'owner' }, owner.cookie)).statusCode, 400);
   db.prepare("UPDATE members SET role='admin' WHERE workspace_id=? AND user_id=?").run(owner.workspace.id, guest.user.id);
   assert.equal((await call('POST', url, { role: 'admin' }, guest.cookie)).statusCode, 403);
@@ -471,7 +512,7 @@ test('employee execution thinking has four persistent levels, defaults medium an
 test('existing employee schema gains medium without rewriting existing employee fields',async t=>{
  const {register,call,db,path}=await setup(t),owner=await register('legacy-thinking-owner'),base=`/api/workspaces/${owner.workspace.id}/entities`;
  const created=(await call('POST',base,{name:'Legacy employee',description:'Retained',ownWebUse:false},owner.cookie)).json().entity;
- db.exec('ALTER TABLE entities DROP COLUMN execution_thinking_level');const before=db.prepare('SELECT * FROM entities WHERE id=?').get(created.id);
+ db.exec('DROP TABLE combined_schema_migrations; ALTER TABLE entities DROP COLUMN execution_thinking_level');const before=db.prepare('SELECT * FROM entities WHERE id=?').get(created.id);
  const {Store}=await import('../dist/store.js');const migrated=new Store(path);
  try{const after=migrated.one('SELECT * FROM entities WHERE id=?',created.id);assert.equal(after.execution_thinking_level,'medium');delete after.execution_thinking_level;assert.deepEqual({...after},{...before});}finally{migrated.close();}
 });

@@ -51,6 +51,7 @@ const connection = (revision=1, appId='synthetic-old-app') => ({id:'synthetic-co
 async function choose(label) { const tab=[...document.querySelectorAll('[role=tab]')].find(el=>el.querySelector('.provider-label')&&el.textContent.trim()===label);assert.ok(tab,label);tab.click();await flush(); }
 async function setup(t, handler, extra={}) {
   const env=await mount(t,'settings',{base,canManage:true,...extra}, async (request, options)=> {
+    if(request.url.includes('/feishu/registration') && request.method==='GET')return {registration:null,preset:{name:'Fixture',description:'Fixture'},permissions:{version:'v1',scopes:[],events:[]}};
     if(request.url.endsWith('/runtime-status'))return {observedAt:null,employee:null};
     if(request.url.endsWith('/channels') && request.method==='GET')return [];
     return handler(request,options);
@@ -61,9 +62,9 @@ async function openStart(){await click('扫码创建新机器人');await click('
 
 test('scan is opt-in, unavailable source explains fallback and all manual channel inputs remain',async t=>{
  const env=await setup(t,async request=>{assert.equal(request.method,'GET');return {available:false,reason:'source_unconfigured'};});
- assert.equal(env.requests.some(r=>r.url.includes('/registration')),false);
+ assert.equal(env.requests.some(r=>r.url.includes('/dingtalk/registration')),false);
  await click('扫码创建新机器人');assert.ok(text().includes('尚未配置已登记'));assert.equal(document.querySelectorAll('.dingtalk-registration .n-qr-code svg').length,0);
- for(const label of ['飞书','钉钉','企业微信']) {await choose(label);assert.ok(document.querySelector('input[aria-label="渠道应用 ID"]'));assert.ok(document.querySelector('input[aria-label="渠道应用密钥"]'));}
+ for(const label of ['飞书','钉钉','企业微信']) {await choose(label);if(label!=='钉钉'){await until(()=>!button('绑定已有应用').disabled);await click('绑定已有应用');}assert.ok(document.querySelector('input[aria-label="渠道应用 ID"]'));assert.ok(document.querySelector('input[aria-label="渠道应用密钥"]'));}
  assert.equal(env.requests.filter(r=>r.method==='POST').length,0);
 });
 
@@ -98,7 +99,7 @@ test('double start click is single flight and close fences a pending start; late
  pending.resolve(session(id,'ready'));await flush();assert.ok(!text().includes('尚未绑定'));assert.equal(button('扫码创建新机器人').disabled,false);
 });
 
-for(const change of ['close','provider','base','unmount'])test(`pending poll is cancelled on ${change} and late ready cannot bind`,async t=>{
+for(const change of ['close','provider','base','active','unmount'])test(`pending poll is cancelled on ${change} and late ready cannot bind`,async t=>{
  const pending=deferred();let pollSignal;let id;
  const env=await setup(t,async(request,options)=>{
   if(request.method==='GET')return {available:true};
@@ -110,6 +111,7 @@ for(const change of ['close','provider','base','unmount'])test(`pending poll is 
  if(change==='close')await click('关闭扫码');
  if(change==='provider')await choose('企业微信');
  if(change==='base'){env.props.base='/workspaces/synthetic-workspace/employees/other';await flush();}
+ if(change==='active'){env.props.active=false;await flush();}
  if(change==='unmount')env.app.unmount();
  assert.equal(pollSignal.aborted,true);assert.ok(env.requests.some(r=>r.method==='DELETE'&&r.url===`${registrationPath}/${id}`));
  pending.resolve(session(id,'ready'));await flush();assert.equal(env.requests.filter(r=>r.url.endsWith('/bind')).length,0);assert.ok(!text().includes('尚未绑定'));
@@ -131,7 +133,8 @@ test('a refreshed binding revision invalidates a ready registration without over
  let channels=[];let id;
  const env=await mount(t,'settings',{base,canManage:true},async request=>{
   if(request.url.endsWith('/channels'))return channels;
-  if(request.url.endsWith('/runtime-status'))return {employee:null};
+  if(request.url.includes('/feishu/registration') && request.method==='GET')return {registration:null,preset:{name:'Fixture',description:'Fixture'},permissions:{version:'v1',scopes:[],events:[]}};
+    if(request.url.endsWith('/runtime-status'))return {employee:null};
   if(request.url.endsWith('/registration'))return {available:true};
   if(request.url.endsWith('/start')){id=request.body.sessionId;return session(id,'ready');}
   if(request.method==='DELETE')return {status:'cancelled'};
@@ -145,7 +148,8 @@ test('ready replacement requires explicit reset checkbox',async t=>{
  let id;
  const env=await mount(t,'settings',{base,canManage:true},async request=>{
   if(request.url.endsWith('/channels'))return [connection(3)];
-  if(request.url.endsWith('/runtime-status'))return {employee:null};
+  if(request.url.includes('/feishu/registration') && request.method==='GET')return {registration:null,preset:{name:'Fixture',description:'Fixture'},permissions:{version:'v1',scopes:[],events:[]}};
+    if(request.url.endsWith('/runtime-status'))return {employee:null};
   if(request.url.endsWith('/registration'))return {available:true};
   if(request.url.endsWith('/access'))return {};
   if(request.url.endsWith('/start')){id=request.body.sessionId;assert.equal(request.body.expectedRevision,3);return session(id,'ready');}

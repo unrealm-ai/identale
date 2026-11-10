@@ -22,3 +22,15 @@ test('new explicit mutual rule, save, independent toggle and cancellation preser
 test('load failure retries; unknown save cannot duplicate after server reconciliation',async t=>{
  let fail=true,config={revision:1,rules:[rule()]},write=0;await mount(t,async(url,init)=>{if(init.method==='PUT'){write++;config={revision:2,rules:[rule({enabled:false})]};throw Error('response lost after commit');}if(url.endsWith('/group-sharing')&&fail)return{status:503,data:{error:'runtime_service_unavailable'}};return handler(config)(url);});await until(()=>text().includes('刷新并核对'));fail=false;button('刷新并核对').click();await until(()=>text().includes('Explicit sharing'));document.querySelector('[aria-label="启用共享规则 Explicit sharing"]').click();await until(()=>text().includes('保存结果尚未确认'));button('刷新并核对').click();await until(()=>!text().includes('保存结果尚未确认'));assert.equal(write,1);assert.equal(document.querySelector('[aria-label="启用共享规则 Explicit sharing"]').getAttribute('aria-checked'),'false');
 });
+test('directed people pagination and directory refresh preserve selected targets and group pages',async t=>{
+ const second=selection('U2','person');let version=1;
+ const env=await mount(t,async(url,init)=>{
+  if(url.endsWith('/directory/status'))return {connectionId:'c',running:false,snapshotVersion:version,hasSnapshot:true,stale:false,lastSuccessAt:Date.now(),lastResult:'success'};
+  if(url.endsWith('/directory/sync')){version++;return {accepted:true,task:{connectionId:'c',running:false,snapshotVersion:version,hasSnapshot:true,stale:false,lastSuccessAt:Date.now(),lastResult:'success'}};}
+  if(url.includes('/candidates'))return {connections:[{id:'c',appId:'app',label:'飞书 · app'}],groups:url.includes('peopleOnly=true')?[]:[a,b],people:url.includes('peopleCursor=')?[second]:[person],nextCursor:'group-next',nextPeopleCursor:url.includes('peopleCursor=')?null:'people-next'};
+  return handler({revision:1,rules:[rule({type:'directed',sources:[a],targets:[person]})]})(url);
+ });
+ await until(()=>text().includes('Explicit sharing'));button('编辑').click();await until(()=>text().includes('加载更多人员'));button('加载更多人员').click();await until(()=>env.calls.some(c=>c.url.includes('peopleCursor=people-next')));await until(()=>!button('保存共享规则').disabled);
+ assert.ok(env.calls.find(c=>c.url.includes('peopleCursor=')).url.includes('peopleOnly=true'));assert.ok(text().includes('同名群B'));assert.ok(text().includes('确认人 · 私聊'));
+ button('同步通讯录').click();await until(()=>env.calls.filter(c=>c.url.includes('peopleOnly=true')).length===2);assert.ok(text().includes('同名群B'));assert.ok(text().includes('确认人 · 私聊'));
+});

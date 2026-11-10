@@ -5,6 +5,9 @@ import { NAlert, NButton, NCard, NCheckbox, NForm, NFormItem, NInput, NSpace, NT
 import { api, ApiError, errorMessage } from '../../shared/api';
 import { useDingtalkRegistration } from './dingtalk-registration';
 import ChannelBrand from './ChannelBrand.vue';
+import WeComRegistration from './WeComRegistration.vue';
+import type { WeComRegistrationCredentials } from './wecom-registration';
+import FeishuRegistration from './FeishuRegistration.vue';
 import ChannelCapabilities from './ChannelCapabilities.vue';
 import ChannelAccessSettings from './ChannelAccessSettings.vue';
 import GroupSharingSettings from './GroupSharingSettings.vue';
@@ -15,17 +18,32 @@ import ChannelValidationReport from './ChannelValidationReport.vue';
 import { channelApi, ChannelValidationFailure, type ChannelValidation } from './channel-validation';
 import { directoryStatusLabel } from '../directory/types';
 import type { DirectoryConnection, DirectoryProvider, DirectoryIdentityEvidence } from '../directory/types';
-const props = defineProps<{ base: string; canManage: boolean; disabled?: boolean }>();
+const props = withDefaults(defineProps<{ base: string; canManage: boolean; disabled?: boolean; active?: boolean; employeeName?: string }>(), { active: true, employeeName: '' });
 const emit = defineEmits<{ busyChanged: [value: boolean]; sessionExpired: []; changed: [];rebound:[];dirtyChanged:[boolean] }>();
-const sharingBusy=ref(false),sharingDirty=ref(false);
+const feishuManual = ref(false), wecomManual = ref(false);
+const pendingWecomCredentials = ref<WeComRegistrationCredentials | null>(null);
+const sharingBusy=ref(false),sharingDirty=ref(false),registrationBusy=ref(false);
 const sharingEditor=ref<InstanceType<typeof GroupSharingSettings>|null>(null);
 const selectedConnection=ref(false),policyBusy=ref(false),policyDirty=ref(false),confirmPolicySwitch=ref(false);
 const policyEditor=ref<InstanceType<typeof ChannelAccessSettings>|null>(null);
 let pendingPolicySwitch:(()=>void)|undefined;
-const channelLocked=computed(()=>!!props.disabled||busy.value||directoryBusy.value||policyBusy.value||sharingBusy.value||registrationBinding.value);
-const unsaved=computed(()=>policyDirty.value||sharingDirty.value||contextDirty.value||!!appSecret.value||!!appId.value&&appId.value!==(connection.value?.appId??''));
+const channelLocked=computed(()=>!!props.disabled||busy.value||directoryBusy.value||policyBusy.value||sharingBusy.value||registrationBusy.value||registrationBinding.value);
+const unsaved=computed(()=>!!pendingWecomCredentials.value||policyDirty.value||sharingDirty.value||contextDirty.value||!!appSecret.value||!!appId.value&&appId.value!==(connection.value?.appId??''));
+const registrationBlocked=computed(()=>props.active===false||!!props.disabled||busy.value||directoryBusy.value||policyBusy.value||sharingBusy.value||!loaded.value||unsaved.value);
+function receiveRegistration(credentials: WeComRegistrationCredentials) {
+  if (!props.canManage || provider.value !== 'wecom' || !selectedConnection.value || registrationBlocked.value) return;
+  appId.value = credentials.botId; appSecret.value = credentials.secret; report.value = null; notice.value = ''; error.value = '';
+  if (!connection.value) { pendingWecomCredentials.value = credentials; void mutate('connect'); }
+  // Existing bindings always stay in the explicit save/rebind flow.
+}
+async function retryWecomSave() {
+  if (channelLocked.value || !pendingWecomCredentials.value || connection.value) return;
+  appId.value = pendingWecomCredentials.value.botId; appSecret.value = pendingWecomCredentials.value.secret;
+  await mutate('connect');
+}
+
 function requestPolicySwitch(action:()=>void){if(channelLocked.value)return;if(unsaved.value){pendingPolicySwitch=action;confirmPolicySwitch.value=true;return;}action();}
-function discardPolicySwitch(){if(channelLocked.value)return;policyEditor.value?.cancel();sharingEditor.value?.discard();historyEnabled.value=connection.value?.context?.groupListenEnabled??false;keywordText.value=(connection.value?.context?.groupTriggerKeywords??[]).join('\n');appId.value=connection.value?.appId??'';clearSecrets();replaceSource.value=false;confirmPolicySwitch.value=false;pendingPolicySwitch?.();pendingPolicySwitch=undefined;}
+function discardPolicySwitch(){if(channelLocked.value)return;pendingWecomCredentials.value=null;policyEditor.value?.cancel();sharingEditor.value?.discard();historyEnabled.value=connection.value?.context?.groupListenEnabled??false;keywordText.value=(connection.value?.context?.groupTriggerKeywords??[]).join('\n');appId.value=connection.value?.appId??'';clearSecrets();replaceSource.value=false;confirmPolicySwitch.value=false;pendingPolicySwitch?.();pendingPolicySwitch=undefined;}
 function guardProvider(value:DirectoryProvider){if(channelLocked.value)return false;if(unsaved.value){requestPolicySwitch(()=>provider.value=value);return false;}return true;}
 function selectProvider(value:DirectoryProvider){requestPolicySwitch(()=>provider.value=value);}
 
@@ -39,6 +57,8 @@ const displayConnections = computed(() => connections.value.map(item => {
 }));
 const evidenceLabel = (value: DirectoryConnection['identityEvidence']) => ({ provider_api: '厂商 API 身份证据', authenticated_event_confirmed: '管理员确认的已认证事件', authenticated_first_message: '首条真实消息自动确认', app_credentials_only: '仅应用凭据', admin_asserted: '管理员同企业声明（非厂商证明）' })[value] ?? '尚无身份验证证据';
 const connection = computed(() => connections.value.find(item => item.provider === provider.value));
+const showManualSetup = computed(() => !!connection.value || (provider.value === 'feishu' ? feishuManual.value : provider.value === 'wecom' ? wecomManual.value : true));
+const showAutomaticSetup = computed(() => !!connection.value || !feishuManual.value);
 const historyEnabled = ref(false),keywordText=ref('');
 const contextDirty=computed(()=>historyEnabled.value!==(connection.value?.context?.groupListenEnabled??false)||keywordText.value!==(connection.value?.context?.groupTriggerKeywords??[]).join('\n'));
 const appId = ref(''), appSecret = ref(''), replaceSource = ref(false);
@@ -55,7 +75,7 @@ const registration = useDingtalkRegistration({
   base: () => props.base,
   revision: () => connections.value.find(item => item.provider === 'dingtalk')?.revision ?? 0,
   appId: () => connections.value.find(item => item.provider === 'dingtalk')?.appId,
-  active: () => selectedConnection.value && provider.value === 'dingtalk' && props.canManage,
+  active: () => props.active !== false && selectedConnection.value && provider.value === 'dingtalk' && props.canManage,
   locked: () => channelLocked.value || policyDirty.value || sharingDirty.value || contextDirty.value || !loaded.value,
   onSessionExpired: () => emit('sessionExpired'),
   onBound: (result, replaced) => {
@@ -70,11 +90,11 @@ const { open: registrationOpen, available: registrationAvailable, checking: regi
   requesting: registrationRequesting, binding: registrationBinding, session: registrationSession,
   message: registrationMessage, replacing: registrationReplacing, replaceSource: registrationReplaceSource } = registration;
 
-watch(() => busy.value || directoryBusy.value || policyBusy.value || sharingBusy.value || registrationBinding.value, value => emit('busyChanged', value), { flush: 'sync' });
+watch(() => busy.value || directoryBusy.value || policyBusy.value || sharingBusy.value || registrationBusy.value || registrationBinding.value, value => emit('busyChanged', value), { flush: 'sync' });
 watch(unsaved,v=>emit('dirtyChanged',v),{flush:'sync'});
 function clearSecrets() { appSecret.value = ''; }
-watch(provider, () => { clearSecrets(); appId.value = connection.value?.appId ?? ''; replaceSource.value = false; notice.value = ''; error.value = ''; report.value = null; });
-watch(connection, value => { historyEnabled.value = value?.context?.groupListenEnabled ?? false;keywordText.value=(value?.context?.groupTriggerKeywords??[]).join('\n'); appId.value = value?.appId ?? ''; clearSecrets(); replaceSource.value = false; });
+watch(provider, () => { pendingWecomCredentials.value = null; wecomManual.value = false; feishuManual.value = false; clearSecrets(); appId.value = connection.value?.appId ?? ''; replaceSource.value = false; notice.value = ''; error.value = ''; report.value = null; });
+watch(connection, value => { if (value) pendingWecomCredentials.value = null; if (!value) feishuManual.value = false; historyEnabled.value = value?.context?.groupListenEnabled ?? false;keywordText.value=(value?.context?.groupTriggerKeywords??[]).join('\n'); appId.value = value?.appId ?? ''; clearSecrets(); replaceSource.value = false; });
 async function run(action: (signal: AbortSignal) => Promise<void>) {
   if (channelLocked.value) return; const signal = controller.signal; busy.value = true; error.value = ''; notice.value = '';
   try { await action(signal); } catch (cause) { if (!signal.aborted) { if (cause instanceof ChannelValidationFailure && cause.validation) { report.value = cause.validation; error.value = ''; } else error.value = errorMessage(cause); if (cause instanceof ApiError && cause.status === 401) emit('sessionExpired'); } }
@@ -96,6 +116,10 @@ function mergeIdentityEvidence(evidence: DirectoryIdentityEvidence) {
   if (current) current.memberSearchVerifiedUserIds = [...new Set([...(current.memberSearchVerifiedUserIds ?? []), evidence.userId])];
 }
 async function load() { await run(read); }
+function registrationChanged() {
+  if (unsaved.value) { notice.value = '飞书自动接入已完成。当前未保存的手动输入已保留；请先保存或放弃修改，再刷新渠道状态。'; return; }
+  void load(); emit('changed');
+}
 async function mutate(action: 'connect' | 'revalidate' | 'settings') {
   if (!props.canManage || !loaded.value || channelLocked.value || policyDirty.value || sharingDirty.value || contextDirty.value || action === 'connect' && (!credentialsComplete.value || replacing.value&&!replaceSource.value)) return;
   const current = connection.value, selected = provider.value, rebinding=action==='connect'&&replacing.value;
@@ -106,7 +130,8 @@ async function mutate(action: 'connect' | 'revalidate' | 'settings') {
       const result = await channelApi<DirectoryConnection & {validation?:ChannelValidation}>(`${props.base}/channels/${selected}${action === 'connect' ? '' : `/${action}`}`, signal, body, action === 'revalidate' ? 'POST' : 'PUT');
       if (signal.aborted) return;
       report.value = result.validation ?? null;
-      notice.value = rebinding ? '换绑已保存。本渠道已恢复新建默认配置，旧名单未迁移；请核对新连接状态与使用范围。' : action === 'settings' ? (current?.enabled ? '已提交停用，请刷新核对连接状态。' : '已提交启用，请重新验证凭据并等待连接。') : current ? '已提交重新验证或连接。使用范围、能力包、群共享和上下文设置均保留，停用状态不变；请核对连接状态。' : '配置已保存：空白名单、群内可用，能力包继承本渠道范围。请核对连接状态。';
+      if (selected === 'wecom') pendingWecomCredentials.value = null;
+      notice.value = rebinding ? '换绑已保存。本渠道已重置为空白名单配置，旧名单未迁移；请核对新连接状态与使用范围。' : action === 'settings' ? (current?.enabled ? '已提交停用，请刷新核对连接状态。' : '已提交启用，请重新验证凭据并等待连接。') : current ? '已提交重新验证或连接。使用范围、能力包、群共享和上下文设置均保留，停用状态不变；请核对连接状态。' : '配置已保存，能力包继承本渠道范围。请核对连接状态与使用范围。';
       if(rebinding)emit('rebound');
     } finally { if (!signal.aborted) { await read(signal); if (!signal.aborted) emit('changed'); } }
   });
@@ -128,8 +153,8 @@ async function saveContext() {
     if (!signal.aborted) { await read(signal);notice.value = '已保存。';emit('changed'); }
   });
 }
-watch(() => props.base, () => { controller.abort(); controller = new AbortController(); busy.value = false; loaded.value = false; report.value = null; notice.value = ''; error.value = ''; connections.value = []; runtimeSnapshot.value = null;policyDirty.value=false;policyBusy.value=false;sharingBusy.value=false;sharingDirty.value=false;confirmPolicySwitch.value=false;pendingPolicySwitch=undefined; clearSecrets(); void load(); }, { immediate: true });
-onUnmounted(() => { controller.abort(); clearSecrets();emit('dirtyChanged',false); emit('busyChanged', false); });
+watch(() => props.base, () => { controller.abort(); controller = new AbortController(); busy.value = false; loaded.value = false; pendingWecomCredentials.value = null; wecomManual.value = false; feishuManual.value = false; report.value = null; notice.value = ''; error.value = ''; connections.value = []; runtimeSnapshot.value = null;policyDirty.value=false;policyBusy.value=false;sharingBusy.value=false;sharingDirty.value=false;confirmPolicySwitch.value=false;pendingPolicySwitch=undefined; clearSecrets(); void load(); }, { immediate: true });
+onUnmounted(() => { controller.abort(); pendingWecomCredentials.value = null; clearSecrets();emit('dirtyChanged',false); emit('busyChanged', false); });
 </script>
 <template>
   <div class="channel-connections">
@@ -156,8 +181,23 @@ onUnmounted(() => { controller.abort(); clearSecrets();emit('dirtyChanged',false
         </section>
         <ChannelCapabilities v-if="connection" :capabilities="connection.capabilities" :provider="provider" @session-expired="emit('sessionExpired')"/>
         <template v-if="canManage">
-          <section class="form-section channel-setup" aria-label="渠道接入配置">
-            <header class="form-section-heading"><h3>机器人连接凭据</h3><a :href="provider==='feishu'?'https://open.feishu.cn/app':provider==='dingtalk'?'https://open-dev.dingtalk.com/':'https://work.weixin.qq.com/wework_admin/frame'" target="_blank" rel="noopener noreferrer">打开官方后台 ↗</a></header>
+          <FeishuRegistration v-if="provider==='feishu'" v-show="showAutomaticSetup" :show-manual-switch="!connection" :manual-switch-disabled="channelLocked" @manual-requested="feishuManual=true" :base="base" :active="active !== false && selectedConnection && loaded && showAutomaticSetup" :disabled="disabled || busy || directoryBusy || policyBusy || sharingBusy || unsaved" :bound-app-id="connection?.appId" @busy-changed="registrationBusy=$event" @session-expired="emit('sessionExpired')" @changed="registrationChanged"/>
+          <NAlert v-if="provider==='feishu' && !connection && !feishuManual && unsaved" type="info">手动凭据草稿已保留。请切回手动接入，保存或清空草稿后再创建应用。</NAlert>
+          <section v-if="provider==='wecom' && !connection && !wecomManual" class="form-section">
+            <header class="form-section-heading manual-setup-heading"><h3>自动创建企微机器人</h3><NButton size="small" quaternary :disabled="channelLocked || !!pendingWecomCredentials" @click="wecomManual=true">绑定已有应用</NButton></header>
+            <WeComRegistration v-if="selectedConnection" :key="base" :context="base" :employee-name="employeeName" :disabled="registrationBlocked || !!pendingWecomCredentials" @busy-changed="v=>registrationBusy=v" @credentials="receiveRegistration"/>
+            <p v-if="unsaved && !pendingWecomCredentials" class="field-note">已有未保存凭据，请切到“绑定已有应用”保存或清空后再创建。</p>
+            <p v-if="busy && pendingWecomCredentials" role="status">正在保存机器人配置…</p>
+            <NAlert v-if="error" type="error" role="alert">{{error}}</NAlert>
+            <ChannelValidationReport v-if="report && !report.canContinue" :report="report"/>
+            <NButton v-if="pendingWecomCredentials && !busy" :disabled="channelLocked" @click="retryWecomSave">重试保存机器人配置</NButton>
+          </section>
+          <NAlert v-if="notice && !showManualSetup" type="info" role="status">{{notice}}</NAlert>
+          <section v-if="showManualSetup" class="form-section channel-setup" aria-label="渠道接入配置">
+            <header class="form-section-heading manual-setup-heading"><h3>机器人连接凭据</h3><NButton v-if="(provider==='feishu'||provider==='wecom') && !connection" size="small" quaternary :disabled="channelLocked" @click="feishuManual=false;wecomManual=false">返回自动创建</NButton><a v-else :href="provider==='feishu'?'https://open.feishu.cn/app':provider==='dingtalk'?'https://open-dev.dingtalk.com/':'https://work.weixin.qq.com/wework_admin/frame'" target="_blank" rel="noopener noreferrer">打开官方后台 ↗</a></header>
+            <p v-if="provider==='feishu' && !connection" class="field-note">已有飞书应用？填写凭据即可关联。<a href="https://open.feishu.cn/app" target="_blank" rel="noopener noreferrer">打开官方后台 ↗</a></p>
+            <WeComRegistration v-if="selectedConnection && provider==='wecom' && connection" :employee-name="employeeName" :existing-binding="true" :key="base" :context="base" :disabled="registrationBlocked" @busy-changed="v=>registrationBusy=v" @credentials="receiveRegistration"/>
+            <p v-if="provider==='wecom' && unsaved" class="field-note">当前有未保存修改。请先保存，或清空手填凭据并取消其他修改，再开始扫码。</p>
             <section v-if="provider==='dingtalk'" class="dingtalk-registration" aria-label="钉钉扫码创建">
               <NButton v-if="!registrationOpen" :disabled="channelLocked||!loaded" @click="registration.show">扫码创建新机器人</NButton>
               <template v-else>
@@ -189,7 +229,7 @@ onUnmounted(() => { controller.abort(); clearSecrets();emit('dirtyChanged',false
               <p v-if="provider==='feishu'" class="field-note">App ID 标识应用；机器人 open_id 标识应用内的机器人，由官方 API 自动读取，无需手填。未取得可信 open_id 时不能完成连接验证。</p>
               <p class="field-note">{{provider==='wecom'?'仅需本员工独立机器人的 BotID 和 Secret。':'每位员工使用独立机器人应用。'}}<InfoHint label="凭据保存与更换">密钥只写入，提交后清空。相同机器人重新验证、重连或轮换密钥保留所有配置和停用状态。更换机器人须确认换绑并保存；转绑其他员工前须先解除原绑定。</InfoHint></p>
             </NForm>
-            <NAlert v-if="replacing" type="warning" aria-label="换绑授权重置提醒">保存换绑后，启用新连接，仅当前渠道恢复新建默认值：空白名单、群内可用、能力包继承员工使用范围；飞书近期群消息上下文默认打开。当前渠道的人员名单、能力包渠道限制、群共享规则与缓存会重置，旧名单不迁移。群内可用和能力包继承可能扩大授权。其他渠道、网页权限和资源绑定不变。未保存前原绑定继续有效。<NCheckbox v-model:checked="replaceSource" :disabled="channelLocked" aria-label="确认换绑并重置当前渠道配置">我确认换绑并重置当前渠道配置</NCheckbox></NAlert>
+            <NAlert v-if="replacing" type="warning" aria-label="换绑授权重置提醒">保存换绑后，启用新连接，仅当前渠道恢复换绑默认值：空白名单、群内可用、能力包继承员工使用范围；飞书近期群消息上下文默认打开。当前渠道的人员名单、能力包渠道限制、群共享规则与缓存会重置，旧名单不迁移。群内可用和能力包继承可能扩大授权。其他渠道、网页权限和资源绑定不变。未保存前原绑定继续有效。<NCheckbox v-model:checked="replaceSource" :disabled="channelLocked" aria-label="确认换绑并重置当前渠道配置">我确认换绑并重置当前渠道配置</NCheckbox></NAlert>
             <ChannelSetupRequirements :provider="provider"/>
             <NAlert v-if="error" type="error" role="alert">{{error}}</NAlert><NAlert v-if="notice" type="info" role="status">{{notice}}</NAlert>
             <ChannelValidationReport v-if="report && (provider!=='wecom'||!report.canContinue)" :report="report"/>
@@ -234,7 +274,7 @@ onUnmounted(() => { controller.abort(); clearSecrets();emit('dirtyChanged',false
 .channel-actions{display:flex;flex-wrap:wrap;gap:10px;padding-top:4px}
 .channel-connections p{overflow-wrap:anywhere}
 .connection-status p{margin:6px 0}
-.channel-setup{display:grid;gap:16px}
+.manual-setup-heading{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:12px;align-items:start}.channel-setup{display:grid;gap:16px}
 .channel-setup .settings-form{margin:0}
 .channel-setup .field-note{margin:0}
 .optional-directory{display:grid;justify-items:start;gap:12px}

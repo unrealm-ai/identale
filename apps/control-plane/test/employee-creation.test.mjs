@@ -120,6 +120,7 @@ test('wizard channel/model/package late SQL failure rolls back every formal row 
   assert.ok(Object.entries(f.counts()).every(([key,n])=>n===(key==='model_catalog'?1:0))); assert.equal(f.db.prepare("SELECT count(*) n FROM audit WHERE action='entity.created'").get().n, 0); assert.equal(f.state.started.length, 0);
   f.db.exec('DROP TRIGGER reject_wizard_package');
   const created = expect(await f.call('POST', `${f.base}/employee-creations`, request, f.owner.cookie), 200).entity;
+  assert.equal(JSON.parse(f.db.prepare('SELECT channel_policies_json FROM entity_directory_policies WHERE entity_id=?').get(created.id).channel_policies_json)[0].mode, 'allowlist');
   await f.supervisor.tick(); assert.equal(f.state.started.length, 1); assert.equal(f.counts().entities, 1); assert.equal(f.counts().model_catalog, 1); assert.equal(f.counts().capability_packages, 1);
   assert.equal(expect(await f.call('POST', `${f.base}/employee-creations`, request, f.owner.cookie), 200).entity.id, created.id);
   assert.equal(f.state.networkLockFailures, 0);
@@ -225,4 +226,13 @@ test('new employee Feishu draft commits listening on without claiming ordinary-m
  const f=await setup(t),draft=await f.draft(),created=expect(await f.call('POST',`${f.base}/employee-creations`,f.body({channelDraftId:draft.draftId}),f.owner.cookie),200).entity;
  const connections=expect(await f.call('GET',`${f.base}/entities/${created.id}/channels`,undefined,f.owner.cookie),200);
  assert.equal(connections.length,1);assert.equal(connections[0].context.groupListenEnabled,true);assert.notEqual(connections[0].groupListeningStatus.permission,'granted');
+});
+
+test('wizard first channel is all users and records only its provider binding',async t=>{
+ const f=await setup(t),draft=await f.draft(),created=expect(await f.call('POST',`${f.base}/employee-creations`,f.body({channelDraftId:draft.draftId,directoryAccess:{allow:[],deny:[],allowGroupMembers:true}}),f.owner.cookie),200).entity;
+ const row=f.db.prepare('SELECT channel_policies_json FROM entity_directory_policies WHERE entity_id=?').get(created.id);
+ const [policy]=JSON.parse(row.channel_policies_json);
+ assert.equal(policy.mode,'denylist');assert.deepEqual(policy.deny,[]);assert.equal(policy.allowGroupMembers,true);
+ const defaults=JSON.parse(f.db.prepare('SELECT channel_binding_history_json FROM entities WHERE id=?').get(created.id).channel_binding_history_json);
+ assert.deepEqual(defaults,{feishu:true});
 });

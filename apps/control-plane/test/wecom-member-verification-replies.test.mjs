@@ -23,7 +23,7 @@ async function until(fn){const end=Date.now()+5000;while(!fn()){if(Date.now()>en
 // provider session search, proactive notification or business runtime is used.
 async function fixture(t,{sendAck=true,allowBusiness=false}={}){
  const dir=await mkdtemp(join(tmpdir(),'wecom-verification-replies-')),store=new Store(join(dir,'test.sqlite'));let now=1800000000000;
- store.run("INSERT INTO users VALUES('u','user','Owner','active')");store.run("INSERT INTO workspaces VALUES('w','Workspace','u','active')");store.run("INSERT INTO members VALUES('m','w','u','owner','active')");store.run("INSERT INTO entities(id,workspace_id,name,owner_member_id,created_by_member_id,own_web_use,web_use_user_id,interaction_runtime) VALUES('e','w','Employee','m','m',1,'u','builtin-interaction')");
+ store.run("INSERT INTO users VALUES('u','user','Owner','active')");store.run("INSERT INTO workspaces VALUES('w','Workspace','u','active')");store.run("INSERT INTO members(id,workspace_id,user_id,role,status) VALUES('m','w','u','owner','active')");store.run("INSERT INTO entities(id,workspace_id,name,owner_member_id,created_by_member_id,own_web_use,web_use_user_id,interaction_runtime) VALUES('e','w','Employee','m','m',1,'u','builtin-interaction')");
  const repository=new EmployeeChannelRepository(store),service=new EmployeeChannelService(repository,{masterKey:new Uint8Array(32).fill(9),now:()=>now});
  const connection=await service.save('w','e','wecom','u',{appId:'bot-local',appSecret:'local-only-secret'}),old=repository.byId(connection.id);
  repository.save({...old,status:'verified',eventTenantId:connection.appId,eventTenantNamespace:'app_id',botId:connection.appId,inboundVerified:true,identityEvidence:'authenticated_first_message'},old);

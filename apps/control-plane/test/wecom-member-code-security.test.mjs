@@ -9,7 +9,8 @@ import {Store} from '../dist/store.js';
 import {EmployeeChannelRepository} from '../dist/employee-channels/repository.js';
 import {EmployeeChannelService} from '../dist/employee-channels/service.js';
 import {registerEmployeeChannelRoutes} from '../dist/employee-channels/routes.js';
-import {weComMemberCodeCandidates,weComMemberCodeHash} from '../dist/employee-channels/wecom-member-verification.js';
+import {WeComMemberVerification,weComMemberCodeCandidates,weComMemberCodeHash} from '../dist/employee-channels/wecom-member-verification.js';
+import {withChallengeDelta,challengeLookup} from '../dist/employee-channels/wecom-verification-challenges.js';
 import {DirectoryCredentialVault} from '../dist/directory/secrets.js';
 import {configurationSnapshot,deriveRuntimeConfigurationKey} from '../dist/split/config-sync.js';
 import {tableOwner} from '../dist/split/table-ownership.js';
@@ -159,12 +160,12 @@ test('used codes expire from old-code recognition three days after consumption, 
 });
 
 test('late retirement cannot extend a naturally expired code and new issuance prunes only histories outside three days',async t=>{
- const f=await fixture(t),issued=await f.start(),createdAt=f.now();f.advance(2*day);
+ const f=await fixture(t),issued=await f.start(),createdAt=f.now(),oldRequestId=f.challenges()[0].requestId;f.advance(2*day);
  const before=f.record();f.repository.save({...before,wecomMemberChallenges:before.wecomMemberChallenges.map(c=>({...c,status:'failed',completedAt:f.now()}))},before);
  f.setNow(createdAt+4*day-1);assert.equal(f.accept('这是 '+issued.phrase),'expired');
  f.advance(1);assert.equal(f.control('这是 '+issued.phrase),false);
  await f.start('other-person');assert.equal(f.challenges().length,1);
- const old=f.store.one('SELECT collision_hash,code_hash,sealed_code FROM wecom_member_verification_requests WHERE request_id=?',before.wecomMemberChallenges[0].requestId);
+ const old=f.store.one('SELECT collision_hash,code_hash,sealed_code FROM wecom_member_verification_requests WHERE request_id=?',oldRequestId);
  assert.deepEqual(Object.values(old),[null,null,null]);
 });
 
@@ -181,14 +182,14 @@ test('collision reservations cover the full validity and old-code window but are
 test('concurrent same-person requests share one issued code, while different people have unique active codes',async t=>{
  const f=await fixture(t),same=await Promise.all(Array.from({length:20},()=>f.start('person-a')));
  assert.equal(new Set(same.flatMap(r=>r.phrase?[r.phrase]:[])).size,1);assert.equal(f.pending().length,1);
- const others=await Promise.allSettled(Array.from({length:10},(_,i)=>f.start('person-'+i)));
- assert.equal(others.filter(r=>r.status==='fulfilled').length,9);assert.deepEqual(others.filter(r=>r.status==='rejected').map(r=>r.reason.code),['member_verification_limit']);
- const codes=[f.status('person-a').phrase,...others.flatMap(r=>r.status==='fulfilled'?[r.value.phrase]:[])];assert.equal(new Set(codes).size,10);
+ const others=await Promise.all(Array.from({length:120},(_,i)=>f.start('person-'+i)));
+ assert.equal(f.pending().length,121);
+ const codes=[f.status('person-a').phrase,...others.map(r=>r.phrase)];assert.equal(new Set(codes).size,121);
 });
 
-test('bounded configuration never evicts a still-protected old code to make room for another replacement',async t=>{
- const f=await fixture(t),first=await f.start();for(let i=1;i<100;i++)await f.start('selected-member',{replace:true});
- await assert.rejects(f.start('selected-member',{replace:true}),{code:'member_verification_limit'});
+test('more than 100 retained old codes remain recognized without blocking replacements',async t=>{
+ const f=await fixture(t),first=await f.start();for(let i=1;i<130;i++)await f.start('selected-member',{replace:true});
+ assert.equal(f.challenges().length,130);assert.equal(f.pending().length,1);
  assert.equal(f.control('这是 '+first.phrase),true);assert.equal(f.accept('这是 '+first.phrase),'revoked');
  f.advance(3*day);await f.start('selected-member',{replace:true});assert.equal(f.control('这是 '+first.phrase),false);
 });
@@ -268,4 +269,106 @@ test('split snapshots carry only scoped digests; active and three-day old-code b
  f.advance(3*day);assert.equal(control(),false);assert.equal(accept('runtime-outside-retention'),'ordinary');
  assert.equal(runtime.one("SELECT 1 FROM main.sqlite_master WHERE name LIKE 'wecom_member_code_%'"),undefined);
  runtime.db.exec('PRAGMA wal_checkpoint(TRUNCATE)');assert.equal(readFileSync(path).includes(Buffer.from(JSON.stringify(issued.phrase))),false);
+});
+
+
+test('more than 500 persisted identity bindings can accept a new code, survive restart and remain locally verifiable',async t=>{
+ const f=await fixture(t),r=f.record();
+ const mappings=Array.from({length:501},(_,i)=>({userId:'person-'+i,callbackUserId:'callback-'+i,verifiedAt:f.now(),requestId:'historic-'+i,method:'administrator_relay'}));
+ assert.equal(f.repository.save({...r,wecomContactIdentityRevision:r.authRevision,wecomContactMappings:mappings},r),true);
+ const issued=await f.start('next-person');assert.equal(issued.status,'pending');assert.equal(f.accept(issued.phrase,{callback:'next-callback'}),'verified');
+ assert.equal(f.record().wecomContactMappings.length,502);f.reopen();assert.equal(f.record().wecomContactMappings.length,502);
+ await f.service.assertWeComPrivateRecipient(f.record().id,'callback-500');await f.service.assertWeComPrivateRecipient(f.record().id,'next-callback');
+ await assert.rejects(f.service.assertWeComPrivateRecipient(f.record().id,'not-bound'),/authorization_denied/);
+ f.candidate('exact-person');f.service.observeWeComContact(f.record().id,'exact-person');assert.ok(f.record().wecomVerifiedContactIds.includes('exact-person'));
+});
+
+
+test('collision reservation is scoped to workspace employee and provider, not connection or credential revision',async t=>{
+ const f=await fixture(t),issued=await f.start(),r=f.record();
+ const reservation=(workspace,entity,provider,code)=>createHmac('sha256',key).update(JSON.stringify(['member-code-collision-v2',workspace,entity,provider,code])).digest('hex');
+ const row=f.store.one('SELECT * FROM wecom_member_verification_requests WHERE collision_hash IS NOT NULL');
+ assert.equal(row.collision_hash,reservation(r.workspaceId,r.entityId,r.provider,issued.phrase));
+ const differentEmployee=reservation(r.workspaceId,'another-employee',r.provider,issued.phrase);
+ const differentWorkspace=reservation('another-workspace',r.entityId,r.provider,issued.phrase);
+ assert.notEqual(row.collision_hash,differentEmployee);assert.notEqual(row.collision_hash,differentWorkspace);
+ // Synthetic reservation inserts exercise the actual database unique boundary.
+ const insert=(hash,id)=>f.store.run('INSERT INTO wecom_member_verification_requests VALUES(?,?,?,?,?,?,?,?,?,?,?)',r.id,'another-source',r.authRevision+1,id,'other-person',f.now(),r.appId,row.code_hash,hash,null,id);
+ insert(differentEmployee,'other-employee-reservation');insert(differentWorkspace,'other-workspace-reservation');
+ assert.throws(()=>insert(row.collision_hash,'same-employee-reservation'),/UNIQUE constraint failed/);
+});
+
+test('one challenge per row supports 10000 records with indexed matching and bounded connection JSON',async t=>{
+ const f=await fixture(t),r=f.record(),code='000007';
+ const challenges=Array.from({length:10000},(_,i)=>({requestId:'scale-'+i,userId:'scale-person-'+i,authRevision:r.authRevision,phraseHash:weComMemberCodeHash(secret,r,String(i).padStart(6,'0')),createdAt:f.now(),expiresAt:f.now()+day,issuedAt:f.now(),status:'pending',method:'administrator_relay',createdBy:'u'}));
+ assert.equal(f.repository.save(withChallengeDelta({...r},challenges),r),true);
+ assert.equal(f.store.one('SELECT count(*) n FROM wecom_member_challenges').n,10000);
+ const raw=JSON.parse(f.store.one('SELECT record_json FROM employee_channel_connections WHERE id=?',r.id).record_json);
+ assert.equal(raw.wecomMemberChallenges,undefined);
+ assert.ok(JSON.stringify(raw).length<10000);
+ const queryPlan=f.store.all('EXPLAIN QUERY PLAN SELECT challenge_json FROM wecom_member_challenges WHERE connection_id=? AND source_id=? AND auth_revision=? AND phrase_hash=?',r.id,r.sourceId,r.authRevision,weComMemberCodeHash(secret,r,code));
+ assert.ok(queryPlan.some(row=>/SEARCH.*INDEX/.test(row.detail)),JSON.stringify(queryPlan));
+ const all=f.store.all.bind(f.store);
+ f.store.all=(sql,...args)=>{if(/wecom_member_challenges/i.test(sql))throw Error('hot path must not enumerate challenge history');return all(sql,...args);};
+ assert.equal(f.control('验证码 '+code),true);assert.equal(f.accept('验证码 '+code,{callback:'scale-callback'}),'verified');
+ assert.equal(challengeLookup(f.record(),'request_id','scale-7').status,'verified');
+ f.store.all=all;f.reopen();assert.equal(f.status('scale-person-7').status,'verified');
+});
+
+test('bounded maintenance releases only retired codes, preserves pending ones and is resumable',async t=>{
+ const f=await fixture(t),a=await f.start('a'),b=await f.start('b');
+ f.accept(a.phrase,{callback:'a'});f.advance(3*day);const c=await f.start('c');
+ f.service.memberVerification.cleanup(1);
+ assert.equal(f.control(a.phrase),false);assert.equal(f.control(b.phrase),true);assert.equal(f.control(c.phrase),true);
+ f.advance(day);f.service.memberVerification.cleanup(1);f.service.memberVerification.cleanup(1);
+ assert.equal(f.control(b.phrase),false);assert.equal(f.control(c.phrase),true);
+ const old=f.store.one('SELECT collision_hash,code_hash,sealed_code FROM wecom_member_verification_requests WHERE user_id=?','b');
+ assert.deepEqual(Object.values(old),[null,null,null]);
+});
+
+test('duplicate verification event and simultaneous callers create only one binding',async t=>{
+ const f=await fixture(t),issued=await f.start();
+ const results=await Promise.all([Promise.resolve().then(()=>f.accept(issued.phrase,{callback:'first',messageId:'same-event'})),Promise.resolve().then(()=>f.accept(issued.phrase,{callback:'second',messageId:'same-event'}))]);
+ assert.deepEqual(results,['verified','ignored']);assert.equal(f.record().wecomContactMappings.length,1);assert.equal(f.record().wecomContactMappings[0].callbackUserId,'first');
+ assert.equal(f.accept(issued.phrase,{callback:'second',messageId:'different-event'}),'used');
+});
+
+
+function fixedCode(f,randomCode){
+ f.service.memberVerification=new WeComMemberVerification(f.repository,f.now,{secret:()=>secret,vault:new DirectoryCredentialVault(key),collisionKey:key,randomCode});
+}
+
+test('forced leading-zero generation retries collisions at most 32 times without damaging an existing code',async t=>{
+ const f=await fixture(t);let calls=0;fixedCode(f,()=>{calls++;return 7;});
+ const issued=await f.start('first');assert.equal(issued.phrase,'000007');assert.equal(calls,1);
+ await assert.rejects(f.start('second'),{code:'member_verification_limit'});assert.equal(calls,33);
+ assert.equal(f.pending().length,1);assert.equal(f.status('first').phrase,'000007');assert.equal(f.status('second').status,'unverified');
+ assert.equal(f.store.one('SELECT count(*) n FROM wecom_member_verification_requests').n,1);
+ assert.equal(f.accept('验证码 000007'),'verified');
+ calls=0;await assert.rejects(f.start('third'),{code:'member_verification_limit'});assert.equal(calls,32);
+ f.advance(3*day);assert.equal((await f.start('third')).phrase,'000007');
+});
+
+test('different employees can actually issue the same code, while another connection cannot consume its challenge',async t=>{
+ const f=await fixture(t);fixedCode(f,()=>7);const first=await f.start('first');
+ f.store.run("INSERT INTO entities(id,workspace_id,name,owner_member_id,created_by_member_id,own_web_use,web_use_user_id,interaction_runtime) VALUES('other','w','Other Employee','m','m',1,'u','builtin')");
+ await f.service.save('w','other','wecom','u',{appId:'synthetic-other-bot',appSecret:secret});
+ let other=f.repository.byProvider('w','other','wecom');
+ f.service.observeFirstInbound(other.id,{appId:other.appId,botId:other.appId,tenantId:other.appId,tenantNamespace:'app_id'});
+ other=f.repository.byId(other.id);
+ const accept=()=>f.service.memberVerification.accept(f.repository.byId(other.id),{text:first.phrase,callbackUserId:'second-callback',eventId:randomUUID(),messageId:randomUUID(),privateMessage:true});
+ assert.equal(accept(),'ordinary');assert.equal(f.status('first').status,'pending');
+ f.service.botContacts.remember(other,[{id:'second',displayName:'Second Member',departmentPaths:[]}]);
+ const second=await f.service.startMemberVerification('w','other','u',{userId:'second',sourceId:other.sourceId,requestId:randomUUID()});
+ assert.equal(second.phrase,first.phrase);assert.equal(accept(),'verified');
+ assert.equal(f.status('first').status,'pending');assert.equal(f.accept(first.phrase,{callback:'first-callback'}),'verified');
+ assert.equal(f.record().wecomContactMappings[0].callbackUserId,'first-callback');
+ assert.equal(f.repository.byId(other.id).wecomContactMappings[0].callbackUserId,'second-callback');
+});
+
+test('credential revalidation does not enumerate the lazy challenge history',async t=>{
+ const f=await fixture(t);await f.start();const all=f.store.all.bind(f.store);
+ f.store.all=(sql,...args)=>{if(/wecom_member_challenges/i.test(sql))throw Error('revalidation must not enumerate challenge history');return all(sql,...args);};
+ const before=f.record();await f.service.revalidate('w','e','wecom','u',before.revision);
+ assert.equal(f.record().authRevision,before.authRevision+1);assert.equal(f.record().status,'pending_verification');f.store.all=all;
 });

@@ -137,7 +137,7 @@ for(const cached of [false,true])test(`mapping and credential revocation defeat 
  await f.channels.revalidate('w','e','wecom','u',f.record(c).revision);
  await assert.rejects(a.invoke(),forbidden);
  f.channels.observeFirstInbound(c.id,{appId:c.appId,botId:c.appId,tenantId:c.appId,tenantNamespace:'app_id'});
- await assert.rejects((await f.access(c,'a')).invoke(),forbidden,'fresh authenticated binding cannot use old member proof');
+ await (await f.access(c,'a')).invoke(); // Same-bot authenticated renewal restores durable member proof.
 });
 
 test('the same search/callback IDs do not share grants between robots',async t=>{

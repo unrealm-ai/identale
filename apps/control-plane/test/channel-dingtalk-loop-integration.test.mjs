@@ -30,7 +30,7 @@ async function fixture(t,options={}){
  await new Promise(resolve=>http.listen(0,'127.0.0.1',resolve));
  const local=`http://127.0.0.1:${http.address().port}`;
  const dir=mkdtempSync(join(tmpdir(),'identity-ding-loop-')),store=new Store(join(dir,'app.sqlite'));
- store.run("INSERT INTO users VALUES('manager','manager','Manager','active')");store.run("INSERT INTO workspaces VALUES('w','WS','manager','active')");store.run("INSERT INTO members VALUES('manager-member','w','manager','owner','active')");store.run("INSERT INTO entities(id,workspace_id,name,owner_member_id,created_by_member_id,own_web_use,web_use_user_id,interaction_runtime) VALUES('e','w','Helper','manager-member','manager-member',1,'manager','builtin-interaction')");
+ store.run("INSERT INTO users VALUES('manager','manager','Manager','active')");store.run("INSERT INTO workspaces VALUES('w','WS','manager','active')");store.run("INSERT INTO members(id,workspace_id,user_id,role,status) VALUES('manager-member','w','manager','owner','active')");store.run("INSERT INTO entities(id,workspace_id,name,owner_member_id,created_by_member_id,own_web_use,web_use_user_id,interaction_runtime) VALUES('e','w','Helper','manager-member','manager-member',1,'manager','builtin-interaction')");
  const journal=new JsonlJournal({root:join(dir,'records'),ownerId:'fixture',serialize:fn=>store.transaction(fn)}),conversations=new SqliteConversationRepository(store,journal,()=>now);conversations.initialize(0);
  const auth={authorizeEntity(){},async refreshAuthorization(){}};
  const taskRuntime={idempotentDispatch:true,async dispatch(){throw new Error('no task expected');},async input(){throw new Error('no task expected');},async cancel(){throw new Error('no task expected');},async events(){return[];}};

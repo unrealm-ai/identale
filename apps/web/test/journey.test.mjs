@@ -159,7 +159,7 @@ test('management routes allow ordinary member resources but never expose member 
 test('registration creates one default workspace, wizard skips optional steps, double-click creates once, cards separate chat/settings', async t => {
   const env = await setup(t); await env.mount(); await click('注册账号');
   assert.equal(document.querySelector('input[name=password]').minLength, 6);
-  assert.equal(document.querySelector('.auth-brand .brand-logo').textContent.trim(), 'identale');
+  assert.equal(document.querySelector('.auth-brand .brand-logo').getAttribute('aria-label'), 'identale');
   assert.equal(document.querySelector('.auth-brand .brand-logo img').getAttribute('src'), '/brand/lockup-horizontal.svg');
   input('input[name=username]', 'journey-owner'); input('input[name=password]', password); await submit('.auth-panel form');
   await until(() => !!document.querySelector('.employee-wizard'));
@@ -194,10 +194,31 @@ test('invitation registration joins target without default workspace and member 
   const env = await setup(t); const owner = await env.register('invite-owner');
   const invite = (await env.call('POST', `/api/workspaces/${owner.workspace.id}/invitations`, {})).json(); env.setCookie('');
   await env.mount('/#invite=' + encodeURIComponent(invite.token));
+  assert.doesNotMatch(document.querySelector('.invite-context').textContent, /仅限一次/);
   assert.equal(location.hash, ''); await click('注册账号'); input('input[name=username]', 'invited-member'); input('input[name=password]', password); await submit('.auth-panel form');
   await until(() => !!document.querySelector('.app-nav'));
   assert.equal(env.db.prepare('SELECT count(*) n FROM workspaces').get().n, 1);
   assert.ok(document.querySelector('.employee-wizard'));assert.ok(document.querySelector('input[aria-label="员工名称"]'));
+});
+
+test('invitation dialog uses whole days and generates a reusable link at the 180-day limit', async t => {
+  const env = await setup(t); const owner = await env.register('invite-dialog-owner');
+  await env.mount(); await click('暂时退出');
+  await click('设置'); await click('成员'); await click('邀请成员');
+  const selector = 'input[aria-label="有效期（天）"]';
+  const expiry = document.querySelector(selector);
+  assert.equal(expiry.value, '2');
+  assert.ok(button('生成邀请链接'));
+  assert.equal(document.querySelectorAll('.workspace-dialog form .n-form-item').length, 2);
+  expiry.focus();
+  input(selector, '180');
+  expiry.blur();
+  await flush();
+  await submit('.workspace-dialog form');
+  await until(() => !!document.querySelector('input[aria-label="邀请链接"]'));
+  const created = env.requests.find(r => r.method === 'POST' && r.url === `/api/workspaces/${owner.workspace.id}/invitations`);
+  assert.deepEqual(created.body, { role: 'member', expiresInHours: 180 * 24 });
+  assert.match(document.querySelector('.invite-result').textContent, /有效期内可供多人加入/);
 });
 
 test('accept invitation after auth expires preserves invitation through login and registration choice', async t => {
@@ -788,7 +809,7 @@ test('administrator direct task list filters employees/status/conversation and o
  document.querySelector('.platform-tasks .n-collapse-item__header-main').click();await until(()=>!!document.querySelector('input[aria-label="会话 ID 筛选"]'));input('input[aria-label="会话 ID 筛选"]',f.first.id);await click('应用会话筛选');await until(()=>text().includes('没有符合筛选条件的记录'));assert.ok(f.env.requests.filter(r=>r.url.includes('/task-management/')).every(r=>r.method==='GET'));assert.equal(f.env.db.prepare('SELECT status FROM tasks WHERE id=?').get(a.id).status,'planned');
 });
 
-test('ordinary member can choose authorized employees while administrator task navigation and APIs stay forbidden', async t => {
+test('ordinary member can use personal tasks and choose authorized employees while administrator task APIs stay forbidden', async t => {
   const env=await setup(t),owner=await env.register('admin-route-owner');
   const e=(await env.call('POST',`/api/workspaces/${owner.workspace.id}/entities`,{name:'可用私聊员工',ownWebUse:true})).json().entity;
   const denied=(await env.call('POST',`/api/workspaces/${owner.workspace.id}/entities`,{name:'无使用权员工',ownWebUse:false})).json().entity;
@@ -796,11 +817,15 @@ test('ordinary member can choose authorized employees while administrator task n
   const registration=await env.call('POST','/api/auth/register',{username:'admin-route-member',password},'');assert.equal(registration.statusCode,201,registration.body);const member=registration.json(),memberCookie=registration.headers['set-cookie'].split(';')[0];await env.call('POST','/api/invitations/accept',{token:invited.token},memberCookie);
   const memberId=env.db.prepare('SELECT id FROM members WHERE workspace_id=? AND user_id=?').get(owner.workspace.id,member.user.id).id;
   const grant=await env.call('PUT',`/api/workspaces/${owner.workspace.id}/entities/${e.id}/web-access`,{allowMemberIds:[owner.workspace.memberId,memberId],denyMemberIds:[]},owner.cookie);assert.equal(grant.statusCode,200,grant.body);
-  env.setCookie(memberCookie);await env.mount(`/?ws=${owner.workspace.id}&view=tasks`);await until(()=>!!document.querySelector('.conversations-page')&&!text().includes('正在读取'));
+  env.setCookie(memberCookie);await env.mount(`/?ws=${owner.workspace.id}&view=tasks`);await until(()=>!!document.querySelector('.workbench-page')&&!text().includes('正在读取'));
+  assert.ok(document.querySelector('[aria-label="查看任务的数字员工"]'));
+  assert.equal(document.querySelector('.platform-tasks'),null);
+  assert.equal(env.requests.some(r=>r.url.includes('/task-management/')),false);
+  await env.mount(`/?ws=${owner.workspace.id}&view=conversations`);await until(()=>!!document.querySelector('.conversations-page')&&!text().includes('正在读取'));
   await until(()=>text().includes('还没有最近对话'));await click('发起对话');await until(()=>document.querySelector('.conversation-picker')?.textContent.includes('可用私聊员工'));
   assert.doesNotMatch(document.querySelector('.conversation-picker').textContent,/无使用权员工/);
   assert.equal([...document.querySelectorAll('.app-nav [role=menuitem]')].some(el=>el.textContent.trim()==='首页'),true);
-  assert.equal([...document.querySelectorAll('.app-nav [role=menuitem]')].some(el=>el.textContent.trim()==='任务'),false);
+  assert.equal([...document.querySelectorAll('.app-nav [role=menuitem]')].some(el=>el.textContent.trim()==='任务'),true);
   assert.equal(document.querySelector('.platform-tasks'),null);
   const forbidden=await env.call('GET',`/api/workspaces/${owner.workspace.id}/task-management/overview`);assert.equal(forbidden.statusCode,403);
   assert.equal(env.requests.some(r=>r.url.includes('/task-management/')),false);
@@ -1001,7 +1026,7 @@ test('work entry editing preserves channel fields, handles version conflicts and
  const created=await env.call('POST',employeeBase+'/triggers',{name:'自动化原任务',type:'schedule',enabled:false,allowedActions:['create_task'],config:{cron:'0 9 * * *',timezone:'Asia/Shanghai',description:'Synthetic isolated task',businessKey:{mode:'empty'}}});assert.equal(created.statusCode,200,created.body);const row=created.json();
  await env.mount(`/?ws=${owner.workspace.id}&view=settings&entity=${entity.id}`);await until(()=>!button('返回员工列表').disabled);await click('渠道接入');
  const tabs=[...document.querySelectorAll('[role=tablist][aria-label="渠道供应商"] [role=tab]')];assert.equal(tabs.some(t=>t.textContent.includes('自动化任务')),false);assert.equal(visible(document.querySelector('.trigger-settings')),false);
- input('input[aria-label="渠道应用 ID"]','synthetic-edit-app');input('input[aria-label="渠道应用密钥"]','synthetic-edit-secret');
+ await click('绑定已有应用');input('input[aria-label="渠道应用 ID"]','synthetic-edit-app');input('input[aria-label="渠道应用密钥"]','synthetic-edit-secret');
  const before=env.requests.length;await click('自动运行');assert.equal(document.querySelector('.employee-section-tabs [role=tab][aria-selected=true]').textContent.trim(),'触发器');
  assert.match(document.querySelector('.trigger-settings').textContent,/自动化原任务/);await click('编辑 自动化原任务');
  assert.ok([...document.querySelectorAll('.employee-section-tabs [role=tab]')].filter(t=>['渠道','模型'].includes(t.textContent.trim())).every(t=>t.getAttribute('aria-disabled')==='true'));assert.equal(button('返回员工列表').disabled,true);
@@ -1043,7 +1068,7 @@ test('employee server search cancels stale reads and keeps URL/results/cursor on
 test('identity validation focuses and associates the first error while preserving the responsibility draft',async t=>{const env=await setup(t),owner=await env.register('identity-error-focus'),base=`/api/workspaces/${owner.workspace.id}`,entity=(await env.call('POST',base+'/entities',{name:'Before',ownWebUse:false})).json().entity;await env.mount(`/?ws=${owner.workspace.id}&view=settings&entity=${entity.id}&section=identity`);input('input[aria-label="员工名称"]','');input('textarea[aria-label="职责与表达风格"]','Preserve this synthetic draft');await submit('form:has(input[aria-label="员工名称"])');const field=document.querySelector('input[aria-label="员工名称"]');assert.equal(document.activeElement,field);assert.equal(field.getAttribute('aria-invalid'),'true');assert.match(document.getElementById(field.getAttribute('aria-describedby')).textContent,/请输入员工名称/);assert.equal(document.querySelector('textarea[aria-label="职责与表达风格"]').value,'Preserve this synthetic draft');assert.equal(env.requests.some(r=>r.method==='PATCH'),false);});
 
 
-test('workbench navigation has real scoped links, preserves native modified clicks and guards unsaved edits',async t=>{const env=await setup(t),owner=await env.register('navigation-links'),base=`/api/workspaces/${owner.workspace.id}`,entity=(await env.call('POST',base+'/entities',{name:'Navigation employee',ownWebUse:false})).json().entity;await env.mount(`/?ws=${owner.workspace.id}&view=employees`);const links=[...document.querySelectorAll('.app-nav a')];assert.deepEqual([...document.querySelectorAll('.app-nav .nav-link')].map(a=>a.textContent.trim()),['首页','数字员工','任务','资源库','设置']);for(const link of links)assert.equal(new URL(link.href).searchParams.get('ws'),owner.workspace.id);const resources=links.find(a=>a.textContent==='资源库');assert.equal(new URL(resources.href).searchParams.get('view'),'resources');let browserDefaultPrevented;resources.addEventListener('click',event=>{browserDefaultPrevented=event.defaultPrevented;event.preventDefault();},{once:true});resources.dispatchEvent(new MouseEvent('click',{button:0,ctrlKey:true,bubbles:true,cancelable:true}));await flush();assert.equal(browserDefaultPrevented,false,'modified click retains the native new-tab action');assert.equal(new URLSearchParams(location.search).get('view'),'employees');const ordinary=new MouseEvent('click',{button:0,bubbles:true,cancelable:true});resources.dispatchEvent(ordinary);await until(()=>!!document.querySelector('.workspace-management'));assert.equal(ordinary.defaultPrevented,true);assert.equal(new URLSearchParams(location.search).get('view'),'resources');await env.mount(`/?ws=${owner.workspace.id}&view=settings&entity=${entity.id}&section=identity`);input('input[aria-label="员工名称"]','Unsaved navigation draft');await flush();assert.equal(document.querySelectorAll('.app-nav a').length,0,'dirty navigation exposes no bypassing URL');const route=location.search;await click('资源库');assert.equal(location.search,route);assert.equal(document.querySelector('input[aria-label="员工名称"]').value,'Unsaved navigation draft');assert.equal(env.requests.some(r=>r.method==='PATCH'),false);});
+test('workbench navigation has real scoped links, preserves native modified clicks and guards unsaved edits',async t=>{const env=await setup(t),owner=await env.register('navigation-links'),base=`/api/workspaces/${owner.workspace.id}`,entity=(await env.call('POST',base+'/entities',{name:'Navigation employee',ownWebUse:false})).json().entity;await env.mount(`/?ws=${owner.workspace.id}&view=employees`);const links=[...document.querySelectorAll('.app-nav a')];assert.deepEqual([...document.querySelectorAll('.app-nav .nav-link')].map(a=>a.textContent.trim()),['首页','数字员工','任务','事项看板','资源库','设置']);for(const link of links)assert.equal(new URL(link.href).searchParams.get('ws'),owner.workspace.id);const resources=links.find(a=>a.textContent==='资源库');assert.equal(new URL(resources.href).searchParams.get('view'),'resources');let browserDefaultPrevented;resources.addEventListener('click',event=>{browserDefaultPrevented=event.defaultPrevented;event.preventDefault();},{once:true});resources.dispatchEvent(new MouseEvent('click',{button:0,ctrlKey:true,bubbles:true,cancelable:true}));await flush();assert.equal(browserDefaultPrevented,false,'modified click retains the native new-tab action');assert.equal(new URLSearchParams(location.search).get('view'),'employees');const ordinary=new MouseEvent('click',{button:0,bubbles:true,cancelable:true});resources.dispatchEvent(ordinary);await until(()=>!!document.querySelector('.workspace-management'));assert.equal(ordinary.defaultPrevented,true);assert.equal(new URLSearchParams(location.search).get('view'),'resources');await env.mount(`/?ws=${owner.workspace.id}&view=settings&entity=${entity.id}&section=identity`);input('input[aria-label="员工名称"]','Unsaved navigation draft');await flush();assert.equal(document.querySelectorAll('.app-nav a').length,0,'dirty navigation exposes no bypassing URL');const route=location.search;await click('资源库');assert.equal(location.search,route);assert.equal(document.querySelector('input[aria-label="员工名称"]').value,'Unsaved navigation draft');assert.equal(env.requests.some(r=>r.method==='PATCH'),false);});
 
 
 test('mobile navigation retains logout and protects unsaved edits when the compact header hides account actions',async t=>{

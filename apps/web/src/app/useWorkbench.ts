@@ -24,7 +24,7 @@ const inviteInput = ref('');
 const invitationToken = ref('');
 const invitation = ref<Invitation | null>(null);
 const inviteRole = ref<'member' | 'admin'>('member');
-const inviteHours = ref(48);
+const inviteDays = ref<number | null>(2);
 const generatedInvite = ref<{ link: string; expiresAt: number } | null>(null);
 const canManage = computed(() => selected.value?.role === 'owner' || selected.value?.role === 'admin');
 const roleLabel = (role: Role) => ({ owner: '所有者', admin: '管理员', member: '成员' })[role];
@@ -342,10 +342,10 @@ async function createWorkspace() {
 }
 async function createInvitation() {
   await run(async () => {
-    if (!selected.value || !canManage.value) return;
+    if (!selected.value || !canManage.value || inviteDays.value === null) return;
     const version = generation;
     generatedInvite.value = null;
-    const result = await api<{ token: string; expiresAt: number }>(`/workspaces/${encodeURIComponent(selected.value.id)}/invitations`, controller.signal, { role: inviteRole.value, expiresInHours: inviteHours.value });
+    const result = await api<{ token: string; expiresAt: number }>(`/workspaces/${encodeURIComponent(selected.value.id)}/invitations`, controller.signal, { role: inviteRole.value, expiresInHours: inviteDays.value * 24 });
     if (version !== generation) return;
     generatedInvite.value = { link: `${location.origin}${location.pathname}#invite=${encodeURIComponent(result.token)}`, expiresAt: result.expiresAt };
   });
@@ -397,5 +397,5 @@ onUnmounted(() => {employeeReadController.abort();clearTimeout(searchTimer);
   controller.abort(); password.value = '';
 });
 watch(canManage,allowed=>{if(!allowed&&view.value==='management'&&managementSection.value==='members'){managementSection.value='models';updateRoute(true);}});
-return { workItemId,workbenchSection,taskSection,selectWorkbenchSection,workspaceRenamed,entityLoading,openEmployee,employeeSection,selectEmployeeSection,employeeQuery,employeeCursor,searchEmployees,managementSection,selectManagementSection,user, workspaces, selected, entities, activeEntity, entitiesLoaded, booting, busy, error, notice, mode, username, password, displayName, newWorkspaceName, inviteInput, invitationToken, invitation, inviteRole, inviteHours, generatedInvite, canManage, roleLabel, formatTime, view, conversationId, initialMode, wizardOpen, wizardBusy, settingsBusy, navigationLocked, taskEntityId, taskEntity, workspaceMenuOpen, workspaceAction, dialogTitle, navigate, updateRoute, canEdit, entityUpdated, finishWizard, closeWizard, closeWorkspaceMenu, openWorkspaceDialog, closeWorkspaceDialog, clearSession, run, loadEntities, inspectInvitation, cancelInvitation, inspectInput, authenticate, logout, switchWorkspace, createWorkspace, createInvitation, acceptInvitation };
+return { workItemId,workbenchSection,taskSection,selectWorkbenchSection,workspaceRenamed,entityLoading,openEmployee,employeeSection,selectEmployeeSection,employeeQuery,employeeCursor,searchEmployees,managementSection,selectManagementSection,user, workspaces, selected, entities, activeEntity, entitiesLoaded, booting, busy, error, notice, mode, username, password, displayName, newWorkspaceName, inviteInput, invitationToken, invitation, inviteRole, inviteDays, generatedInvite, canManage, roleLabel, formatTime, view, conversationId, initialMode, wizardOpen, wizardBusy, settingsBusy, navigationLocked, taskEntityId, taskEntity, workspaceMenuOpen, workspaceAction, dialogTitle, navigate, updateRoute, canEdit, entityUpdated, finishWizard, closeWizard, closeWorkspaceMenu, openWorkspaceDialog, closeWorkspaceDialog, clearSession, run, loadEntities, inspectInvitation, cancelInvitation, inspectInput, authenticate, logout, switchWorkspace, createWorkspace, createInvitation, acceptInvitation };
 }

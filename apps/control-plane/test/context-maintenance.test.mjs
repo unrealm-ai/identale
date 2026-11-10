@@ -144,7 +144,7 @@ test('reference key ordering and lease-like changes preserve fingerprint, while 
 
 test('legacy schedule migration preserves jobs/deadlines and persists the new content fingerprint across reopen',async t=>{
  const dir=await mkdtemp(join(tmpdir(),'identity-maintenance-migration-')),path=join(dir,'db.sqlite');let store=new Store(path);t.after(async()=>{store.close();await rm(dir,{recursive:true,force:true});});
- store.db.exec("CREATE TABLE context_maintenance_schedules(session_id TEXT PRIMARY KEY,policy_revision TEXT NOT NULL,next_due_at INTEGER NOT NULL,last_history_version INTEGER NOT NULL DEFAULT 0);INSERT INTO context_maintenance_schedules VALUES('session','policy',10000,7)");
+ store.db.exec("DROP TABLE combined_schema_migrations; ALTER TABLE context_maintenance_schedules DROP COLUMN last_context_fingerprint; INSERT INTO context_maintenance_schedules(session_id,policy_revision,next_due_at,last_history_version) VALUES('session','policy',10000,7)");store.close();store=new Store(path);
  let repo=new SqliteScheduleRepository(store);const job=repo.enqueue('existing-job','context.compact',{synthetic:true},0);let schedule=repo.ensureSchedule('session','policy',100,500);
  assert.deepEqual({...schedule},{next_due_at:10000,last_history_version:7,last_context_fingerprint:null});repo.observe('session',9,10000,'a'.repeat(64));store.close();store=new Store(path);repo=new SqliteScheduleRepository(store);
  assert.equal(repo.get(job.id).status,'queued');assert.equal(repo.ensureSchedule('session','policy',200,500).last_context_fingerprint,'a'.repeat(64));new SqliteScheduleRepository(store);
