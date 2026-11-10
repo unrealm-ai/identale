@@ -26,7 +26,7 @@ test('existing split platform upgrades missing entity defaults before real API c
  let raw=new DatabaseSync(path);
  raw.prepare('INSERT OR REPLACE INTO entity_directory_policies(entity_id,workspace_id,revision,allow_json,deny_json) VALUES(?,?,?,?,?)').run(oldId,workspaceId,7,'[]','[]');
  const oldPolicy=raw.prepare('SELECT * FROM entity_directory_policies WHERE entity_id=?').get(oldId),oldEntities=raw.prepare('SELECT count(*) AS n FROM entities').get().n;
- raw.exec('ALTER TABLE entities DROP COLUMN initial_channel_defaults_json');raw.close();
+ raw.exec('DROP TABLE platform_schema_migrations; ALTER TABLE entities DROP COLUMN initial_channel_defaults_json');raw.close();
  app=server(path);await app.ready();
  const result=await call(app,'POST',`/api/workspaces/${workspaceId}/entities`,{name:'New employee after upgrade',ownWebUse:true},cookie);assert.equal(result.statusCode,200,result.body);
  raw=new DatabaseSync(path,{readOnly:true});
@@ -41,12 +41,12 @@ test('existing split platform upgrades missing entity defaults before real API c
 
 test('split platform defaults migration is idempotent and leaves consumed defaults and new tables intact',t=>{
  const path=fixture(t);let store=new Store(path,{role:'platform'});
- store.run("INSERT INTO users VALUES('u','user','User','active')");store.run("INSERT INTO workspaces VALUES('w','Workspace','u','active')");store.run("INSERT INTO members VALUES('m','w','u','owner','active')");
+ store.run("INSERT INTO users VALUES('u','user','User','active')");store.run("INSERT INTO workspaces VALUES('w','Workspace','u','active')");store.run("INSERT INTO members(id,workspace_id,user_id,role,status) VALUES('m','w','u','owner','active')");
  store.run("INSERT INTO entities(id,workspace_id,name,owner_member_id,created_by_member_id,own_web_use,web_use_user_id,interaction_runtime,initial_channel_defaults_json) VALUES('e','w','Employee','m','m',1,'u','builtin',?)",JSON.stringify({wecom:'denylist'}));
  new EmployeeChannelRepository(store);new CapabilityConfigService(store,[]);
  // These independent tables were added alongside the defaults change. Older
- // split databases must initialize them through repository startup as well.
- store.db.exec('DROP TABLE wecom_identity_bindings; DROP TABLE wecom_member_challenges;');store.close();
+ // split databases must initialize them through the versioned baseline.
+ store.db.exec('DROP TABLE platform_schema_migrations; DROP TABLE wecom_identity_bindings; DROP TABLE wecom_member_challenges;');store.close();
  for(let i=0;i<3;i++){
   store=new Store(path,{role:'platform'});new EmployeeChannelRepository(store);new CapabilityConfigService(store,[]);
   try{

@@ -20,9 +20,15 @@ for(const [status,category,code] of [[401,'authentication','mock_authentication_
  await log.run(context,async()=>assert.rejects(model.complete(input()),e=>{assert.ok(e instanceof DiagnosticError);assert.equal(e.diagnostic.category,category);assert.equal(e.diagnostic.httpStatus,status);assert.ok(!e.message.includes(secret)&&!e.message.includes(body));return true;}));
  await log.flush();const end=(await records(dir)).find(e=>e.stage==='model.http'&&e.phase==='end');assert.equal(end.outcome,'failure');assert.equal(end.category,category);assert.equal(end.httpStatus,status);assert.equal(end.providerCode,code);assert.equal(end.messageId,context.messageId);
 });
-for(const mode of ['network','timeout','parse','shape'])test(`model ${mode} is classified without raw causes or retry`,async t=>{
- const {log,dir}=await fixture(t);const request=input();let calls=0;const model=client(log,async()=>{calls++;if(mode==='timeout'){request.signal=new AbortController().signal;const c=new AbortController();c.abort();request.signal=c.signal;throw new Error(secret);}if(mode==='network')throw new Error(secret);return mode==='parse'?new Response(secret):new Response(JSON.stringify({private:body}));});
- await log.run(context,async()=>assert.rejects(model.complete(request),e=>{assert.equal(e.diagnostic.category,mode==='shape'?'parse':mode);return true;}));assert.equal(calls,1);await log.flush();assert.ok((await records(dir)).some(e=>e.outcome==='failure'&&e.category===(mode==='shape'?'parse':mode)));
+for(const mode of ['network','configuration','parse','shape'])test(`model ${mode} classification obeys bounded local retries without retaining raw causes`,async t=>{
+ const {log,dir}=await fixture(t);let calls=0;const model=client(log,async()=>{calls++;if(mode==='network')throw new TypeError(secret);if(mode==='configuration')throw new Error(secret);return mode==='parse'?new Response(secret):new Response(JSON.stringify({private:body}));});
+ const category=mode==='shape'?'parse':mode,attempts=mode==='network'?3:1;
+ await log.run(context,()=>assert.rejects(model.complete(input()),e=>{assert.equal(e.diagnostic.category,category);return true;}));assert.equal(calls,attempts);await log.flush();const failures=(await records(dir)).filter(e=>e.stage==='model.http'&&e.phase==='end');assert.equal(failures.length,attempts);assert.ok(failures.every(e=>e.category===category));
+});
+test('aborted model transport records timeout but preserves cancellation without retry',async t=>{
+ const {log,dir}=await fixture(t),controller=new AbortController(),reason=new DOMException('Aborted','AbortError');let calls=0;
+ const model=client(log,async()=>{calls++;controller.abort(reason);throw new Error(secret);});
+ await log.run(context,()=>assert.rejects(model.complete({...input(),signal:controller.signal}),e=>e===reason));assert.equal(calls,1);await log.flush();assert.ok((await records(dir)).some(e=>e.stage==='model.http'&&e.phase==='end'&&e.category==='timeout'));
 });
 test('successful model request is timed and no request or response text is retained',async t=>{
  const {log,dir}=await fixture(t);await log.run(context,()=>client(log,async()=>success()).complete(input()));await log.flush();const rows=await records(dir);assert.equal(rows.find(e=>e.stage==='model.http'&&e.phase==='end').outcome,'success');assert.ok(rows.every(e=>e.traceId===context.traceId));

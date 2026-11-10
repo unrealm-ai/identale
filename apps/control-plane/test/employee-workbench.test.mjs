@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { createServer } from '../dist/server.js';
 import {Store} from '../dist/store.js';
+import {createJournalIndex} from '../dist/adapters/sqlite/journal-index.js';
 import {SqliteConversationRepository} from '../dist/adapters/sqlite/conversation-repository.js';
 import {JsonlJournal} from '@dentity/runtime-builtin';
 import {ingressFixture} from './helpers/ingress-fixture.mjs';
@@ -33,12 +34,12 @@ async function setup(t, options = {}) {
 
 
 async function employee(t,options={}){const f=await setup(t,{pollIntervalMs:0,maintenance:{enabled:false},...options}),owner=await f.register('workbench-owner'),root=`/api/workspaces/${owner.workspace.id}`,entity=(await f.call('POST',root+'/entities',{name:'Workbench employee',ownWebUse:true},owner.cookie)).json().entity,base=root+'/entities/'+entity.id;const request=(method,path,body)=>f.call(method,base+path,body,owner.cookie);return {...f,owner,root,entity,base,request};}
-function conversation(f){const store=new Store(f.path);try{const journal=new JsonlJournal({root:join(f.path,'..','builtin-records'),ownerId:JSON.stringify([store.databaseId,store.databasePath]),serialize:fn=>store.transaction(fn)}),r=new SqliteConversationRepository(store,journal);r.initialize(0);const id=randomUUID();r.create(id,{workspaceId:f.owner.workspace.id,entityId:f.entity.id,userId:f.owner.user.id},'fixture:'+id,1800000000000,'real',0);r.addMessage('history:'+id,r.get(id),'user','Authorized retained context',1800000000000,false);return id;}finally{store.close();}}
+function conversation(f){const store=new Store(f.path);try{const journal=new JsonlJournal({root:join(f.path,'..','builtin-records'),ownerId:JSON.stringify([store.databaseId,store.databasePath]),serialize:fn=>store.transaction(fn),index:createJournalIndex(store)}),r=new SqliteConversationRepository(store,journal);r.initialize(0);const id=randomUUID();r.create(id,{workspaceId:f.owner.workspace.id,entityId:f.entity.id,userId:f.owner.user.id},'fixture:'+id,1800000000000,'real',0);r.addMessage('history:'+id,r.get(id),'user','Authorized retained context',1800000000000,false);return id;}finally{store.close();}}
 
 test('employee state is reversible, versioned, cross-workspace protected and keeps authorized history',async t=>{
  const f=await employee(t),id=conversation(f),before=f.db.prepare('SELECT count(*) n FROM conversations').get().n;
  const disabled=await f.request('PUT','/status',{enabled:false,expectedRevision:1});assert.equal(disabled.statusCode,200,disabled.body);assert.equal(disabled.json().entity.enabled,false);assert.equal(disabled.json().entity.lifecycleRevision,2);
- assert.equal((await f.request('GET',`/conversations/${id}/messages`)).statusCode,200);
+ {const response=await f.request('GET',`/conversations/${id}/messages`);assert.equal(response.statusCode,200,response.body);}
  assert.equal((await f.request('POST',`/conversations/${id}/turns`,{operationId:'disabled-turn',text:'must not dispatch'})).json().error,'employee_disabled');
  assert.equal((await f.request('POST',`/conversations/${id}/todos`,{operationId:'disabled-todo',input:'must not create'})).json().error,'employee_disabled');
  assert.equal((await f.request('PUT','/status',{enabled:true,expectedRevision:1})).statusCode,409);
@@ -111,6 +112,6 @@ test('undiscovered and pending completion work blocks disable, persisted status 
  f.db.prepare("INSERT INTO task_completion_notifications(id,task_id,run_id,conversation_id,scope_json,result_ref,status,created_at) VALUES('retained-completion',?,?,?,'{}','','pending',1800000000000)").run(todo.id,runId,id);
  for(const state of ['pending','leased']){f.db.prepare("UPDATE task_completion_notifications SET status=? WHERE id='retained-completion'").run(state);assert.equal((await f.request('PUT','/status',{enabled:false,expectedRevision:1})).json().error,'employee_has_pending_work');}
  f.db.prepare("UPDATE task_completion_notifications SET status='succeeded' WHERE id='retained-completion'").run();assert.equal((await f.request('PUT','/status',{enabled:false,expectedRevision:1})).statusCode,200);await f.restart();
- const restored=await f.request('GET','/configuration');assert.equal(restored.json().entity.enabled,false);assert.equal(restored.json().entity.lifecycleRevision,2);assert.equal((await f.request('GET',`/conversations/${id}/messages`)).statusCode,200);assert.equal((await f.request('POST',`/conversations/${id}/todos`,{operationId:'after-restart',input:'Cannot admit'})).json().error,'employee_disabled');
+ const restored=await f.request('GET','/configuration');assert.equal(restored.json().entity.enabled,false);assert.equal(restored.json().entity.lifecycleRevision,2);{const response=await f.request('GET',`/conversations/${id}/messages`);assert.equal(response.statusCode,200,response.body);}assert.equal((await f.request('POST',`/conversations/${id}/todos`,{operationId:'after-restart',input:'Cannot admit'})).json().error,'employee_disabled');
  assert.equal((await f.request('PUT','/status',{enabled:true,expectedRevision:2})).statusCode,200);assert.equal(f.db.prepare('SELECT count(*) n FROM runs WHERE id=?').get(runId).n,1);assert.equal(f.db.prepare('SELECT count(*) n FROM task_completion_notifications').get().n,1);
 });

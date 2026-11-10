@@ -22,7 +22,7 @@ import {ChannelMessageLoop} from '@dentity/application';
 async function until(fn){const end=Date.now()+5000;while(!fn()){if(Date.now()>end)throw Error('condition timed out');await delay(10);}}
 async function fixture(t,{botOnly=false,deny=false,sendAck=true}={}){
  const dir=await mkdtemp(join(tmpdir(),'wecom-supervisor-')),store=new Store(join(dir,'test.sqlite'));let now=1800000000000;
- store.run("INSERT INTO users VALUES('u','user','Owner','active')");store.run("INSERT INTO workspaces VALUES('w','Workspace','u','active')");store.run("INSERT INTO members VALUES('m','w','u','owner','active')");store.run("INSERT INTO entities(id,workspace_id,name,owner_member_id,created_by_member_id,own_web_use,web_use_user_id,interaction_runtime) VALUES('e','w','Employee','m','m',1,'u','builtin-interaction')");
+ store.run("INSERT INTO users VALUES('u','user','Owner','active')");store.run("INSERT INTO workspaces VALUES('w','Workspace','u','active')");store.run("INSERT INTO members(id,workspace_id,user_id,role,status) VALUES('m','w','u','owner','active')");store.run("INSERT INTO entities(id,workspace_id,name,owner_member_id,created_by_member_id,own_web_use,web_use_user_id,interaction_runtime) VALUES('e','w','Employee','m','m',1,'u','builtin-interaction')");
  const repository=new EmployeeChannelRepository(store),service=new EmployeeChannelService(repository,{masterKey:new Uint8Array(32).fill(9),now:()=>now});
  const c=await service.save('w','e','wecom','u',{appId:'bot-local',appSecret:'local-only-secret'});
  const capabilities=new CapabilityConfigService(store,[],service);
@@ -139,8 +139,7 @@ for(const publication of ['legacy','completion','unified'])for(const revoked of 
   assert.equal(f.store.one("SELECT delivery_id FROM task_completion_notifications").delivery_id,resultId);
  }else{
   if(publication==='unified'){
-   f.store.db.exec("CREATE TABLE business_notification_jobs(id TEXT PRIMARY KEY,source_kind TEXT,task_id TEXT,run_id TEXT,scope_json TEXT,target_json TEXT,state TEXT)");
-   f.store.run("INSERT INTO business_notification_jobs VALUES(?,'task','synthetic-task','synthetic-run',?,?,'published')",resultId,scopeJson,targetJson);
+   f.store.run("INSERT INTO business_notification_jobs(id,source_kind,task_id,run_id,scope_json,target_json,state,source_id,workspace_id,entity_id,data_ref,turn_id,created_at) VALUES(?,'task','synthetic-task','synthetic-run',?,?,'published','fixture','w','e','','fixture-turn',1800000000000)",resultId,scopeJson,targetJson);
    f.store.run("UPDATE task_completion_notifications SET status='succeeded',delivery_id=?",resultId);
   }
   // Legacy delivery publication belongs to loop.tick(), including its stable ID.
@@ -174,9 +173,8 @@ test('task recipient permission revoked during host beforeSend is checked again 
 
 test('unified task attachment inherits only a verified durable parent origin and exact private target',async t=>{
  const f=await fixture(t,{botOnly:true}),scopeJson=await acceptedTaskSource(f),targetJson=JSON.stringify({conversation:f.request.conversation});
- f.store.db.exec("CREATE TABLE business_notification_jobs(id TEXT PRIMARY KEY,source_kind TEXT,task_id TEXT,run_id TEXT,scope_json TEXT,target_json TEXT,state TEXT);CREATE TABLE task_artifact_delivery_grants(delivery_id TEXT PRIMARY KEY,scope_hash TEXT,target_hash TEXT,parent_json TEXT)");
  f.store.run("INSERT INTO task_completion_notifications(id,task_id,run_id,conversation_id,scope_json,result_ref,status,created_at,delivery_id) VALUES('artifact-notice','synthetic-task','synthetic-run','synthetic-conversation',?,'','succeeded',?,'artifact-parent')",scopeJson,1800000000000);
- f.store.run("INSERT INTO business_notification_jobs VALUES('artifact-parent','task','synthetic-task','synthetic-run',?,?,'published')",scopeJson,targetJson);
+ f.store.run("INSERT INTO business_notification_jobs(id,source_kind,task_id,run_id,scope_json,target_json,state,source_id,workspace_id,entity_id,data_ref,turn_id,created_at) VALUES('artifact-parent','task','synthetic-task','synthetic-run',?,?,'published','fixture','w','e','','fixture-turn',1800000000000)",scopeJson,targetJson);
  const parent={id:'artifact-parent',scopeJson,targetJson,text:'synthetic task report',status:'queued',taskDeliveryId:null,leaseToken:null};
  f.messageRepository.enqueueDelivery(parent,1800000000000);
  const artifact={...parent,id:'synthetic-artifact',text:'',targetJson:JSON.stringify({conversation:f.request.conversation,artifact:{taskId:'synthetic-task',runId:'synthetic-run',ref:{resourceId:'synthetic-file',version:'1'}}})};

@@ -132,7 +132,7 @@ test('expired fork bodies are scrubbed from task and transport snapshots, preser
   const s=await setup(t);s.seedMessage('retained-ref',s.conversation.id,'user','Short-lived private body',1800000000000,0,1800000000010);
   const response=await s.create('fork-retention',{contextMode:'fork',historyMessageIds:['retained-ref']});assert.equal(response.statusCode,202,response.body);const task=response.json().task;
   assert.ok(s.db.prepare('SELECT snapshot_json FROM tasks').get().snapshot_json.includes('Short-lived private body'));
-  s.db.exec('CREATE TABLE task_host_bindings(run_id TEXT PRIMARY KEY,command_json TEXT NOT NULL)');s.db.prepare('INSERT INTO task_host_bindings VALUES(?,?)').run(task.run.id,JSON.stringify({context:{messages:[{id:'retained-ref',role:'user',text:'Short-lived private body'}]}}));
+  s.db.prepare("INSERT INTO task_host_bindings(run_id,task_id,profile_id,revision,spec_json,command_json) VALUES(?,?,'synthetic',1,'{}',?)").run(task.run.id,task.id,JSON.stringify({context:{messages:[{id:'retained-ref',role:'user',text:'Short-lived private body'}]}}));
   s.advance(11);await s.service.tick();const snapshot=JSON.parse(s.db.prepare('SELECT snapshot_json FROM tasks').get().snapshot_json);assert.equal(snapshot[0].id,'retained-ref');assert.equal(snapshot[0].text,'');assert.equal(snapshot[0].expired,true);
   assert.ok(!s.db.prepare('SELECT command_json FROM task_host_bindings').get().command_json.includes('Short-lived private body'));assert.equal(s.runtime.commands.length,0);assert.equal(s.db.prepare('SELECT status FROM task_outbox').get().status,'blocked');
 });

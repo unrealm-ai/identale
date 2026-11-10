@@ -1,4 +1,6 @@
 import {backup, DatabaseSync, type SQLInputValue} from 'node:sqlite';
+import {Store} from '../store.js';
+import {validateDatabaseVersion} from '../schema-migrations/catalog.js';
 import {createHash, randomUUID} from 'node:crypto';
 import {chmodSync, existsSync, lstatSync, mkdirSync, openSync, closeSync, fsyncSync,
   readdirSync, readFileSync, realpathSync, rmSync, writeFileSync, readSync, writeSync} from 'node:fs';
@@ -46,9 +48,11 @@ function fileEvidence(path: string, root: string): FileEvidence {
   finally { closeSync(fd); }
   return {path: relative(root, path), size: info.size, sha256: h.digest('hex')};
 }
-function assertKnownSchema(db: DatabaseSync): void {
+const isVersionHistory = (name:string) => ['combined','platform','runtime'].some(role=>name===`${role}_schema_migrations`);
+function assertKnownSchema(db: DatabaseSync, versioned=false): void {
   for (const item of schema(db)) {
-    if (item.type === 'view' || item.type === 'trigger') throw new Error(`split_unsupported_schema:${item.type}:${item.name}`);
+    if (isVersionHistory(item.name)) continue; // Independently validated, never copied as business state.
+    if (item.type === 'view' || (item.type === 'trigger' && !versioned)) throw new Error(`split_unsupported_schema:${item.type}:${item.name}`);
     if (!tableOwner(item.type === 'table' ? item.name : item.tbl_name)) throw new Error(`split_unknown_table:${item.tbl_name}`);
     if (item.type === 'table' && (!item.sql || /\bCREATE\s+VIRTUAL\s+TABLE\b/i.test(item.sql))) throw new Error('split_schema_not_supported');
   }
@@ -90,7 +94,7 @@ function assertOffline(db: DatabaseSync): void {
 function copyDatabase(source: DatabaseSync, path: string, owner: StorageOwner): {name: string; owner: StorageOwner; rows: number}[] {
   const dest = new DatabaseSync(path);
   chmodSync(path, 0o600);
-  const tables = names(source).filter(r => tableOwner(r.name) === owner), evidence: {name: string; owner: StorageOwner; rows: number}[] = [];
+  const tables = names(source).filter(r => !isVersionHistory(r.name) && tableOwner(r.name) === owner), evidence: {name: string; owner: StorageOwner; rows: number}[] = [];
   try {
     dest.exec('PRAGMA foreign_keys=OFF; BEGIN IMMEDIATE');
     for (const table of tables) dest.exec(stripCrossDomainReferences(table.sql!, owner));
@@ -113,6 +117,7 @@ function copyDatabase(source: DatabaseSync, path: string, owner: StorageOwner): 
         dest.prepare('INSERT INTO sqlite_sequence(name,seq) VALUES(?,?)').run(row['name'] as string, row['seq'] as bigint);
       }
     }
+    for (const trigger of schema(source).filter(r => r.type === 'trigger' && tableOwner(r.tbl_name) === owner && r.sql)) dest.exec(trigger.sql!);
     dest.exec('COMMIT; PRAGMA foreign_keys=ON');
     for (const name of ['user_version', 'application_id']) dest.exec(`PRAGMA ${name}=${Number(source.prepare(`PRAGMA ${name}`).get()?.[name] ?? 0)}`);
     if (dest.prepare('PRAGMA integrity_check').get()?.['integrity_check'] !== 'ok' || dest.prepare('PRAGMA foreign_key_check').get()) throw new Error('split_integrity_failed');
@@ -238,7 +243,8 @@ export async function splitLegacyStorage(options: SplitStorageOptions): Promise<
   const source = new DatabaseSync(sourcePath, {readOnly: true});
   let ownsDirectory = false;
   try {
-    assertOffline(source); assertKnownSchema(source);
+    const versioned = validateDatabaseVersion(source, 'combined') !== 'unversioned';
+    assertOffline(source); assertKnownSchema(source, versioned);
     const initialDigest = logicalDigest(source);
     const initialFileEvidence = roots.map(root => ({id: root.id, files: sourceFileEvidence(realpathSync(root.path))}));
     const result = (manifest: SplitStorageManifest, reused: boolean): SplitStorageResult => ({directory, platformDatabasePath: join(directory, 'platform', 'platform.sqlite'), runtimeDatabasePath: join(directory, 'runtime', 'runtime.sqlite'), manifest, reused});
@@ -254,14 +260,23 @@ export async function splitLegacyStorage(options: SplitStorageOptions): Promise<
     const snapshot = new DatabaseSync(backupPath, {readOnly: true});
     let manifest: SplitStorageManifest;
     try {
-      assertKnownSchema(snapshot);
+      validateDatabaseVersion(snapshot, 'combined');
+      assertKnownSchema(snapshot, versioned);
       if (logicalDigest(snapshot) !== initialDigest) throw new Error('split_source_changed');
       const id = names(snapshot).some(t => t.name === 'builtin_storage_metadata') ? snapshot.prepare('SELECT database_id FROM builtin_storage_metadata WHERE id=1').get()?.['database_id'] : null;
       if (names(snapshot).some(t => t.name === 'builtin_records') && typeof id !== 'string') throw new Error('split_journal_owner_missing');
       mkdirSync(join(directory, 'platform'), {mode: 0o700}); mkdirSync(join(directory, 'runtime'), {mode: 0o700});
       const tables = [...copyDatabase(snapshot, join(directory, 'platform', 'platform.sqlite'), 'platform'), ...copyDatabase(snapshot, join(directory, 'runtime', 'runtime.sqlite'), 'runtime')];
+      if (versioned) {
+        // Histories describe each owning schema, not rows copied from the combined source.
+        for (const role of ['platform','runtime'] as const) {
+          const path=join(directory,role,`${role}.sqlite`), migrated=new Store(path,{role});migrated.close();
+          const finalized=new DatabaseSync(path);try { finalized.exec('PRAGMA wal_checkpoint(TRUNCATE); PRAGMA journal_mode=DELETE'); } finally { finalized.close(); }
+          fsync(path);
+        }
+      }
       fsync(join(directory, 'platform')); fsync(join(directory, 'runtime'));
-      const files = ['legacy-backup.sqlite', join('platform', 'platform.sqlite'), join('runtime', 'runtime.sqlite')].map(name => fileEvidence(join(directory, name), directory));
+      const files = [fileEvidence(backupPath,directory),...['platform','runtime'].flatMap(role=>sourceFileEvidence(join(directory,role)).map(file=>({...file,path:join(role,file.path)})))];
       const fileRoots: SplitStorageManifest['fileRoots'] = [];
       if (roots.length) mkdirSync(join(directory, 'files'), {mode: 0o700});
       for (const root of roots) { const path = realpathSync(root.path), destinationPath = join('files', root.id); copyFiles(path, join(directory, destinationPath), directory, files); fileRoots.push({id: root.id, sourcePath: path, destinationPath}); }

@@ -20,7 +20,7 @@ async function fixture(t){
  let clock=1_800_000_000_000,batch=0;
  store.run("INSERT INTO users VALUES('u','owner','Owner','active')");
  store.run("INSERT INTO workspaces VALUES('w','Fixture','u','active'),('w2','Other','u','active')");
- store.run("INSERT INTO members VALUES('m','w','u','owner','active'),('m2','w2','u','owner','active')");
+ store.run("INSERT INTO members(id,workspace_id,user_id,role,status) VALUES('m','w','u','owner','active'),('m2','w2','u','owner','active')");
  store.run("INSERT INTO entities(id,workspace_id,name,owner_member_id,created_by_member_id,own_web_use,web_use_user_id,interaction_runtime) VALUES('e','w','Employee','m','m',1,'u','builtin'),('e2','w','Second','m','m',1,'u','builtin'),('e3','w2','Foreign','m2','m2',1,'u','builtin')");
  const catalog=new Map(),state={removed:new Set(),queries:[],beforeSearch:undefined};
  const options={masterKey:Buffer.alloc(32,31),now:()=>clock,fetch:async(url,init)=>{

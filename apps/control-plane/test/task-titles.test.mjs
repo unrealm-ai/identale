@@ -38,7 +38,7 @@ test('task title HTTP creates, projections and permission boundaries use the exi
 
 test('existing runtime split database upgrades title metadata on reopen without touching platform ownership',t=>{
  const root=mkdtempSync(join(tmpdir(),'task-title-split-'));t.after(()=>rmSync(root,{recursive:true,force:true}));
- const path=join(root,'runtime.sqlite');let store=new Store(path,{role:'runtime'});store.db.exec('ALTER TABLE main.tasks DROP COLUMN title');store.close();
+ const path=join(root,'runtime.sqlite');let store=new Store(path,{role:'runtime'});store.db.exec('DROP TABLE runtime_schema_migrations; ALTER TABLE main.tasks DROP COLUMN title');store.close();
  store=new Store(path,{role:'runtime'});assert.ok(store.all('PRAGMA main.table_info(tasks)').some(c=>c.name==='title'));store.close();
  const platform=new Store(join(root,'platform.sqlite'),{role:'platform'});try{assert.equal(platform.one("SELECT 1 FROM main.sqlite_master WHERE name='tasks'"),undefined);assert.ok(platform.all('PRAGMA temp.table_info(tasks)').some(c=>c.name==='title'));}finally{platform.close();}
 });

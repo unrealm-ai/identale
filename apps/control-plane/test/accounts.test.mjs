@@ -190,7 +190,7 @@ test('upgrading stored invitations preserves used links and single-use concurren
   const used = (await call('POST', url, { role: 'admin' }, owner.cookie)).json();
   const unused = (await call('POST', url, {}, owner.cookie)).json();
   db.prepare("UPDATE invitations SET used_by=? WHERE role='admin'").run(owner.user.id);
-  db.exec('ALTER TABLE invitations DROP COLUMN reusable');
+  db.exec('DROP TABLE combined_schema_migrations; ALTER TABLE invitations DROP COLUMN reusable');
   await restart();
   assert.equal((await call('POST', '/api/invitations/inspect', { token: used.token })).statusCode, 400);
   const concurrent = await Promise.all(['legacy-one', 'legacy-two'].map(username => call('POST', '/api/auth/register', { username, password, invitationToken: unused.token })));
@@ -512,7 +512,7 @@ test('employee execution thinking has four persistent levels, defaults medium an
 test('existing employee schema gains medium without rewriting existing employee fields',async t=>{
  const {register,call,db,path}=await setup(t),owner=await register('legacy-thinking-owner'),base=`/api/workspaces/${owner.workspace.id}/entities`;
  const created=(await call('POST',base,{name:'Legacy employee',description:'Retained',ownWebUse:false},owner.cookie)).json().entity;
- db.exec('ALTER TABLE entities DROP COLUMN execution_thinking_level');const before=db.prepare('SELECT * FROM entities WHERE id=?').get(created.id);
+ db.exec('DROP TABLE combined_schema_migrations; ALTER TABLE entities DROP COLUMN execution_thinking_level');const before=db.prepare('SELECT * FROM entities WHERE id=?').get(created.id);
  const {Store}=await import('../dist/store.js');const migrated=new Store(path);
  try{const after=migrated.one('SELECT * FROM entities WHERE id=?',created.id);assert.equal(after.execution_thinking_level,'medium');delete after.execution_thinking_level;assert.deepEqual({...after},{...before});}finally{migrated.close();}
 });

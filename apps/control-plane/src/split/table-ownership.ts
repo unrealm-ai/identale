@@ -51,7 +51,7 @@ const ownership = new Map<string, StorageOwner>([
   ...PLATFORM_TABLES.map(name => [name, 'platform'] as const),
   ...RUNTIME_TABLES.map(name => [name, 'runtime'] as const),
 ]);
-export function tableOwner(name: string): StorageOwner | undefined { return ownership.get(name); }
+export function tableOwner(name: string): StorageOwner | undefined { return name==='platform_schema_migrations'?'platform':name==='runtime_schema_migrations'?'runtime':ownership.get(name); }
 
 /** Split only the top-level table definitions, respecting literals and quoted identifiers. */
 function definitions(sql: string): {head: string; parts: string[]; tail: string} {
