@@ -205,3 +205,20 @@ test('challenge paging rejects corrupt pages without partial apply',async t=>{
  const poller=new ConfigurationPoller({store:f.runtime,baseUrl:'http://127.0.0.1:9999',token,fetch:async(...args)=>{const response=await f.fetch(...args);if(String(args[0]).endsWith('challenge-page')){const page=await response.json();page.rows[0].user_id='tampered';return new Response(JSON.stringify(page));}return response;},now:f.clock});
  assert.equal(await poller.poll(),false);assert.equal(poller.ready,false);poller.stop();
 });
+
+test('retired directory credentials stay on platform and do not enter runtime configuration',async t=>{
+ const f=await fixture(t);const {RETAINED_LEGACY_SCHEMA,RETAINED_DIRECTORY_COLUMN}=await import('../dist/schema-migrations/retained-legacy.js');
+ f.platform.db.exec(RETAINED_LEGACY_SCHEMA.find(o=>o.name==='employee_channel_directory_credentials').sql);
+ f.platform.db.exec('ALTER TABLE employee_channel_connections ADD COLUMN '+RETAINED_DIRECTORY_COLUMN);
+ f.platform.db.exec(RETAINED_LEGACY_SCHEMA.find(o=>o.type==='index').sql);
+ f.platform.run("INSERT INTO employee_channel_directory_credentials VALUES('retired','w','wecom','corp','agent',1,'RETIRED_PRIVATE_RECORD')");
+ f.platform.run("UPDATE employee_channel_connections SET directory_credential_id='retired' WHERE id='ch'");
+ const poller=new ConfigurationPoller({store:f.runtime,baseUrl:'http://127.0.0.1:9999',token,fetch:f.fetch,now:f.clock});
+ assert.equal(await poller.poll(),true,JSON.stringify(poller.status));
+ const snapshot=(await f.app.inject({url:'/internal/config/snapshot',headers:auth})).json();
+ assert.equal(JSON.stringify(snapshot).includes('directory_credential_id'),false);
+ assert.equal(JSON.stringify(snapshot).includes('RETIRED_PRIVATE_RECORD'),false);
+ assert.equal(f.runtime.all('PRAGMA temp.table_info(employee_channel_connections)').some(c=>c.name==='directory_credential_id'),false);
+ assert.equal(f.platform.one('SELECT directory_credential_id FROM employee_channel_connections').directory_credential_id,'retired');
+ assert.equal(f.platform.one('SELECT record_json FROM employee_channel_directory_credentials').record_json,'RETIRED_PRIVATE_RECORD');
+});

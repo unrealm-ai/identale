@@ -1,4 +1,5 @@
 import {DatabaseSync} from 'node:sqlite';
+import {RETAINED_LEGACY_SCHEMA,RETAINED_DIRECTORY_COLUMN} from './retained-legacy.js';
 import {BASELINE_V1} from './baseline-v1.js';
 import {runSchemaMigrations,migrationChecksum,type MigrationRole,type MigrationOptions} from './runner.js';
 import {tableOwner,stripCrossDomainReferences} from '../split/table-ownership.js';
@@ -42,14 +43,24 @@ function compatible(db:DatabaseSync,reference:DatabaseSync,schema:SchemaObject[]
  const tables=new Map(schema.filter(o=>o.type==='table').map(o=>[o.name,o]));
  for(const row of db.prepare("SELECT type,name,tbl_name,sql FROM main.sqlite_master WHERE name NOT LIKE 'sqlite_%'").all()){
   const name=String(row['name']);if(/^(platform|runtime|combined)_schema_migrations$/.test(name))continue;
+  const retained=RETAINED_LEGACY_SCHEMA.find(o=>o.name===name);
+  if(retained){if(row['type']!==retained.type||!schema.some(o=>tableOwner(o.tbl_name)===retained.owner)||canonicalSQL(String(row['sql']))!==canonicalSQL(retained.sql))throw Error(`schema_migration_unrecognized_retired_object:${name}`);continue;}
   if(row['type']==='table'){
    if(!tables.has(name))throw Error(`schema_migration_unrecognized_table:${name}`);
    if(/\bWITHOUT\s+ROWID\b/i.test(String(row['sql']))!==/\bWITHOUT\s+ROWID\b/i.test(tables.get(name)!.sql)||/\bSTRICT\s*$/i.test(String(row['sql']))!==/\bSTRICT\s*$/i.test(tables.get(name)!.sql))throw Error(`schema_migration_unrecognized_table_options:${name}`);
    const expected=new Map(columns(reference,name).map(c=>[c.name,c]));
-   const present=new Set(columns(db,name).map(c=>c.name));
+   const actualColumns=columns(db,name);
+   const retainedColumn=name==='employee_channel_connections'&&actualColumns.some(c=>c.name==='directory_credential_id');
+   if(retainedColumn){
+    const c=actualColumns.find(c=>c.name==='directory_credential_id')!;
+    const links=db.prepare(`PRAGMA main.foreign_key_list(${quote(name)})`).all().filter(f=>f['from']==='directory_credential_id');
+    if(links.length!==1||links[0]!['table']!=='employee_channel_directory_credentials'||links[0]!['to']!=='id'||links[0]!['on_update']!=='NO ACTION'||links[0]!['on_delete']!=='RESTRICT'||links[0]!['match']!=='NONE'||links[0]!['seq']!==0)throw Error('schema_migration_unrecognized_retired_column_constraint');
+    if(c.type!=='TEXT'||c.notnull!==0||c.dflt_value!==null||c.pk!==0||c.hidden!==0||canonicalSQL(definition(String(row['sql']),'directory_credential_id'))!==canonicalSQL(RETAINED_DIRECTORY_COLUMN)||!db.prepare("SELECT 1 FROM main.sqlite_master WHERE type='table' AND name='employee_channel_directory_credentials'").get())throw Error('schema_migration_unrecognized_retired_column:employee_channel_connections.directory_credential_id');
+   }
+   const present=new Set(actualColumns.filter(c=>!retainedColumn||c.name!=='directory_credential_id').map(c=>c.name));
    if(JSON.stringify(checks(String(row['sql']),present))!==JSON.stringify(checks(tables.get(name)!.sql,present)))throw Error(`schema_migration_unrecognized_checks:${name}`);
    if(JSON.stringify(foreignKeys(db,name,present))!==JSON.stringify(foreignKeys(reference,name,present))||JSON.stringify(uniqueKeys(db,name))!==JSON.stringify(uniqueKeys(reference,name)))throw Error(`schema_migration_unrecognized_constraints:${name}`);
-   for(const col of columns(db,name)){const target=expected.get(col.name);if(!target||['type','notnull','pk','hidden'].some(k=>col[k as keyof Column]!==target[k as keyof Column])||normalized(col.dflt_value)!==normalized(target.dflt_value))throw Error(`schema_migration_unrecognized_column:${name}.${col.name}`);expected.delete(col.name);}
+   for(const col of actualColumns){if(retainedColumn&&col.name==='directory_credential_id')continue;const target=expected.get(col.name);if(!target||['type','notnull','pk','hidden'].some(k=>col[k as keyof Column]!==target[k as keyof Column])||normalized(col.dflt_value)!==normalized(target.dflt_value))throw Error(`schema_migration_unrecognized_column:${name}.${col.name}`);expected.delete(col.name);}
    for(const col of expected.keys())if(!legacy||!ADDITIVE_V1[name]?.includes(col))throw Error(`schema_migration_missing_column:${name}.${col}`);
   }else {const expected=schema.find(o=>o.name===name&&o.type===row['type']);if(!expected||canonicalSQL(String(row['sql']))!==canonicalSQL(expected.sql))throw Error(`schema_migration_unrecognized_object:${name}`);}
  }

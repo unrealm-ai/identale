@@ -1,3 +1,4 @@
+import {BASELINE_V1} from '../schema-migrations/baseline-v1.js';
 import { createHash, timingSafeEqual } from 'node:crypto';
 import type { FastifyInstance } from 'fastify';
 import type { SQLInputValue } from 'node:sqlite';
@@ -88,7 +89,15 @@ export interface ConfigurationApiOptions {
 export function configurationSnapshot(options: ConfigurationApiOptions): ConfigurationSnapshot {
   return options.store.transaction(() => {
     const schemas = options.store.all<{ name: string; sql: string }>("SELECT name,sql FROM main.sqlite_master WHERE type='table' ORDER BY name").filter(t => allowedTables.has(t.name));
-    const originals = schemas.map(table => ({ ...table, rows: options.store.all<ConfigurationRow>(`SELECT * FROM main.${quoteIdentifier(table.name)}`).sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b))) }));
+    const originals = schemas.map(table => {
+      const rows=options.store.all<ConfigurationRow>(`SELECT * FROM main.${quoteIdentifier(table.name)}`);
+      // Retired platform credentials are preserved for recovery, never exported
+      // into the runtime projection (which has no retired credential table).
+      const retiredDirectory=table.name==='employee_channel_connections'&&/\bdirectory_credential_id\b/i.test(table.sql);
+      if(retiredDirectory)for(const row of rows)delete row['directory_credential_id'];
+      const sql=retiredDirectory?BASELINE_V1.find(o=>o.type==='table'&&o.name==='employee_channel_connections')!.sql:table.sql;
+      return {...table,sql,rows:rows.sort((a,b)=>JSON.stringify(a).localeCompare(JSON.stringify(b)))};
+    });
     const workspace = new Map((originals.find(t => t.name === 'trigger_bindings')?.rows ?? []).map(row => [String(row['id']), String(row['workspace_id'])]));
     const approvedResources = JSON.parse(JSON.stringify(options.approvedResources ?? [])) as unknown; validateApprovedResources(approvedResources);
     const moduleRevisions = Object.fromEntries(Object.entries(CONFIGURATION_MODULES).map(([module, names]) => [module, digest([originals.filter(table => (names as readonly string[]).includes(table.name)), ...(module === 'resources' ? [approvedResources] : [])])])) as Record<ConfigurationModule, string>;
