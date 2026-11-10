@@ -53,6 +53,7 @@ import {withDirectoryAccessPolicy} from './directory/channel-policy.js';
 import {EmployeeChannelService} from './employee-channels/service.js';
 import {EmployeeChannelRepository} from './employee-channels/repository.js';
 import {registerEmployeeChannelRoutes} from './employee-channels/routes.js';
+import {FeishuAppRegistration,registerFeishuAppRegistrationRoutes} from './employee-channels/feishu-registration.js';
 import type {EmployeeChannelOptions} from './employee-channels/types.js';
 import { ChannelIntegrationService, type ChannelIntegrationOptions } from '@dentity/application';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
@@ -203,6 +204,11 @@ export async function bootstrap(server: FastifyInstance, config: ControlPlaneCon
       requireWorkspaceManager:(request,workspaceId)=>{workspaces.get(auth(request).id,workspaceId);},
     });
     await registerCapabilityConfigRoutes(server, capabilities, {requireManager, currentUser: auth,requireWorkspaceManager:(request,workspaceId)=>{workspaces.get(auth(request).id,workspaceId);}});
+    const feishuRegistration = new FeishuAppRegistration(employeeChannels, {...config.employeeChannels,
+      ...(config.employeeChannels?.masterKey ?? config.modelProfiles?.masterKey ? {masterKey: config.employeeChannels?.masterKey ?? config.modelProfiles!.masterKey!} : {})},
+      (w,e,a)=>{entities.requireManager(a,w,e);capabilities.assertActive({workspaceId:w,entityId:e});});
+    server.addHook('preClose',async()=>{feishuRegistration.close();});
+    registerFeishuAppRegistrationRoutes(server,feishuRegistration,(request,w,e)=>{const user=auth(request);entities.requireManager(user.id,w,e);return user.id;});
     await registerEmployeeChannelRoutes(server,employeeChannels,{requireReader:(request,w,e)=>{const user=auth(request);entities.requireReader(user.id,w,e);return{canManage:!!workspaces.get(user.id,w)};},requireManager:(request,workspaceId,entityId)=>{const user=auth(request);entities.requireManager(user.id,workspaceId,entityId);if(!['GET','DELETE'].includes(request.method))capabilities.assertActive({workspaceId,entityId});return user.id;}});
 
     }

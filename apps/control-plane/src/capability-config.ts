@@ -70,7 +70,16 @@ function sourceAccessWrite(store:Store,workspaceId:string,entityId:string,oldSou
     if(!oldSourceId&&newSourceId&&saved.some(p=>p.sourceId===newSourceId))return;
     const keep=(r:DirectoryAccessRule)=>r.sourceId!==oldSourceId;
     const policies=saved.filter(p=>p.sourceId!==oldSourceId&&p.sourceId!==newSourceId);
-    if(newSourceId)policies.push({sourceId:newSourceId,mode:'allowlist',allow:[],deny:[],allowGroupMembers:true,revision:1});
+    let initialMode:DirectoryChannelPolicy['mode']='allowlist';
+    if(!oldSourceId&&newSourceId){
+      const connection=store.one<{provider:string}>("SELECT provider FROM employee_channel_connections WHERE workspace_id=? AND entity_id=? AND json_extract(record_json,'$.sourceId')=?",workspaceId,entityId,newSourceId);
+      const defaults=JSON.parse(store.one<{initial_channel_defaults_json:string}>('SELECT initial_channel_defaults_json FROM entities WHERE workspace_id=? AND id=?',workspaceId,entityId)?.initial_channel_defaults_json??'{}') as Record<string,string>;
+      if(connection&&defaults[connection.provider]==='denylist'){
+        initialMode='denylist';delete defaults[connection.provider];
+        store.run('UPDATE entities SET initial_channel_defaults_json=? WHERE workspace_id=? AND id=?',JSON.stringify(defaults),workspaceId,entityId);
+      }
+    }
+    if(newSourceId)policies.push({sourceId:newSourceId,mode:initialMode,allow:[],deny:[],allowGroupMembers:true,revision:1});
     store.run('INSERT INTO entity_directory_policies(entity_id,workspace_id,revision,allow_json,deny_json,allow_group_members,channel_policies_json) VALUES(?,?,?,?,?,?,?) ON CONFLICT(entity_id) DO UPDATE SET revision=excluded.revision,allow_json=excluded.allow_json,deny_json=excluded.deny_json,channel_policies_json=excluded.channel_policies_json',entityId,workspaceId,(row?.revision??0)+1,JSON.stringify((JSON.parse(row?.allow_json??'[]') as DirectoryAccessRule[]).filter(keep)),JSON.stringify((JSON.parse(row?.deny_json??'[]') as DirectoryAccessRule[]).filter(keep)),row?.allow_group_members??0,JSON.stringify(policies));
     if(!store.one("SELECT name FROM sqlite_master WHERE type='table' AND name='capability_packages'"))return;
     for(const row of store.all<{id:string;config_json:string}>('SELECT id,config_json FROM capability_packages WHERE workspace_id=? AND entity_id=?',workspaceId,entityId)){

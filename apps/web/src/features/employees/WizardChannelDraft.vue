@@ -48,7 +48,7 @@ async function verify() {
     if (selected === 'feishu' && !result.source.botId) { error.value = '未取得可信的机器人 open_id，请启用机器人能力并重新验证；App ID 不能代替机器人身份。'; removeDraft(result.draftId, base); return; }
     report.value = validation; draft.value = result;
     expiry = setTimeout(() => { discard(); error.value = '渠道草稿已过期，请重新验证。'; }, Math.max(0, result.expiresAt - Date.now()));
-    scopeNotice.value = selected === 'wecom' ? '新建默认空白名单，群内可用；私聊需加入白名单或切换全员 + 黑名单。首条真实消息自动确认身份。' : `已读取可见范围：${result.scope.departmentCount===null?'部门入口未披露':`${result.scope.departmentCount} 个部门入口`}、${result.scope.userCount===null?'直接用户入口未披露':`${result.scope.userCount} 个直接用户入口`}。`;
+    scopeNotice.value = selected === 'wecom' ? '新建数字员工首次接入默认全员 + 空黑名单，群内可用；换绑重置为空白名单。首条真实消息自动确认身份。' : `已读取可见范围：${result.scope.departmentCount===null?'部门入口未披露':`${result.scope.departmentCount} 个部门入口`}、${result.scope.userCount===null?'直接用户入口未披露':`${result.scope.userCount} 个直接用户入口`}。`;
   } catch (cause) { if (alive && !signal.aborted && generation === version && base === props.base) validationError(cause); }
   finally { if (alive && !signal.aborted && generation === version && base === props.base) busy.value = false; }
 }
@@ -58,12 +58,12 @@ onUnmounted(() => { alive = false; controller.abort(); clearTimeout(expiry); app
 <div class="channel-draft">
   <ChannelProviderTabs v-model="provider" :disabled="blocked">
     <template v-if="$slots.automation" #automation><slot name="automation" /></template>
-    <p class="field-note">先检查渠道配置，再配置能力包。三渠道新建默认空白名单、群内可用，能力包继承员工使用范围。飞书近期群消息上下文默认打开，跨群共享另行配置。最后确认创建才保存并启动连接。</p>
+    <p class="field-note">先检查渠道配置，再配置能力包。三渠道新建数字员工首次接入默认全员 + 空黑名单、群内可用，能力包继承员工使用范围。飞书近期群消息上下文默认打开，跨群共享另行配置。最后确认创建才保存并启动连接。</p>
     <WizardChannelGuide :report="report" :provider="provider" :ready="!configuring || !!draft" :busy="busy" :skipped="!configuring" :locked="blocked">
       <template #credentials>
         <NAlert v-if="!configuring" type="info">已跳过渠道连接，仅配置工作区平台用户。</NAlert>
         <NForm v-else @submit.prevent>
-          <NAlert v-if="provider === 'wecom'" type="info">仅需 BotID 和 Secret。新建默认空白名单，允许群成员在群内使用。</NAlert>
+          <NAlert v-if="provider === 'wecom'" type="info">仅需 BotID 和 Secret。新建数字员工首次接入默认全员 + 空黑名单，允许群成员在群内使用。</NAlert>
           <NFormItem :label="provider === 'wecom' ? 'BotID' : provider === 'feishu' ? 'App ID' : 'Client ID（AppKey）'"><NInput v-model:value="appId" :input-props="{ 'aria-label': '渠道应用 ID' }" :disabled="blocked" autocomplete="off" :maxlength="256" /></NFormItem>
           <p v-if="provider === 'feishu'" class="field-note">App ID 标识应用，不是机器人 open_id；机器人 open_id 由官方 API 读取，无需手填。</p>
           <NFormItem :label="provider === 'wecom' ? 'Secret' : provider === 'feishu' ? 'App Secret' : 'Client Secret（AppSecret）'"><NInput v-model:value="appSecret" :input-props="{ 'aria-label': '渠道应用 Secret' }" type="password" autocomplete="new-password" :disabled="blocked" :maxlength="8192" /></NFormItem>

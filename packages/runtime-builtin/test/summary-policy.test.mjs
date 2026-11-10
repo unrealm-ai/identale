@@ -74,9 +74,9 @@ for(const protocol of ['chat_completions','openai_responses','anthropic_messages
  });
 }
 
-test('Responses filter or unknown incomplete reason has bounded local retries without semantic compression',async()=>{
+test('Responses filter or unknown incomplete reason does not retry locally or trigger semantic compression',async()=>{
  for(const reason of ['content_filter',undefined]){let calls=0;const client=new OpenAICompatibleModelClient({protocol:'openai_responses',endpoint:'https://fixture.invalid/v1',model:'synthetic-summary',secretRef:'synthetic-reference'},async()=> 'synthetic-key',async()=>{calls++;return Response.json({...wire('openai_responses','partial',true),incomplete_details:reason?{reason}:undefined});});
-  await assert.rejects(summarizeHistory(request(client)));assert.equal(calls,3);
+  await assert.rejects(summarizeHistory(request(client)));assert.equal(calls,1);
  }
 });
 

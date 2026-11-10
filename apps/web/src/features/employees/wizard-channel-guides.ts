@@ -37,7 +37,7 @@ export const wizardChannelGuides: Record<DirectoryProvider, WizardChannelGuide> 
       '创建后可在渠道使用范围中用机器人凭据搜索成员，配置允许或排除名单。',
     ], action: { title: '打开企业微信管理后台', url: consoles.wecom } },
     { id: 'validate', title: '检查机器人配置', location: '检查临时草稿 → 确认创建后启动长连接', paragraphs: [
-      '新建默认空白名单，群内可用；私聊需加入白名单或切换全员 + 黑名单。连接在线后，首条通过校验的真实消息会自动确认机器人身份。',
+      '新建数字员工首次接入默认全员 + 空黑名单，群内可用；换绑重置为空白名单。连接在线后，首条通过校验的真实消息会自动确认机器人身份。',
       '当前不支持群历史或会议材料。',
     ], figures: [diagram('credentials-to-draft', '机器人凭据先进入临时草稿，最后确认创建才保存。')] },
   ] },

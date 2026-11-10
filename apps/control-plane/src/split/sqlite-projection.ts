@@ -72,7 +72,7 @@ export interface ConfigurationTable {name: string; sql: string; rows: readonly R
 export function replaceConfigurationTables(db: DatabaseSync, snapshot: ConfigurationRows | readonly ConfigurationTable[]): void {
   if (Array.isArray(snapshot)) {replaceConfigurationCatalog(db, snapshot);return;}
   const rows = snapshot as ConfigurationRows;
-  const forbidden = new Set(['credentials', 'sessions', 'invitations']);
+  const forbidden = new Set(['credentials', 'sessions', 'invitations', 'feishu_app_registrations', 'platform_schema_migrations']);
   const names = Object.keys(rows);
   for (const name of names) {
     if (tableOwner(name) !== 'platform' || forbidden.has(name)) throw new Error(`snapshot_table_forbidden:${name}`);
@@ -100,7 +100,7 @@ export function replaceConfigurationTables(db: DatabaseSync, snapshot: Configura
  * complete TEMP referential integrity is checked before committing instead.
  */
 function replaceConfigurationCatalog(db: DatabaseSync, catalog: readonly ConfigurationTable[]): void {
-  const forbidden = new Set(['credentials', 'sessions', 'invitations']);
+  const forbidden = new Set(['credentials', 'sessions', 'invitations', 'feishu_app_registrations', 'platform_schema_migrations']);
   if (!db.prepare("SELECT 1 FROM temp.sqlite_master WHERE type='table' AND name='entities'").get()) throw new Error('snapshot_wrong_store');
   if (db.isTransaction) throw new Error('snapshot_nested_catalog_transaction');
   const seen = new Set<string>();

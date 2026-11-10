@@ -24,7 +24,7 @@ async function setup(t){
 }
 test('source PATCH changes only selected allow rules and preserves other source and all deny rules',async t=>{
  const f=await setup(t),a=f.rule(f.a),b=f.rule(f.b),deny=f.rule(f.a,'denied');const initial=await f.call('PUT',f.eb+'/directory-access',{allow:[a,b],deny:[deny],allowGroupMembers:true});assert.equal(initial.statusCode,200,initial.body);
- const replacement=f.rule(f.a,'department-a','department');const saved=await f.call('PATCH',f.eb+'/directory-access',{sourceId:f.a.sourceId,allow:[replacement],expectedRevision:initial.json().revision,allowGroupMembers:false});assert.equal(saved.statusCode,200,saved.body);assert.deepEqual(saved.json().allow,[b,replacement]);assert.deepEqual(saved.json().deny,[deny]);assert.equal(saved.json().allowGroupMembers,false);assert.equal(saved.json().revision,initial.json().revision+1);
+ const replacement=f.rule(f.a,'department-a','department');const saved=await f.call('PATCH',f.eb+'/directory-access',{sourceId:f.a.sourceId,allow:[replacement],expectedRevision:initial.json().revision,allowGroupMembers:false});assert.equal(saved.statusCode,200,saved.body);assert.deepEqual(saved.json().allow,[b,replacement]);assert.deepEqual(saved.json().deny,[deny]);assert.equal(saved.json().allowGroupMembers,true);assert.equal(saved.json().channelPolicies.find(p=>p.sourceId===f.a.sourceId).allowGroupMembers,false);assert.equal(saved.json().channelPolicies.find(p=>p.sourceId===f.b.sourceId).allowGroupMembers,true);assert.equal(saved.json().revision,initial.json().revision+1);
 });
 test('source PATCH is not blocked by removed connection references and cannot transfer them to a replacement',async t=>{
  const f=await setup(t),a=f.rule(f.a),b=f.rule(f.b),deny=f.rule(f.b,'old-deny');const initial=(await f.call('PUT',f.eb+'/directory-access',{allow:[a,b],deny:[deny]})).json();assert.equal(f.repo.remove(f.b),true);
@@ -41,7 +41,7 @@ test('source PATCH rejects cross-employee sources, mixed rules, malformed subjec
  {sourceId:f.a.sourceId,allow:[{...f.rule(f.a),subjectId:'forged'}],expectedRevision:0},
  {sourceId:f.b.sourceId,allow:[],expectedRevision:0,allowGroupMembers:'true'},
  {sourceId:f.a.sourceId,allow:[]},
- {sourceId:f.a.sourceId,allow:[],expectedRevision:0,deny:[]},
+ {sourceId:f.a.sourceId,allow:[],expectedRevision:0,deny:[f.rule(f.b)]},
  ]){const result=await f.call('PATCH',f.eb+'/directory-access',body);assert.equal(result.statusCode,400,result.body);}assert.equal((await f.call('GET',f.eb+'/directory-access')).json().revision,0);
 });
 test('source PATCH requires current workspace management access and authentication',async t=>{
@@ -50,7 +50,7 @@ test('source PATCH requires current workspace management access and authenticati
 test('source PATCH preserves global group switch on non-Feishu writes and legacy PUT remains compatible',async t=>{
  const f=await setup(t);const initial=(await f.call('PUT',f.eb+'/directory-access',{allow:[f.rule(f.a)],deny:[],allowGroupMembers:true})).json();const result=await f.call('PATCH',f.eb+'/directory-access',{sourceId:f.b.sourceId,allow:[f.rule(f.b)],expectedRevision:initial.revision});assert.equal(result.statusCode,200,result.body);assert.equal(result.json().allowGroupMembers,true);const legacy=await f.call('PUT',f.eb+'/directory-access',{allow:[],deny:[],allowGroupMembers:false,expectedRevision:result.json().revision});assert.equal(legacy.statusCode,200,legacy.body);
 });
-test('source PATCH keeps the existing overall rule limit even when untouched sources fill it',async t=>{
+test('source PATCH applies rule limits per source and preserves a full untouched source',async t=>{
  const f=await setup(t),existing=Array.from({length:100},(_,i)=>f.rule(f.b,'person-'+i));f.store.run('INSERT INTO entity_directory_policies(entity_id,workspace_id,revision,allow_json,deny_json,allow_group_members) VALUES(?,?,?,?,?,?)',f.a.entityId,f.owner.workspace.id,1,JSON.stringify(existing),'[]',0);
- const result=await f.call('PATCH',f.eb+'/directory-access',{sourceId:f.a.sourceId,allow:[f.rule(f.a)],expectedRevision:1});assert.equal(result.statusCode,400,result.body);const current=(await f.call('GET',f.eb+'/directory-access')).json();assert.equal(current.revision,1);assert.deepEqual(current.allow,existing);
+ const result=await f.call('PATCH',f.eb+'/directory-access',{sourceId:f.a.sourceId,allow:[f.rule(f.a)],expectedRevision:1});assert.equal(result.statusCode,200,result.body);const current=(await f.call('GET',f.eb+'/directory-access')).json();assert.equal(current.revision,2);assert.deepEqual(current.allow,[...existing,f.rule(f.a)]);const oversized=await f.call('PATCH',f.eb+'/directory-access',{sourceId:f.a.sourceId,allow:Array.from({length:101},(_,i)=>f.rule(f.a,'person-'+i)),expectedRevision:2});assert.equal(oversized.statusCode,400,oversized.body);assert.deepEqual((await f.call('GET',f.eb+'/directory-access')).json(),current);
 });

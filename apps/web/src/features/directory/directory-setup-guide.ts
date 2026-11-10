@@ -46,7 +46,7 @@ export const directorySetupGuides: Record<DirectoryProvider, DirectorySetupGuide
         '为每位数字员工创建独立机器人，填写 BotID 和 Secret。服务器使用官方 SDK 主动建立唯一 WebSocket，同一连接收发，无需公网回调地址。',
       ], sources: [{ title: '企业微信官方智能机器人 SDK', url: 'https://github.com/WecomTeam/aibot-node-sdk' }] },
       { id: 'confirm', title: '保存配置并发送首条消息', location: '本员工 → 渠道连接 / 使用范围', paragraphs: [
-        '新建默认空白名单，群内可用；私聊需加入白名单或切换全员 + 黑名单。连接在线后，首条通过校验的真实私聊或群定向消息自动确认机器人身份。',
+        '新建数字员工首次接入默认全员 + 空黑名单，群内可用；换绑重置为空白名单。连接在线后，首条通过校验的真实私聊或群定向消息自动确认机器人身份。',
         '可按本渠道设置全部使用者、仅允许名单或排除名单。名单使用机器人成员搜索，按姓名、拼音或别名查询，一次最多 10 个关键词。部门路径仅供区分同名人员。',
         '能力包权限只会进一步收窄员工使用范围，不会扩大本渠道授权。',
       ] },

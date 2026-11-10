@@ -165,3 +165,68 @@ test('deployment-approved resources travel as safe metadata and participate in r
   const invalid = await f.app.inject({ url: '/internal/config/snapshot', headers: auth });
   assert.equal(invalid.statusCode, 503); assert.equal(invalid.body.includes('MUST_NOT_EXPORT'), false);
 });
+
+test('independent WeCom identity bindings project to runtime memory and refresh with channel revision',async t=>{
+ const f=await fixture(t);f.platform.run('INSERT INTO wecom_identity_bindings VALUES(?,?,?,?,?,?)','synthetic-wecom','source-A',1,'directory-user','callback-user',null);
+ f.platform.run('DELETE FROM combined_schema_migrations WHERE version=2');
+ new Store(f.platform.databasePath).close();
+ const poller=new ConfigurationPoller({store:f.runtime,baseUrl:'http://127.0.0.1:9999',token,fetch:f.fetch,now:f.clock});
+ assert.equal(await poller.poll(),true,JSON.stringify(poller.status));
+ assert.equal(f.runtime.one('SELECT callback_user_id FROM wecom_identity_bindings WHERE connection_id=?','synthetic-wecom').callback_user_id,'callback-user');
+ assert.equal(f.runtime.one("SELECT name FROM main.sqlite_master WHERE name='wecom_identity_bindings'"),undefined,'bindings remain configuration projection, not runtime durable database');
+ f.platform.run('DELETE FROM wecom_identity_bindings WHERE connection_id=?','synthetic-wecom');
+ assert.equal(await poller.poll(),true);
+ assert.equal(f.runtime.one('SELECT user_id FROM wecom_identity_bindings WHERE connection_id=?','synthetic-wecom'),undefined,'withdrawn identity disappears on next coherent projection');
+});
+
+function seedChallenges(store,count){
+ for(let i=0;i<count;i++)store.run('INSERT INTO wecom_member_challenges VALUES(?,?,?,?,?,?,?,?,?,?)','ch','source',1,'request-'+i,'person-'+i,String(i).padStart(64,'0'),'pending',86400000,86400000,JSON.stringify({requestId:'request-'+i,phraseHash:String(i).padStart(64,'0')}));
+}
+test('verification challenges use bounded pages, remain memory-only and never project encrypted code material',async t=>{
+ const f=await fixture(t);seedChallenges(f.platform,251);
+ const manifest=(await f.app.inject({url:'/internal/config/snapshot',headers:auth})).json();
+ const table=manifest.tables.find(t=>t.name==='wecom_member_challenges');assert.equal(table.rows.length,0);assert.equal(table.page.count,251);
+ assert.equal(manifest.tables.some(t=>t.name==='wecom_member_verification_requests'),false);
+ const requests=[];const poller=new ConfigurationPoller({store:f.runtime,baseUrl:'http://127.0.0.1:9999',token,fetch:async(...args)=>{const response=await f.fetch(...args);if(String(args[0]).endsWith('challenge-page'))requests.push(await response.clone().json());return response;},now:f.clock});
+ assert.equal(await poller.poll(),true,JSON.stringify(poller.status));assert.deepEqual(requests.map(p=>p.rows.length),[100,100,51]);
+ assert.equal(f.runtime.one('SELECT count(*) n FROM wecom_member_challenges').n,251);assert.equal(f.runtime.one("SELECT name FROM main.sqlite_master WHERE name='wecom_member_challenges'"),undefined);
+ assert.equal((await f.app.inject({method:'POST',url:'/internal/config/challenge-page',payload:{epoch:manifest.epoch,offset:0}})).statusCode,401);
+ assert.equal((await f.app.inject({method:'POST',url:'/internal/config/challenge-page',headers:auth,payload:{epoch:manifest.epoch,offset:1}})).statusCode,400);
+ poller.stop();
+});
+test('challenge paging rejects changed generations and preserves prior coherent configuration',async t=>{
+ const f=await fixture(t);seedChallenges(f.platform,101);let mutate=false;
+ f.platform.run('DELETE FROM combined_schema_migrations WHERE version=2');
+ new Store(f.platform.databasePath).close();
+ const poller=new ConfigurationPoller({store:f.runtime,baseUrl:'http://127.0.0.1:9999',token,fetch:async(...args)=>{const response=await f.fetch(...args);if(mutate&&String(args[0]).endsWith('challenge-page')){mutate=false;f.platform.run("DELETE FROM wecom_member_challenges WHERE request_id='request-0'");}return response;},now:f.clock});
+ assert.equal(await poller.poll(),true);const before=poller.status.epoch;
+ f.platform.run("UPDATE entities SET name='Changed' WHERE id='e'");mutate=true;
+ assert.equal(await poller.poll(),false);assert.equal(poller.status.epoch,before);assert.equal(f.runtime.one('SELECT count(*) n FROM wecom_member_challenges').n,101);assert.equal(f.runtime.one("SELECT name FROM entities WHERE id='e'").name,'Employee');
+ assert.equal(await poller.poll(),true);assert.equal(f.runtime.one('SELECT count(*) n FROM wecom_member_challenges').n,100);poller.stop();
+});
+test('challenge paging rejects corrupt pages without partial apply',async t=>{
+ const f=await fixture(t);seedChallenges(f.platform,101);
+ f.platform.run('DELETE FROM combined_schema_migrations WHERE version=2');
+ new Store(f.platform.databasePath).close();
+ const poller=new ConfigurationPoller({store:f.runtime,baseUrl:'http://127.0.0.1:9999',token,fetch:async(...args)=>{const response=await f.fetch(...args);if(String(args[0]).endsWith('challenge-page')){const page=await response.json();page.rows[0].user_id='tampered';return new Response(JSON.stringify(page));}return response;},now:f.clock});
+ assert.equal(await poller.poll(),false);assert.equal(poller.ready,false);poller.stop();
+});
+
+test('V2 removes retired directory storage before runtime configuration export',async t=>{
+ const f=await fixture(t);const {RETAINED_LEGACY_SCHEMA,RETAINED_DIRECTORY_COLUMN}=await import('../dist/schema-migrations/retained-legacy.js');
+ f.platform.db.exec(RETAINED_LEGACY_SCHEMA.find(o=>o.name==='employee_channel_directory_credentials').sql);
+ f.platform.db.exec('ALTER TABLE employee_channel_connections ADD COLUMN '+RETAINED_DIRECTORY_COLUMN);
+ f.platform.db.exec(RETAINED_LEGACY_SCHEMA.find(o=>o.type==='index').sql);
+ f.platform.run("INSERT INTO employee_channel_directory_credentials VALUES('retired','w','wecom','corp','agent',1,'RETIRED_PRIVATE_RECORD')");
+ f.platform.run("UPDATE employee_channel_connections SET directory_credential_id='retired' WHERE id='ch'");
+ f.platform.run('DELETE FROM combined_schema_migrations WHERE version=2');
+ new Store(f.platform.databasePath).close();
+ const poller=new ConfigurationPoller({store:f.runtime,baseUrl:'http://127.0.0.1:9999',token,fetch:f.fetch,now:f.clock});
+ assert.equal(await poller.poll(),true,JSON.stringify(poller.status));
+ const snapshot=(await f.app.inject({url:'/internal/config/snapshot',headers:auth})).json();
+ assert.equal(JSON.stringify(snapshot).includes('directory_credential_id'),false);
+ assert.equal(JSON.stringify(snapshot).includes('RETIRED_PRIVATE_RECORD'),false);
+ assert.equal(f.runtime.all('PRAGMA temp.table_info(employee_channel_connections)').some(c=>c.name==='directory_credential_id'),false);
+ assert.equal(f.platform.one("SELECT 1 FROM sqlite_master WHERE name='employee_channel_directory_credentials'"),undefined);
+ assert.equal(f.platform.one("SELECT app_id FROM employee_channel_connections WHERE id='ch'").app_id,'app');
+});

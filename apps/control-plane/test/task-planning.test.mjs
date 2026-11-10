@@ -24,7 +24,7 @@ class MockRuntime {
 function fixture(t,{runtimeConfigured=true,modelConfigured=true}={}){
   const dir=mkdtempSync(join(tmpdir(),'dentity-planning-')),path=join(dir,'test.sqlite'),store=new Store(path);let now=1000;
   t.after(()=>{store.close();rmSync(dir,{recursive:true,force:true});});
-  store.db.exec("INSERT INTO users VALUES('u','user','Owner','active'),('guest','guest','Guest','active'); INSERT INTO workspaces VALUES('w','Workspace','u','active'),('other','Other','guest','active'); INSERT INTO members VALUES('m','w','u','owner','active'),('g','w','guest','member','active'); INSERT INTO entities(id,workspace_id,name,owner_member_id,created_by_member_id,own_web_use,web_use_user_id,interaction_runtime) VALUES('e','w','Employee','m','m',1,'u','builtin-interaction');");
+  store.db.exec("INSERT INTO users VALUES('u','user','Owner','active'),('guest','guest','Guest','active'); INSERT INTO workspaces VALUES('w','Workspace','u','active'),('other','Other','guest','active'); INSERT INTO members(id,workspace_id,user_id,role,status) VALUES('m','w','u','owner','active'),('g','w','guest','member','active'); INSERT INTO entities(id,workspace_id,name,owner_member_id,created_by_member_id,own_web_use,web_use_user_id,interaction_runtime) VALUES('e','w','Employee','m','m',1,'u','builtin-interaction');");
   const journal=new JsonlJournal({root:join(dir,'journal'),ownerId:'fixture',serialize:fn=>store.transaction(fn)}),conversations=new SqliteConversationRepository(store,journal,()=>now);conversations.initialize(0);
   const scope={workspaceId:'w',entityId:'e',userId:'u'},context={...scope,conversationId:'c'},other={...scope,conversationId:'c2'};
   conversations.create('c',scope,'c-op',now,'real',0);conversations.create('c2',scope,'c2-op',now,'real',0);

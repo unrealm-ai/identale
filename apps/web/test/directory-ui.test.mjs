@@ -14,7 +14,7 @@ const window = new Window({ url: 'http://127.0.0.1:5173/' });
 for (const name of ['window', 'document', 'navigator', 'location', 'history', 'localStorage', 'Node', 'ShadowRoot', 'Document', 'Element', 'HTMLElement', 'SVGElement', 'HTMLDialogElement', 'Event', 'MouseEvent', 'KeyboardEvent', 'PointerEvent', 'FocusEvent', 'InputEvent', 'Image', 'HTMLInputElement', 'HTMLTextAreaElement', 'getComputedStyle', 'MutationObserver', 'ResizeObserver', 'requestAnimationFrame', 'cancelAnimationFrame']) Object.defineProperty(globalThis, name, { value: name === 'window' ? window : window[name], configurable: true });
 const { createApp, h, reactive, nextTick } = await import('vue');
 const bundle = await mkdtemp(resolve('apps/web/.directory-ui-test-'));
-const paths = { materials:'apps/web/src/features/business-resources/TaskMaterialAuthorization.vue', business: 'apps/web/src/features/business-resources/BusinessResourceConfiguration.vue', requirements: 'apps/web/src/features/employees/ChannelSetupRequirements.vue', draft: 'apps/web/src/features/employees/WizardChannelDraft.vue', wizard: 'apps/web/src/features/employees/EntityWizard.vue', guide: 'apps/web/src/features/directory/DirectorySetupGuide.vue', settings: 'apps/web/src/features/employees/ChannelConnections.vue', picker: 'apps/web/src/features/directory/DirectoryRulePicker.vue', access: 'apps/web/src/features/employees/AccessSettings.vue' };
+const paths = { sync:'apps/web/src/features/directory/DirectorySyncStatus.vue', materials:'apps/web/src/features/business-resources/TaskMaterialAuthorization.vue', business: 'apps/web/src/features/business-resources/BusinessResourceConfiguration.vue', requirements: 'apps/web/src/features/employees/ChannelSetupRequirements.vue', draft: 'apps/web/src/features/employees/WizardChannelDraft.vue', wizard: 'apps/web/src/features/employees/EntityWizard.vue', guide: 'apps/web/src/features/directory/DirectorySetupGuide.vue', settings: 'apps/web/src/features/employees/ChannelConnections.vue', picker: 'apps/web/src/features/directory/DirectoryRulePicker.vue', access: 'apps/web/src/features/employees/AccessSettings.vue' };
 const components = {};
 for (const [name, path] of Object.entries(paths)) {
   const outfile = join(bundle, `${name}.mjs`);
@@ -39,7 +39,7 @@ async function mount(t, name, initial, handler = async () => { throw new Error('
     assert.ok(String(url).startsWith('/api/'), 'Only relative local fixture API routes are permitted');
     const request = { url: String(url), method: options.method ?? 'GET', body: options.body ? JSON.parse(options.body) : undefined };
     requests.push(request);
-    const result = name==='settings'&&request.url.endsWith('/group-sharing')?{revision:0,rules:[]}:name==='settings'&&request.url.endsWith('/group-sharing/status')?{appliedRevision:0}:name==='settings' && request.url === '/api/business-resources/configuration' ? {configured:false,reason:'business_oauth_not_configured'} : name === 'settings' && request.method==='GET' && request.url.endsWith('/directory-access')
+    const result = name==='settings'&&request.url.endsWith('/registration')?{registration:null,preset:{name:'合成员工',description:''},permissions:{version:'v1',scopes:[],events:[]}}:name==='settings'&&request.url.endsWith('/group-sharing')?{revision:0,rules:[]}:name==='settings'&&request.url.endsWith('/group-sharing/status')?{appliedRevision:0}:name==='settings' && request.url === '/api/business-resources/configuration' ? {configured:false,reason:'business_oauth_not_configured'} : name === 'settings' && request.method==='GET' && request.url.endsWith('/directory-access')
       ? {allow:[],deny:[],allowGroupMembers:false,revision:0}
       : name === 'settings' && request.url.endsWith('/runtime-status')
       ? await (runtimeHandler ? runtimeHandler(request) : { observedAt: 1792756800000, employee: { channels: latestConnections } })
@@ -48,7 +48,7 @@ async function mount(t, name, initial, handler = async () => { throw new Error('
     return new Response(JSON.stringify(result?.data ?? result), { status: typeof result?.status === 'number' ? result.status : 200, headers: { 'content-type': 'application/json' } });
   };
   document.body.innerHTML = '<div id="app"></div>';
-  const app = createApp({ render: () => h(components[name], props) }); app.mount('#app'); await flush();if(name==='settings'&&initial.canManage){await until(()=>!!document.querySelector('.connection-list'));const b=[...document.querySelectorAll('.connection-list button')].find(b=>b.textContent.trim()==='查看此连接')??[...document.querySelectorAll('.connection-list button')].find(b=>b.textContent.trim()==='添加渠道连接');if(b){b.click();await flush();}const details=document.querySelector('.channel-guide-toggle');if(details)details.open=true;}if(name==='wizard'){const b=[...document.querySelectorAll('button')].find(b=>b.textContent.trim()==='展开渠道、工作能力与自动运行配置');if(b){b.click();await flush();}} if(name==='settings'&&document.querySelector('.channel-guide-dots button[data-step=validate]'))await channelCard('validate');
+  const app = createApp({ render: () => h(components[name], props) }); app.mount('#app'); await flush();if(name==='settings'&&initial.canManage){await until(()=>!!document.querySelector('.connection-list'));const b=[...document.querySelectorAll('.connection-list button')].find(b=>b.textContent.trim()==='查看此连接')??[...document.querySelectorAll('.connection-list button')].find(b=>b.textContent.trim()==='添加渠道连接');if(b){b.click();await flush();}const manual=[...document.querySelectorAll('button')].find(b=>b.textContent.trim()==='手动接入');if(manual){manual.click();await flush();}const details=document.querySelector('.channel-guide-toggle');if(details)details.open=true;}if(name==='wizard'){const b=[...document.querySelectorAll('button')].find(b=>b.textContent.trim()==='展开渠道、工作能力与自动运行配置');if(b){b.click();await flush();}} if(name==='settings'&&document.querySelector('.channel-guide-dots button[data-step=validate]'))await channelCard('validate');
   t.after(() => { app.unmount(); document.body.innerHTML = ''; });
   return { props, requests, app, events };
 }
@@ -101,7 +101,7 @@ test('revalidation and disabling use current CAS revision, failures reread autho
   assert.deepEqual(env.requests.find(item => item.url.endsWith('/settings')).body, { expectedRevision: 2, enabled: false });
 });
 
-test('picker reads only on demand, paginates, preserves opaque references and defaults descendants false', async t => {
+test('picker reads snapshot on open, paginates, preserves opaque references and defaults descendants false', async t => {
   let selected = [];
   const env = await mount(t, 'picker', { base, label: '允许', subjects: subjects(), rules: selected, 'onUpdate:rules': value => { selected = value; env.props.rules = value; } }, async request => {
     const url = new URL(request.url, 'http://localhost');
@@ -109,7 +109,7 @@ test('picker reads only on demand, paginates, preserves opaque references and de
     if (url.searchParams.has('parentId')) { assert.equal(url.searchParams.get('parentId'), department.externalId); return page([]); }
     return url.searchParams.has('cursor') ? page([{ ...department, subjectId: 'opaque-second', displayName: '第二部门' }]) : page([department], { exhausted: false, nextCursor: 'page-2' });
   });
-  assert.equal(env.requests.length, 0); await click('查询当前目录'); await until(() => text().includes('研发部'));
+  await until(() => text().includes('研发部')); assert.equal(env.requests.length,1);
   await click('选择部门'); assert.deepEqual(selected, [{ sourceId: 'source-1', kind: 'department', subjectId: department.subjectId, includeDescendants: false, conversationKinds: ['private'] }]);
   await click('加载下一页'); await until(() => text().includes('第二部门')); assert.ok(env.requests[1].url.includes('cursor=page-2'));
   await click('进入部门'); await until(() => env.requests.length === 3); assert.ok(text().includes('返回上级部门'));
@@ -120,13 +120,13 @@ test('picker rejects changed application scope and leaves old rules removable', 
   const rule = { sourceId: 'retired-source', kind: 'department', subjectId: 'old-opaque-reference', conversationKinds: ['private'], includeDescendants: false };
   let selected = [rule];
   const env = await mount(t, 'picker', { base, label: '拒绝', subjects: subjects(), rules: selected, 'onUpdate:rules': value => { selected = value; env.props.rules = value; } }, async () => page([department], { sourceId: 'changed-source' }));
-  assert.ok(text().includes('来源不可用')); await click('查询当前目录'); await until(() => text().includes('连接来源已改变'));
+  assert.ok(text().includes('来源不可用')); await click('搜索'); await until(() => text().includes('连接来源已改变'));
   assert.equal(document.querySelector('.directory-option'), null); await click('移除此规则'); assert.deepEqual(selected, []);
 });
 
 test('picker fails closed on transport failure and repeated pagination cursor', async t => {
   const env = await mount(t, 'picker', { base, label: '允许', subjects: subjects(), rules: [] }, async () => page([department], { exhausted: false, nextCursor: 'loop' }));
-  await click('查询当前目录'); await until(() => text().includes('研发部')); await click('加载下一页');
+  await click('搜索'); await until(() => text().includes('研发部')); await click('加载下一页');
   await until(() => text().includes('目录分页游标无效')); assert.equal(document.querySelector('.directory-option'), null);
   env.props.subjects = subjects(connection({ status: 'invalid' })); await flush(); assert.ok(text().includes('没有可用的员工渠道目录')); assert.equal(button('查询当前目录').disabled, true);
 });
@@ -188,7 +188,7 @@ test('explicit unbind asks confirmation and releases the current CAS binding bef
   assert.equal(env.requests.some(r => r.method === 'DELETE'), false);
   await click('解除渠道绑定'); await click('确认解除绑定'); await until(() => text().includes('渠道绑定已解除'));
   assert.deepEqual(env.requests.find(r => r.method === 'DELETE').body, { expectedRevision: 1 });
-  input('渠道应用 ID', 'replacement-app'); input('渠道应用密钥', 'replacement-fixture-secret'); await click('验证并保存渠道连接');
+  await click('手动接入'); input('渠道应用 ID', 'replacement-app'); input('渠道应用密钥', 'replacement-fixture-secret'); await click('验证并保存渠道连接');
   await until(() => env.requests.some(r => r.method === 'PUT')); assert.equal(env.requests.find(r => r.method === 'PUT').body.expectedRevision, 0);
 });
 
@@ -237,7 +237,7 @@ test('Feishu context settings preserve enabled status with CAS and remove static
     current = connection({ revision: 2, context: { historyEnabled: false, groupListenEnabled:request.body.groupListenEnabled, meetingRefs: [] } }); return current;
   });
   await until(() => !!document.querySelector('.channel-context-form'));
-  assert.deepEqual(new Set(env.requests.map(r=>r.url)),new Set([`/api${base}/channels`,`/api${base}/runtime-status`,`/api${base}/directory-access`,`/api${base}/group-sharing`,`/api${base}/group-sharing/status`,'/api/business-resources/configuration'])); await click('群上下文范围');assert.ok(text().includes('资料引用'));await click('群上下文范围');assert.ok(document.querySelector('.channel-context-form textarea[aria-label="群聊触发关键词"]'));assert.ok(text().includes('普通群消息接收权限尚未验证'));
+  assert.deepEqual(new Set(env.requests.map(r=>r.url)),new Set([`/api${base}/channels`,`/api${base}/channels/feishu/registration`,`/api${base}/runtime-status`,`/api${base}/directory-access`,`/api${base}/group-sharing`,`/api${base}/group-sharing/status`,'/api/business-resources/configuration'])); await click('群上下文范围');assert.ok(text().includes('资料引用'));await click('群上下文范围');assert.ok(document.querySelector('.channel-context-form textarea[aria-label="群聊触发关键词"]'));assert.ok(text().includes('普通群消息接收权限尚未验证'));
   document.querySelector('.channel-context-form .n-checkbox').click();
   await click('保存'); await until(() => env.requests.some(item => item.method === 'PUT'));
   assert.deepEqual(env.requests.find(item => item.method === 'PUT').body, { enabled: true, expectedRevision: 1, groupListenEnabled: true, groupTriggerKeywords:[] });
@@ -324,7 +324,7 @@ test('DingTalk submits only supported credentials and switching back clears secr
   input('渠道应用 ID', 'ding-fixture'); input('渠道应用密钥', 'ding-fixture-secret'); await click('验证并保存渠道连接');
   const saved = env.requests.find(item => item.method === 'PUT'); assert.ok(saved.url.endsWith('/dingtalk')); assert.deepEqual(saved.body, { appId: 'ding-fixture', appSecret: 'ding-fixture-secret', expectedRevision: 0, replaceSource: false });
   input('渠道应用密钥', 'unsent-ding-secret');
-  await providerTab('飞书');await click('放弃策略修改并切换');
+  await providerTab('飞书');await click('放弃策略修改并切换');await click('手动接入');
   assert.equal(document.querySelector('input[aria-label="渠道应用密钥"]').value, '');
   assert.equal(document.querySelector('input[aria-label="回调加密密钥"]'), null); assert.equal(document.querySelector('input[aria-label="回调校验 Token"]'), null);
 });
@@ -369,7 +369,7 @@ test('WeCom employee selection keeps unsupported contexts absent and waits for a
   assert.equal(document.querySelector('[aria-label="读取当前群历史"]'), null);
   assert.equal(document.querySelector('[aria-label="明确的 Minutes token"]'), null);
   const allowedReads = new Set(['/api/business-resources/configuration', `/api${base}/channels`, `/api${base}/runtime-status`, `/api${base}/channels/wecom/directory-credentials`, `/api${base}/directory-access`]);
-  assert.ok(env.requests.every(item => item.method === 'GET' && allowedReads.has(item.url)), 'Only this employee’s channel configuration, runtime observation and WeCom directory choices may be read');
+  assert.ok(env.requests.every(item => (item.method === 'GET' && allowedReads.has(item.url)) || (item.method==='POST' && item.url.endsWith('/wecom/member-search') && item.body.keywords.length===0)), 'Only this employee’s channel configuration, runtime observation and WeCom directory choices may be read');
   assert.equal(env.requests.filter(item => item.url === `/api${base}/runtime-status`).length, 1, 'Connection status must be read from the runtime observation endpoint');
   assert.ok(!text().includes('CorpID'));assert.ok(!text().includes('可信 IP'));
 });
@@ -380,7 +380,7 @@ test('WeCom member reads separate statuses without directory-management endpoint
   assert.ok(!text().includes('目录关联：'));
   assert.equal(document.querySelector('.wecom-directory-binding'), null);
   const allowedReads = new Set(['/api/business-resources/configuration', `/api${base}/channels`, `/api${base}/runtime-status`]);
-  assert.ok(env.requests.every(item => item.method === 'GET' && allowedReads.has(item.url)), 'A read-only member must not access directory-management or mutation endpoints');
+  assert.ok(env.requests.every(item => (item.method === 'GET' && allowedReads.has(item.url)) || (item.method==='POST' && item.url.endsWith('/wecom/member-search') && item.body.keywords.length===0)), 'A read-only member must not access directory-management or mutation endpoints');
   assert.equal(env.requests.filter(item => item.url === `/api${base}/runtime-status`).length, 1, 'A member may read the same employee’s runtime observation');
 });
 
@@ -481,7 +481,7 @@ test('DingTalk requirements separate Stream receive, proactive send and scoped d
 
 test('WeCom requirements use only robot credentials and default effective-message access',async t=>{
  const env=await mount(t,'requirements',{provider:'wecom'});
- for(const value of ['BotID / Secret','新建默认空白名单，群内可用','私聊需加入白名单','首条通过校验的真实消息自动确认身份'])assert.ok(text().includes(value),value);
+ for(const value of ['BotID / Secret','新建数字员工首次接入默认全员 + 空黑名单，群内可用','换绑重置为空白名单','首条通过校验的真实消息自动确认身份'])assert.ok(text().includes(value),value);
  assert.equal(env.requests.length,0);assert.equal(document.querySelector('.channel-guide-dots'),null);
 });
 
@@ -534,7 +534,7 @@ test('business authorization setup displays actual callback and fixed scopes wit
  assert.ok(text().includes('https://fixture.invalid/api/business-resources/feishu/callback'));
  assert.ok(text().includes('不代表账号已授权'));
  assert.equal(document.querySelector('input'),null);assert.equal(document.querySelector('a'),null);
- assert.ok(env.requests.every(request=>request.method==='GET'));
+ assert.ok(env.requests.every(request=>request.method==='GET'||request.url.endsWith('/wecom/member-search')&&request.body.keywords.length===0));
  env.props.provider='dingtalk';await flush();assert.ok(text().includes('可信身份关联尚未接通'));assert.ok(!text().includes('原型声明的只读权限'));
 });
 
@@ -569,7 +569,7 @@ test('application preparation distinguishes saved states without inventing scope
  const items=[{assetId:'doc',kind:'document',provider:'feishu',accessMode:'application',reads:[{kind:'content',state:'no_permission',reason:'business_resource_authorization_required'}]},{assetId:'minutes',kind:'minutes',provider:'feishu',accessMode:'application',reads:[{kind:'summary',state:'ready'},{kind:'transcript',state:'pending'}]},{assetId:'denied',kind:'document',provider:'feishu',accessMode:'application',reads:[{kind:'content',state:'no_permission',reason:'provider_permission_denied'}]},{assetId:'wecom',kind:'meeting',provider:'wecom',accessMode:'application',reads:[{kind:'transcript',state:'not_available',reason:'wecom_application_resource_unverified'}]}];
  const env=await mount(t,'materials',{taskId:'task-fixture',runId:'run-fixture'},async request=>request.url.endsWith('/configuration')?config:{taskId:'task-fixture',runId:'run-fixture',items});
  await click('查看任务材料');assert.ok(text().includes('不能据此区分缺少哪一项'));assert.ok(text().includes('具体 API 权限或对象访问原因尚未确认'));assert.ok(!text().includes('应用没有该资料访问权'));assert.ok(text().includes('已预下载'));assert.ok(text().includes('资料生成或准备中'));assert.ok(text().includes('企微应用资料读取协议尚未核验'));
- assert.ok(!text().includes('准备飞书账号授权'));assert.equal(document.querySelector('a'),null);assert.ok(env.requests.every(request=>request.method==='GET'));assert.ok(text().includes('不代表当前权限复验通过'));
+ assert.ok(!text().includes('准备飞书账号授权'));assert.equal(document.querySelector('a'),null);assert.ok(env.requests.every(request=>request.method==='GET'||request.url.endsWith('/wecom/member-search')&&request.body.keywords.length===0));assert.ok(text().includes('不代表当前权限复验通过'));
 });
 
 test('application configuration is primary and optional OAuth stays absent unless explicitly configured',async t=>{
@@ -589,7 +589,7 @@ test('I01 DingTalk and WeCom wait for a normal first message without a challenge
   if(detail)detail.click();
   await until(()=>text().includes('系统会自动确认身份'));
   assert.equal(text().includes('开始机器人身份验证'),false);
-  assert.ok(env.requests.every(request=>request.method==='GET'));
+  assert.ok(env.requests.every(request=>request.method==='GET'||request.url.endsWith('/wecom/member-search')&&request.body.keywords.length===0));
  });
 });
 
@@ -597,8 +597,10 @@ test('S01 WeCom picker searches multiple names and shows paths without departmen
  const wecom=connection({provider:'wecom',directoryMode:'member_search',status:'pending_verification',directoryStatus:'unavailable'});
  const env=await mount(t,'picker',{base,subjects:{sources:[wecom],users:[],departments:[]},rules:[],label:'企微权限'},async request=>{
   assert.equal(request.method,'POST');
+  if(request.url.endsWith('/member-selection')){assert.equal(request.body.selectionToken,'signed-candidate');return {ok:true};}
+  if(!request.body.keywords.length)return page([],{provider:'wecom'});
   assert.deepEqual(request.body,{keywords:['测试甲','测试乙']});
-  return page([{externalId:'member-1',subjectId:'member-1',kind:'channel_user',displayName:'测试甲',departmentPaths:['测试部门 / 开发']}],{provider:'wecom',limited:true});
+  return page([{externalId:'member-1',subjectId:'member-1',kind:'channel_user',displayName:'测试甲',selectionToken:'signed-candidate',departmentPaths:['测试部门 / 开发']}],{provider:'wecom',limited:true});
  });
  await until(()=>!!document.querySelector('input[aria-label="企微权限成员关键词"]'));
  input('企微权限成员关键词','测试甲，测试乙');await click('搜索企微成员');
@@ -606,6 +608,7 @@ test('S01 WeCom picker searches multiple names and shows paths without departmen
  assert.equal(document.querySelector('[aria-label="企微权限查询类型"]'),null);
  assert.ok(text().includes('结果可能不完整'));
  assert.ok(env.requests.some(request=>request.url.endsWith('/channels/wecom/member-search')));
+ await click('选择人员');await until(()=>env.requests.some(request=>request.url.endsWith('/channels/wecom/member-selection')));
 });
 
 test('WeCom credential status follows current authenticated transport independently of first-message identity',async t=>{
@@ -634,3 +637,45 @@ test('Feishu cross-group context remains independent of employee scope and hidde
  await until(()=>!!document.querySelector('.group-sharing'));assert.equal(document.querySelector('.channel-access-settings .group-sharing'),null);assert.ok(text().includes('不是员工使用范围'));
  await providerTab('钉钉');assert.equal(document.querySelector('.group-sharing'),null);assert.ok(document.querySelector('[aria-label="允许群成员在群内使用"]'));await providerTab('企业微信');assert.equal(document.querySelector('.group-sharing'),null);
 });
+
+const syncTask = (overrides={}) => ({connectionId:'connection-1',snapshotVersion:1,running:false,hasSnapshot:true,stale:false,lastSuccessAt:Date.now(),lastResult:'success',...overrides});
+test('directory sync prevents duplicate starts and refreshes after real progress completion',async t=>{
+ let completed=0,release;const pending=new Promise(r=>release=r);t.after(()=>release());
+ const env=await mount(t,'sync',{endpoint:base+'/channels/feishu/directory',connectionId:'connection-1',initial:syncTask(),onCompleted:()=>completed++},async request=>{
+  if(request.method==='POST'){await pending;return {accepted:true,task:syncTask({running:true,progress:{userCount:12,departmentCount:3},partSummary:{total:4,succeeded:2,failed:0,blocked:0,running:1}})};}
+  return syncTask({snapshotVersion:2});
+ });
+ button('同步通讯录').click();button('同步通讯录').click();await flush();assert.equal(env.requests.length,1);release();await until(()=>text().includes('已发现 12 人、3 个部门'));assert.ok(button('同步中').disabled);
+ await new Promise(r=>setTimeout(r,1600));await until(()=>completed===1);assert.equal(env.requests.filter(r=>r.method==='GET').length,1);
+ env.app.unmount();const count=env.requests.length;await new Promise(r=>setTimeout(r,1600));assert.equal(env.requests.length,count);
+});
+test('directory sync failure preserves snapshot and rejected foreign source never completes',async t=>{
+ let completed=0;const env=await mount(t,'sync',{endpoint:base+'/channels/feishu/directory',connectionId:'connection-1',initial:syncTask({lastResult:'failure',stale:true}),onCompleted:()=>completed++},async()=>({accepted:true,task:syncTask({connectionId:'other'})}));
+ assert.ok(text().includes('当前显示上次成功结果'));await click('同步通讯录');await until(()=>text().includes('通讯录来源已改变'));assert.equal(completed,0);assert.equal(env.requests.length,1);
+});
+test('snapshot keyword search reaches full directory and rejects pagination from a newer snapshot',async t=>{
+ const env=await mount(t,'picker',{base,label:'允许',subjects:subjects(),rules:[]},async request=>page([department],{snapshotVersion:request.url.includes('cursor=')?2:1,nextCursor:'next',exhausted:false,sync:syncTask()}));
+ await until(()=>text().includes('研发部'));input('允许目录关键词','研发');await click('搜索');assert.ok(env.requests.some(r=>r.url.includes('q=%E7%A0%94%E5%8F%91')));await click('加载下一页');await until(()=>text().includes('通讯录已更新'));assert.equal(document.querySelector('.directory-option'),null);
+});
+test('directory sync pauses while page is hidden and discards late previous-connection status',async t=>{
+ let release;const pending=new Promise(r=>release=r);t.after(()=>{release();delete document.hidden;});
+ const env=await mount(t,'sync',{endpoint:base+'/channels/feishu/directory',connectionId:'connection-1',autoLoad:true},async request=>{if(request.url.includes('feishu')){await pending;return syncTask({running:true});}return syncTask({connectionId:'new-connection',snapshotVersion:7});});
+ env.props.endpoint=base+'/channels/dingtalk/directory';env.props.connectionId='new-connection';await until(()=>env.requests.length===2);release();await flush();assert.equal(text().includes('通讯录正在同步'),false);
+ Object.defineProperty(document,'hidden',{configurable:true,value:true});document.dispatchEvent(new Event('visibilitychange'));const count=env.requests.length;await new Promise(r=>setTimeout(r,1600));assert.equal(env.requests.length,count);
+ Object.defineProperty(document,'hidden',{configurable:true,value:false});document.dispatchEvent(new Event('visibilitychange'));await until(()=>env.requests.length===count+1);
+});
+test('directory newer query status cannot be overwritten by an older status request',async t=>{
+ let release;const pending=new Promise(r=>release=r);t.after(()=>release());
+ const env=await mount(t,'sync',{endpoint:base+'/channels/feishu/directory',connectionId:'connection-1',autoLoad:true},async()=>{await pending;return syncTask({snapshotVersion:1,running:true});});
+ env.props.initial=syncTask({snapshotVersion:2,running:false,progress:{userCount:23,departmentCount:4}});await flush();release();await flush();assert.ok(text().includes('23 人、4 个部门'));assert.equal(text().includes('通讯录正在同步'),false);assert.equal(env.requests.length,1);
+});
+
+ test('WeCom picker does not add a person when candidate validation fails',async t=>{
+ const wecom=connection({provider:'wecom',directoryMode:'member_search',status:'pending_verification',directoryStatus:'unavailable'});
+ const env=await mount(t,'picker',{base,subjects:{sources:[wecom],users:[],departments:[]},rules:[],label:'企微权限'},async request=>{
+ if(request.url.endsWith('/member-selection'))return {status:400,data:{error:'invalid_member_search_candidate'}};
+ return page([{externalId:'member-1',subjectId:'member-1',kind:'channel_user',displayName:'候选成员',selectionToken:'expired'}],{provider:'wecom'});
+ });
+ await until(()=>text().includes('候选成员'));await click('选择人员');await until(()=>text().includes('成员选择已过期或来源已变化'));
+ assert.equal(env.props.rules.length,0);
+ });

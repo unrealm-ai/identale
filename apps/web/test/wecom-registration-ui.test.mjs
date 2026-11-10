@@ -34,7 +34,7 @@ async function mount(t, name, initial, handler = async () => { throw new Error('
   globalThis.fetch = async (url, options = {}) => {
     assert.ok(String(url).startsWith('/api/'), 'Only relative local fixture API routes are permitted');
     const request = { url: String(url), method: options.method ?? 'GET', body: options.body ? JSON.parse(options.body) : undefined };
-    requests.push(request); const result = name==='settings'&&request.url.endsWith('/group-sharing')?{revision:0,rules:[]}:name==='settings'&&request.url.endsWith('/group-sharing/status')?{appliedRevision:0}:await handler(request);
+    requests.push(request); const result = name==='settings'&&request.url.endsWith('/channels/feishu/registration')?{preset:{name:'Synthetic',description:'Synthetic'},permissions:{version:'synthetic',scopes:[],events:[],groups:[]},registration:null}:name==='settings'&&request.url.endsWith('/group-sharing')?{revision:0,rules:[]}:name==='settings'&&request.url.endsWith('/group-sharing/status')?{appliedRevision:0}:await handler(request);
     return new Response(JSON.stringify(result?.data ?? result), { status: typeof result?.status === 'number' ? result.status : 200, headers: { 'content-type': 'application/json' } });
   };
   document.body.innerHTML = '<div id="app"></div>';
@@ -92,7 +92,9 @@ test('existing connection requires replacement acknowledgment before explicit sa
 test('all providers retain manual inputs; unsaved manual credentials prevent popup overwrite', async t => {
   const popup = popupFixture(t), env = await mount(t, 'settings', { base, canManage: true, active: true }, async () => []);
   for (const provider of ['飞书', '钉钉', '企业微信']) {
-    await choose(provider); assert.ok(field('渠道应用 ID')); assert.ok(field('渠道应用密钥'));
+    await choose(provider);
+    if (provider === '飞书') { assert.equal(field('渠道应用 ID'), null); await until(() => !button('手动接入').disabled, 'Feishu setup loaded before manual switch'); await click('手动接入'); }
+    assert.ok(field('渠道应用 ID')); assert.ok(field('渠道应用密钥'));
     assert.equal(!!document.querySelector('.wecom-registration'), provider === '企业微信');
   }
   input('渠道应用 ID', 'synthetic-manual-bot'); input('渠道应用密钥', 'synthetic-manual-secret'); await flush();

@@ -1,0 +1,15 @@
+import type {Store} from '../store.js';
+import type {EmployeeChannelRecord,WeComMemberChallenge} from './types.js';
+const stores=new WeakMap<EmployeeChannelRecord,Store>(),deltas=new WeakMap<EmployeeChannelRecord,WeComMemberChallenge[]>();
+export const challengeScope=(r:EmployeeChannelRecord)=>[r.id,r.sourceId,r.authRevision] as const;
+export function initializeChallenges(store:Store){store.db.exec(`CREATE TABLE IF NOT EXISTS wecom_member_challenges(connection_id TEXT NOT NULL,source_id TEXT NOT NULL,auth_revision INTEGER NOT NULL,request_id TEXT NOT NULL,user_id TEXT NOT NULL,phrase_hash TEXT NOT NULL,status TEXT NOT NULL,expires_at INTEGER NOT NULL,retired_at INTEGER NOT NULL,challenge_json TEXT NOT NULL,PRIMARY KEY(connection_id,source_id,auth_revision,request_id),UNIQUE(connection_id,source_id,auth_revision,phrase_hash));CREATE INDEX IF NOT EXISTS wecom_challenge_user ON wecom_member_challenges(connection_id,source_id,auth_revision,user_id);CREATE INDEX IF NOT EXISTS wecom_challenge_retirement ON wecom_member_challenges(retired_at);`);}
+export function challengeLookup(r:EmployeeChannelRecord,key:'request_id'|'user_id'|'phrase_hash',value:string):WeComMemberChallenge|undefined{const row=stores.get(r)?.one<{challenge_json:string}>(`SELECT challenge_json FROM wecom_member_challenges WHERE connection_id=? AND source_id=? AND auth_revision=? AND ${key}=? ORDER BY rowid DESC LIMIT 1`,...challengeScope(r),value);return row?JSON.parse(row.challenge_json):undefined;}
+export function attachChallenges(store:Store,r:EmployeeChannelRecord){if(r.provider!=='wecom')return r;stores.set(r,store);Object.defineProperty(r,'wecomMemberChallenges',{configurable:true,get:()=>store.all<{challenge_json:string}>('SELECT challenge_json FROM wecom_member_challenges WHERE connection_id=? AND source_id=? AND auth_revision=? ORDER BY rowid',...challengeScope(r)).map(x=>JSON.parse(x.challenge_json) as WeComMemberChallenge)});return r;}
+export function withChallengeDelta(r:EmployeeChannelRecord,changes:WeComMemberChallenge[]){deltas.set(r,changes);return r;}
+export function challengeDelta(r:EmployeeChannelRecord){return deltas.get(r);}
+export function writeChallenges(store:Store,r:EmployeeChannelRecord,_previous?:EmployeeChannelRecord){
+ if(r.provider!=='wecom')return;
+ const changes=challengeDelta(r)??Object.getOwnPropertyDescriptor(r,'wecomMemberChallenges')?.value as WeComMemberChallenge[]|undefined;
+ // Explicit arrays are controlled fixture/import writes; ordinary spreads omit the view.
+ if(changes)for(const c of changes){if(c.authRevision!==r.authRevision)continue;const retirement=c.status==='pending'?c.expiresAt:Math.min(c.completedAt??c.expiresAt,c.expiresAt);store.run('INSERT INTO wecom_member_challenges VALUES(?,?,?,?,?,?,?,?,?,?) ON CONFLICT(connection_id,source_id,auth_revision,request_id) DO UPDATE SET status=excluded.status,expires_at=excluded.expires_at,retired_at=excluded.retired_at,challenge_json=excluded.challenge_json',...challengeScope(r),c.requestId,c.userId,c.phraseHash,c.status,c.expiresAt,retirement,JSON.stringify(c));}
+}

@@ -92,7 +92,7 @@ test('WeCom wizard accepts the real top-level validation contract without any di
   assert.ok(!text().includes('按部门授权'));assert.ok(!text().includes('同企业'));
   input('渠道应用 ID','synthetic-bot');input('渠道应用 Secret','synthetic-bot-secret');
   await channelCard('validate');await click('验证渠道凭据');await until(()=>text().includes('渠道草稿已准备'));
-  assert.equal(ready.at(-1),true);assert.ok(text().includes('新建默认空白名单'));assert.ok(text().includes('长连接结果为准'));
+  assert.equal(ready.at(-1),true);assert.ok(text().includes('新建数字员工首次接入默认全员 + 空黑名单'));assert.ok(text().includes('长连接结果为准'));
   assert.deepEqual(env.requests.find(r=>r.method==='POST').body,{provider:'wecom',appId:'synthetic-bot',appSecret:'synthetic-bot-secret'});
   await click('验证渠道凭据');await until(()=>env.requests.filter(r=>r.method==='POST').length===2);
   assert.equal(env.requests.filter(r=>r.method==='DELETE').length,1);
@@ -101,8 +101,8 @@ test('WeCom wizard accepts the real top-level validation contract without any di
 });
 
 test('editing displays necessary validation failures inline without a tutorial card',async t=>{
-  const env=await mount(t,'settings',{base:`${base}/entities/synthetic-employee`,canManage:true},async request=>request.method==='GET'?[]:{status:400,data:{error:'channel_validation_failed',validation:report('feishu',false)}});
-  input('渠道应用 ID','synthetic-app');input('渠道应用密钥','synthetic-edit-secret');await click('验证并保存渠道连接');
+  const env=await mount(t,'settings',{base:`${base}/entities/synthetic-employee`,canManage:true},async request=>request.url.endsWith('/registration')?{registration:null,preset:{name:'合成员工',description:''},permissions:{version:'v1',scopes:[],events:[]}}:request.method==='GET'?[]:{status:400,data:{error:'channel_validation_failed',validation:report('feishu',false)}});
+  await click('手动接入'); input('渠道应用 ID','synthetic-app');input('渠道应用密钥','synthetic-edit-secret');await click('验证并保存渠道连接');
   await until(()=>text().includes('必要检查尚未全部通过'));assert.equal(document.querySelectorAll('.channel-guide-dots button').length,0);assert.ok(document.querySelector('.channel-validation-report .validation-issues'));assert.equal(document.querySelector('.validation-diagnostics').open,false);assert.equal(env.requests.filter(r=>r.method==='PUT').length,1);
 });
 
@@ -255,14 +255,77 @@ test('Feishu wizard ignores late workspace results, deletes them at their origin
 
 test('create and edit use one robot credentials heading with each provider official field names', async t => {
   for (const component of ['draft', 'settings']) await t.test(component, async t => {
-    const env = await mount(t, component, { base, disabled: false, canManage: true }, async () => []);
+    const env = await mount(t, component, { base, disabled: false, canManage: true }, async request => request.url.endsWith('/registration')?{registration:null,preset:{name:'合成员工',description:''},permissions:{version:'v1',scopes:[],events:[]}}:[]);
     for (const [provider, labels] of [['飞书', ['App ID', 'App Secret']], ['钉钉', ['Client ID（AppKey）', 'Client Secret（AppSecret）']], ['企业微信', ['BotID', 'Secret']]]) {
       await choose(provider);
       if (component === 'draft') await channelCard('credentials');
+      else if (provider === '飞书') await click('手动接入');
       const section = component === 'draft' ? document.querySelector('.slide.is-current') : document.querySelector('.channel-setup');
       assert.match(section.textContent, /机器人连接凭据/);
       assert.deepEqual([...section.querySelectorAll('.n-form-item-label')].map(label => label.textContent.trim()), labels);
     }
     assert.ok(env.requests.every(request => request.method === 'GET'));
   });
+});
+
+test('unbound Feishu defaults to automatic onboarding and manual credentials require an explicit switch', async t => {
+  const env = await mount(t, 'settings', { base, canManage: true }, async request => request.url.endsWith('/registration') ? { registration: null, preset: { name: '合成员工', description: '合成职责' }, permissions: { version: 'v1', scopes: ['im:message'], events: ['im.message.receive_v1'] } } : []);
+  assert.ok(document.querySelector('[aria-label="飞书自动创建应用"]'));
+  assert.match(text(), /创建飞书应用/);
+  assert.equal(document.querySelector('.channel-setup'), null);
+  assert.ok(button('手动接入').closest('.registration-heading'));
+  for (const provider of ['飞书', '钉钉', '企业微信']) {
+    await choose(provider);
+    if (provider === '飞书') { await click('手动接入'); assert.equal(visible(document.querySelector('.feishu-registration')), false); }
+    const manual = document.querySelector('.channel-setup'); assert.ok(manual);
+    assert.ok(manual.querySelector('input[aria-label="渠道应用 ID"]'));
+    assert.ok(manual.querySelector('input[aria-label="渠道应用密钥"]'));
+    assert.equal(manual.querySelector('input[aria-label="渠道应用 ID"]').disabled, false);
+    assert.equal(manual.querySelector('input[aria-label="渠道应用密钥"]').disabled, false);
+    assert.ok(button('验证并保存渠道连接'));
+    assert.equal(!!document.querySelector('[aria-label="飞书自动创建应用"]'), provider === '飞书');
+  }
+  assert.ok(env.requests.every(request => request.method === 'GET'));
+});
+
+test('switching setup views preserves a manual draft without starting automatic creation', async t => {
+  const env = await mount(t, 'settings', { base, canManage: true }, async request => request.url.endsWith('/registration') ? {
+    registration: null, preset: { name: '合成员工', description: '合成职责' }, permissions: { version: 'v1', scopes: [], events: [] }
+  } : []);
+  await click('手动接入'); input('渠道应用 ID', 'cli_manual_unsaved'); input('渠道应用密钥', 'synthetic-unsaved-secret'); await flush();
+  await click('返回自动创建'); assert.equal(document.querySelector('.channel-setup'), null);
+  assert.match(text(), /手动凭据草稿已保留/); assert.equal(button('创建飞书应用').disabled, true);
+  await click('手动接入'); assert.equal(document.querySelector('input[aria-label="渠道应用 ID"]').value, 'cli_manual_unsaved');
+  assert.equal(document.querySelector('input[aria-label="渠道应用密钥"]').value, 'synthetic-unsaved-secret');
+  assert.ok(env.requests.every(r => r.method === 'GET'));
+});
+
+test('unsaved manual credentials pause automatic Feishu permission retry without disabling three-provider manual entry', async t => {
+  const env = await mount(t, 'settings', { base, canManage: true }, async request => request.url.endsWith('/registration') ? {
+    registration: null,
+    preset: { name: '合成员工', description: '合成职责' }, permissions: { version: 'v1', scopes: [], events: [], groups: [] }
+  } : []);
+  await click('手动接入'); input('渠道应用 ID', 'cli_manual_unsaved'); input('渠道应用密钥', 'synthetic-unsaved-secret'); await flush();
+  const reads = env.requests.length; await new Promise(resolve => setTimeout(resolve, 800));
+  assert.equal(env.requests.length, reads); assert.ok(env.requests.every(r => r.method === 'GET'));
+  assert.equal(document.querySelector('input[aria-label="渠道应用密钥"]').value, 'synthetic-unsaved-secret');
+  assert.equal(document.querySelector('input[aria-label="渠道应用 ID"]').disabled, false); assert.equal(visible(document.querySelector('.feishu-registration')), false);
+});
+
+
+test('pending Feishu setup cannot switch until local cancellation succeeds and can resume after reopening', async t => {
+  let state = { id: 'synthetic-registration', state: 'awaiting_confirmation', credentialSaved: false, updatedAt: 1, verificationUrl: 'https://accounts.feishu.cn/confirm' };
+  const env = await mount(t, 'settings', { base, canManage: true }, async request => {
+    if (!request.url.includes('/registration')) return [];
+    if (request.url.endsWith('/cancel')) state = { ...state, state: 'cancelled' };
+    return { registration: state, preset: { name: '合成员工', description: '合成职责' }, permissions: { version: 'v1', scopes: [], events: [] } };
+  });
+  assert.equal(button('手动接入').disabled, true); button('手动接入').click(); await flush(); assert.equal(document.querySelector('.channel-setup'), null);
+  await click('返回连接列表'); await click('添加渠道连接'); assert.equal(button('手动接入').disabled, true);
+  assert.ok(document.querySelector('.registration-scan a'));
+  assert.equal(env.requests.filter(r => r.method === 'POST').length, 0);
+  await click('取消等待'); assert.equal(button('手动接入').disabled, false);
+  await click('手动接入'); assert.ok(document.querySelector('.channel-setup')); assert.equal(visible(document.querySelector('.feishu-registration')), false);
+  await click('返回自动创建'); assert.match(text(), /已取消本次等待/);
+  assert.deepEqual(env.requests.filter(r => r.method === 'POST').map(r => r.url), [`/api${base}/channels/feishu/registration/cancel`]);
 });
