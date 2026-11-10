@@ -56,7 +56,7 @@ export class Store {
             this.db.exec(statement);
           }
         } finally {canonical.close();}
-        if(options.role==='platform')this.migrateInvitationReuse();
+        if(options.role==='platform'){this.migrateInvitationReuse();this.migrateInitialChannelDefaults();}
         if(options.role==='runtime'){migrateHumanRuns(raw);migrateHumanRequestInput(raw);migrateTaskTitles(raw);}
         this.run('INSERT OR IGNORE INTO builtin_storage_metadata VALUES(1,?)', randomUUID());
         this.databaseId = this.one<{database_id:string}>('SELECT database_id FROM builtin_storage_metadata WHERE id=1')!.database_id;
@@ -99,8 +99,7 @@ export class Store {
     if (!this.all<{name:string}>('PRAGMA table_info(entities)').some(column => column.name === 'model_settings_revision')) this.db.exec('ALTER TABLE entities ADD COLUMN model_settings_revision INTEGER NOT NULL DEFAULT 0');
     this.db.exec('CREATE TABLE IF NOT EXISTS web_conversation_previews(conversation_id TEXT PRIMARY KEY REFERENCES conversations(id) ON DELETE CASCADE,message_id TEXT NOT NULL,message_rowid INTEGER NOT NULL,excerpt TEXT NOT NULL CHECK(length(excerpt)<=160),created_at INTEGER NOT NULL,expires_at INTEGER NOT NULL)');
     if (!this.all<{name:string}>('PRAGMA table_info(entities)').some(column => column.name === 'avatar_preset')) this.db.exec('ALTER TABLE entities ADD COLUMN avatar_preset TEXT');
-    // Existing employees stay restrictive; only the entity creation path opts in to first-channel defaults.
-    if (!this.all<{name:string}>('PRAGMA table_info(entities)').some(column => column.name === 'initial_channel_defaults_json')) this.db.exec("ALTER TABLE entities ADD COLUMN initial_channel_defaults_json TEXT NOT NULL DEFAULT '{}'");
+    this.migrateInitialChannelDefaults();
     if (!this.all<{name:string}>('PRAGMA table_info(entities)').some(column => column.name === 'description')) this.db.exec("ALTER TABLE entities ADD COLUMN description TEXT NOT NULL DEFAULT ''");
     if (!this.all<{name:string}>('PRAGMA table_info(task_operations)').some(column => column.name === 'receipt_json')) this.db.exec('ALTER TABLE task_operations ADD COLUMN receipt_json TEXT');
     if (!this.all<{name:string}>('PRAGMA table_info(tasks)').some(column => column.name === 'snapshot_expires_at')) this.db.exec("ALTER TABLE tasks ADD COLUMN snapshot_expires_at INTEGER; UPDATE tasks SET snapshot_expires_at=0 WHERE snapshot_json!='[]';");
@@ -115,6 +114,14 @@ export class Store {
       CREATE TABLE IF NOT EXISTS human_requests(request_id TEXT PRIMARY KEY,workspace_id TEXT NOT NULL,entity_id TEXT NOT NULL,task_id TEXT NOT NULL REFERENCES tasks(id),source_run_id TEXT NOT NULL UNIQUE REFERENCES runs(id),session_id TEXT NOT NULL,question_json TEXT NOT NULL,question_digest TEXT NOT NULL,input_revision INTEGER NOT NULL DEFAULT 1,content_version INTEGER NOT NULL,safe INTEGER NOT NULL DEFAULT 0,checkpoint_ref TEXT,status TEXT NOT NULL DEFAULT 'waiting',target_json TEXT,target_conversation_id TEXT,notification_status TEXT NOT NULL DEFAULT 'pending',notification_error TEXT,response_json TEXT,response_digest TEXT,continuation_run_id TEXT UNIQUE REFERENCES runs(id),created_at INTEGER NOT NULL,updated_at INTEGER NOT NULL);
       CREATE TABLE IF NOT EXISTS human_response_operations(operation_id TEXT PRIMARY KEY,actor_digest TEXT NOT NULL,request_hash TEXT NOT NULL,result_json TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS human_response_messages(request_id TEXT NOT NULL REFERENCES human_requests(request_id),message_id TEXT NOT NULL,actor_json TEXT NOT NULL,text TEXT NOT NULL,candidate_json TEXT NOT NULL,created_at INTEGER NOT NULL,PRIMARY KEY(request_id,message_id));`);migrateHumanRequestInput(this.db);
+  }
+  /** CREATE TABLE IF NOT EXISTS cannot upgrade an existing split-platform table. */
+  private migrateInitialChannelDefaults(): void {
+    this.transaction(() => {
+      // Existing employees remain restrictive. Only new entity creation opts in.
+      if (this.all<{name:string}>('PRAGMA table_info(entities)').some(column => column.name === 'initial_channel_defaults_json')) return;
+      this.db.exec("ALTER TABLE entities ADD COLUMN initial_channel_defaults_json TEXT NOT NULL DEFAULT '{}'");
+    });
   }
   private migrateInvitationReuse(): void {
     this.transaction(() => {
