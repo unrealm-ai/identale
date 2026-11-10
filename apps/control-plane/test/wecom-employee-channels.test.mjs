@@ -74,3 +74,12 @@ test('retired enterprise-scoped records do not reconnect or use directory fallba
  await assert.rejects(f.service.revalidate('w','e','wecom','u',c.revision),{code:'wecom_bot_reconfiguration_required'});
  assert.deepEqual(f.service.directorySources(),[]);
 });
+
+test('WeCom recent-context defaults on and persists independent off generation without enabling listener',async t=>{
+ const f=setup(t),c=await save(f);assert.equal(c.context.wecomRecentGroupContextEnabled,true);assert.equal(c.context.groupListenEnabled,undefined);
+ const off=f.service.settings('w','e','wecom','u',{enabled:true,expectedRevision:c.revision,wecomRecentGroupContextEnabled:false});
+ assert.equal(off.context.wecomRecentGroupContextEnabled,false);assert.equal(off.context.wecomRecentGroupContextGeneration,1);assert.equal(off.context.groupListenEnabled,false);
+ const unchanged=f.service.settings('w','e','wecom','u',{enabled:true,expectedRevision:off.revision});assert.equal(unchanged.context.wecomRecentGroupContextEnabled,false);assert.equal(unchanged.context.wecomRecentGroupContextGeneration,1);
+ const on=f.service.settings('w','e','wecom','u',{enabled:true,expectedRevision:unchanged.revision,wecomRecentGroupContextEnabled:true});assert.equal(on.context.wecomRecentGroupContextGeneration,2);
+ assert.throws(()=>f.service.settings('w','e','wecom','u',{enabled:true,expectedRevision:on.revision,groupListenEnabled:true}),/channel_context_unsupported/);
+});

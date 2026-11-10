@@ -17,7 +17,7 @@ export interface EmployeeChannelRecord {
  wecomMemberChallenges?:WeComMemberChallenge[];
  previousInstallation?:{botId:string;tenantId:string};
  validation?:ChannelValidation;
- context?:{historyEnabled:boolean;groupTriggerKeywords?:readonly string[];groupListenEnabled?:boolean;listenGeneration?:number;meetingRefs:{kind:'minutes';externalId:string}[]};
+ context?:{historyEnabled:boolean;groupTriggerKeywords?:readonly string[];groupListenEnabled?:boolean;listenGeneration?:number;wecomRecentGroupContextEnabled?:boolean;wecomRecentGroupContextGeneration?:number;meetingRefs:{kind:'minutes';externalId:string}[]};
  verification?:{challengeId:string;challengeText:string;expiresAt:number;candidate?:{id:string;appId:string;botId:string;tenantId:string;robotCode?:string;eventId:string;messageId:string}};
 }
 export interface ResolvedEmployeeChannelBinding {
@@ -25,7 +25,7 @@ export interface ResolvedEmployeeChannelBinding {
  identity:{tenantId:string;tenantIdNamespace:DirectoryIdentity['tenantIdNamespace']};connection:ChannelConnection;
  conversation:ConversationPort;meetingArtifacts?:MeetingArtifactsPort;
  policy:{entityMentionId:string;ownSenderIds:readonly string[];groupTriggerKeywords?:readonly string[]};previousInstallation?:{botId:string;tenantId:string};
- context?:{historyEnabled:boolean;groupTriggerKeywords?:readonly string[];groupListenEnabled?:boolean;listenGeneration?:number;meetingRefs:ChannelResourceRef[]};
+ context?:{historyEnabled:boolean;groupTriggerKeywords?:readonly string[];groupListenEnabled?:boolean;listenGeneration?:number;wecomRecentGroupContextEnabled?:boolean;wecomRecentGroupContextGeneration?:number;meetingRefs:ChannelResourceRef[]};
 }
 export interface EmployeeChannelCredential {appSecret:string}
 export interface VerifiedEmployeeApplication {identity:DirectoryIdentity;botId?:string;eventTenantId?:string;directoryStatus:'available'|'unavailable';validation?:ChannelValidation;authorizedScope?:import('@dentity/application').DirectoryAuthorizedScope}

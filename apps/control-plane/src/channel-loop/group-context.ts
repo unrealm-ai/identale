@@ -94,10 +94,20 @@ export class SqliteGroupContext implements GroupContextPort {
  this.store.run('UPDATE group_live_messages SET batch_id=? WHERE scope=? AND message_id=?',batchId,scope,e.message.id);
  const texts=rows.map(r=>r.formatted);if(background)texts.unshift(background);texts.push(current);return texts.join('\n');
  });}
+ /** Reuse the durable input-batch guard, not the live-listener message cache.
+  * The caller stores the exact supplementary input in the same transaction. */
+ reserveSupplement(b:MessageLoopBinding,e:ChannelMessageEvent,batchId:string,current:string){
+  const scope=this.scope(b,e);if(!scope)throw Error('group_membership_changed');
+  this.store.run('INSERT INTO group_live_batches(id,scope,guard_json) VALUES(?,?,?)',batchId,scope,JSON.stringify({kind:'wecom_recent',fallback:current,connectionId:b.connectionId,chatId:e.message.conversation.externalId,bindingVersion:b.bindingVersion,generation:b.context?.wecomRecentGroupContextGeneration??0}));
+ }
+ fallback(batchId:string,b:Pick<MessageLoopBinding,'connectionId'|'bindingVersion'>){
+  const row=this.store.one<{guard_json:string}>('SELECT guard_json FROM group_live_batches WHERE id=?',batchId);if(!row)return;
+  const g=JSON.parse(row.guard_json);return g.kind==='wecom_recent'&&g.connectionId===b.connectionId&&g.bindingVersion===b.bindingVersion&&typeof g.fallback==='string'?g.fallback:undefined;
+ }
  assetIds(batchId:string):readonly string[]{const row=this.store.one<{guard_json:string}>('SELECT guard_json FROM group_live_batches WHERE id=?',batchId);return row?JSON.parse(row.guard_json).assetIds??[]:[];}
  recovery(b:MessageLoopBinding,e:ChannelMessageEvent,batchId:string){const scope=this.scope(b,e);if(!scope)return;return this.store.one<{batchId:string;scopeJson:string;conversationId:string;turnId:string}>("SELECT g.id batchId,t.scope_json scopeJson,t.conversation_id conversationId,t.id turnId FROM group_live_batches g JOIN interaction_turns t ON t.operation_id=('channel:'||g.id) WHERE g.scope=? AND g.released=0 AND g.id!=? LIMIT 1",scope,batchId);}
  busy(b:MessageLoopBinding,e:ChannelMessageEvent,batchId:string){const scope=this.scope(b,e);return !!scope&&!!this.store.one('SELECT id FROM group_live_batches WHERE scope=? AND released=0 AND id!=?',scope,batchId);}
  finish(batchId:string){this.store.run('UPDATE group_live_batches SET released=1 WHERE id=?',batchId);}
- commitAllowed(batchId:string,b:Pick<MessageLoopBinding,'connectionId'|'bindingVersion'|'context'>){const row=this.store.one<{guard_json:string}>('SELECT guard_json FROM group_live_batches WHERE id=?',batchId);if(!row||!b.context?.groupListenEnabled)return false;const g=JSON.parse(row.guard_json);const member=this.store.one<{version:number;present:number}>('SELECT version,present FROM group_live_membership WHERE connection_id=? AND chat_id=?',b.connectionId,g.chatId);return g.connectionId===b.connectionId&&g.bindingVersion===b.bindingVersion&&g.listenGeneration===(b.context.listenGeneration??0)&&g.membershipVersion===(member?.version??0)&&member?.present!==0;}
+ commitAllowed(batchId:string,b:Pick<MessageLoopBinding,'connectionId'|'bindingVersion'|'context'>){const row=this.store.one<{guard_json:string}>('SELECT guard_json FROM group_live_batches WHERE id=?',batchId);if(!row)return false;const g=JSON.parse(row.guard_json);if(g.kind==='wecom_recent')return b.context?.wecomRecentGroupContextEnabled!==false&&g.connectionId===b.connectionId&&g.bindingVersion===b.bindingVersion&&g.generation===(b.context?.wecomRecentGroupContextGeneration??0);if(!b.context?.groupListenEnabled)return false;const member=this.store.one<{version:number;present:number}>('SELECT version,present FROM group_live_membership WHERE connection_id=? AND chat_id=?',b.connectionId,g.chatId);return g.connectionId===b.connectionId&&g.bindingVersion===b.bindingVersion&&g.listenGeneration===(b.context.listenGeneration??0)&&g.membershipVersion===(member?.version??0)&&member?.present!==0;}
  receipt(batchId:string,status:'committed'|'accepted'|'unknown'){this.store.transaction(()=>{this.store.run('UPDATE group_live_batches SET status=? WHERE id=?',status,batchId);if(status==='committed'){this.store.run("UPDATE group_live_messages SET status='committed' WHERE batch_id=?",batchId);this.store.run('UPDATE group_live_topic_roots SET committed=1 WHERE root_batch_id=?',batchId);}});}
 }

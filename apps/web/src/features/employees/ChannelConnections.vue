@@ -42,7 +42,7 @@ async function retryWecomSave() {
 }
 
 function requestPolicySwitch(action:()=>void){if(channelLocked.value)return;if(unsaved.value){pendingPolicySwitch=action;confirmPolicySwitch.value=true;return;}action();}
-function discardPolicySwitch(){if(channelLocked.value)return;pendingWecomCredentials.value=null;policyEditor.value?.cancel();sharingEditor.value?.discard();historyEnabled.value=connection.value?.context?.groupListenEnabled??false;keywordText.value=(connection.value?.context?.groupTriggerKeywords??[]).join('\n');appId.value=connection.value?.appId??'';clearSecrets();replaceSource.value=false;confirmPolicySwitch.value=false;pendingPolicySwitch?.();pendingPolicySwitch=undefined;}
+function discardPolicySwitch(){if(channelLocked.value)return;pendingWecomCredentials.value=null;policyEditor.value?.cancel();sharingEditor.value?.discard();historyEnabled.value=connection.value?.context?.groupListenEnabled??false;wecomRecentContextEnabled.value=connection.value?.context?.wecomRecentGroupContextEnabled??true;keywordText.value=(connection.value?.context?.groupTriggerKeywords??[]).join('\n');appId.value=connection.value?.appId??'';clearSecrets();replaceSource.value=false;confirmPolicySwitch.value=false;pendingPolicySwitch?.();pendingPolicySwitch=undefined;}
 function guardProvider(value:DirectoryProvider){if(channelLocked.value)return false;if(unsaved.value){requestPolicySwitch(()=>provider.value=value);return false;}return true;}
 function selectProvider(value:DirectoryProvider){requestPolicySwitch(()=>provider.value=value);}
 
@@ -58,8 +58,8 @@ const evidenceLabel = (value: DirectoryConnection['identityEvidence']) => ({ pro
 const connection = computed(() => connections.value.find(item => item.provider === provider.value));
 const showManualSetup = computed(() => !!connection.value || (provider.value === 'feishu' ? feishuManual.value : provider.value === 'wecom' ? wecomManual.value : true));
 const showAutomaticSetup = computed(() => !!connection.value || !feishuManual.value);
-const historyEnabled = ref(false),keywordText=ref('');
-const contextDirty=computed(()=>historyEnabled.value!==(connection.value?.context?.groupListenEnabled??false)||keywordText.value!==(connection.value?.context?.groupTriggerKeywords??[]).join('\n'));
+const historyEnabled = ref(false),wecomRecentContextEnabled=ref(true),keywordText=ref('');
+const contextDirty=computed(()=>provider.value==='wecom'?wecomRecentContextEnabled.value!==(connection.value?.context?.wecomRecentGroupContextEnabled??true):historyEnabled.value!==(connection.value?.context?.groupListenEnabled??false)||keywordText.value!==(connection.value?.context?.groupTriggerKeywords??[]).join('\n'));
 const appId = ref(''), appSecret = ref(''), replaceSource = ref(false);
 const replacing=computed(()=>!!connection.value&&!!appId.value.trim()&&appId.value.trim()!==connection.value.appId);
 watch(appId,()=>{replaceSource.value=false;});
@@ -74,7 +74,7 @@ watch(() => busy.value || directoryBusy.value || policyBusy.value || sharingBusy
 watch(unsaved,v=>emit('dirtyChanged',v),{flush:'sync'});
 function clearSecrets() { appSecret.value = ''; }
 watch(provider, () => { pendingWecomCredentials.value = null; wecomManual.value = false; feishuManual.value = false; clearSecrets(); appId.value = connection.value?.appId ?? ''; replaceSource.value = false; notice.value = ''; error.value = ''; report.value = null; });
-watch(connection, value => { if (value) pendingWecomCredentials.value = null; if (!value) feishuManual.value = false; historyEnabled.value = value?.context?.groupListenEnabled ?? false;keywordText.value=(value?.context?.groupTriggerKeywords??[]).join('\n'); appId.value = value?.appId ?? ''; clearSecrets(); replaceSource.value = false; });
+watch(connection, value => { if (value) pendingWecomCredentials.value = null; if (!value) feishuManual.value = false; historyEnabled.value = value?.context?.groupListenEnabled ?? false;wecomRecentContextEnabled.value=value?.context?.wecomRecentGroupContextEnabled??true;keywordText.value=(value?.context?.groupTriggerKeywords??[]).join('\n'); appId.value = value?.appId ?? ''; clearSecrets(); replaceSource.value = false; });
 async function run(action: (signal: AbortSignal) => Promise<void>) {
   if (channelLocked.value) return; const signal = controller.signal; busy.value = true; error.value = ''; notice.value = '';
   try { await action(signal); } catch (cause) { if (!signal.aborted) { if (cause instanceof ChannelValidationFailure && cause.validation) { report.value = cause.validation; error.value = ''; } else error.value = errorMessage(cause); if (cause instanceof ApiError && cause.status === 401) emit('sessionExpired'); } }
@@ -126,8 +126,9 @@ async function unbindChannel() {
 }
 async function saveContext() {
   if (!props.canManage || channelLocked.value || policyDirty.value || sharingDirty.value || !loaded.value || !connection.value || !connection.value.capabilities?.recentGroupContext.supported && !connection.value.capabilities?.keywordTriggers.supported) return;
-  const body = { enabled: connection.value.enabled, expectedRevision: connection.value.revision, groupListenEnabled: historyEnabled.value,groupTriggerKeywords:keywordText.value.split('\n').map(word=>word.trim()).filter(Boolean) };
-  if(body.groupTriggerKeywords.length>20||body.groupTriggerKeywords.some(word=>word.length>80)){error.value='最多20个关键词，每个不超过80个字符。';return;}
+  const keywords=keywordText.value.split('\n').map(word=>word.trim()).filter(Boolean);
+  const body = { enabled: connection.value.enabled, expectedRevision: connection.value.revision, ...(provider.value==='wecom'?{wecomRecentGroupContextEnabled:wecomRecentContextEnabled.value}:{groupListenEnabled: historyEnabled.value,groupTriggerKeywords:keywords}) };
+  if(provider.value!=='wecom'&&(keywords.length>20||keywords.some(word=>word.length>80))){error.value='最多20个关键词，每个不超过80个字符。';return;}
   await run(async signal => {
     await api(`${props.base}/channels/${provider.value}/settings`, signal, body, 'PUT');
     if (!signal.aborted) { await read(signal);notice.value = '已保存。';emit('changed'); }
@@ -184,7 +185,7 @@ onUnmounted(() => { controller.abort(); pendingWecomCredentials.value = null; cl
               <p v-if="provider==='feishu'" class="field-note">App ID 标识应用；机器人 open_id 标识应用内的机器人，由官方 API 自动读取，无需手填。未取得可信 open_id 时不能完成连接验证。</p>
               <p class="field-note">{{provider==='wecom'?'仅需本员工独立机器人的 BotID 和 Secret。':'每位员工使用独立机器人应用。'}}<InfoHint label="凭据保存与更换">密钥只写入，提交后清空。相同机器人重新验证、重连或轮换密钥保留所有配置和停用状态。更换机器人须确认换绑并保存；转绑其他员工前须先解除原绑定。</InfoHint></p>
             </NForm>
-            <NAlert v-if="replacing" type="warning" aria-label="换绑授权重置提醒">保存换绑后，启用新连接，仅当前渠道恢复换绑默认值：空白名单、群内可用、能力包继承员工使用范围；飞书近期群消息上下文默认打开。当前渠道的人员名单、能力包渠道限制、群共享规则与缓存会重置，旧名单不迁移。群内可用和能力包继承可能扩大授权。其他渠道、网页权限和资源绑定不变。未保存前原绑定继续有效。<NCheckbox v-model:checked="replaceSource" :disabled="channelLocked" aria-label="确认换绑并重置当前渠道配置">我确认换绑并重置当前渠道配置</NCheckbox></NAlert>
+            <NAlert v-if="replacing" type="warning" aria-label="换绑授权重置提醒">保存换绑后，启用新连接，仅当前渠道恢复换绑默认值：空白名单、群内可用、能力包继承员工使用范围；飞书及企微近期群消息上下文默认打开。当前渠道的人员名单、能力包渠道限制、群共享规则与缓存会重置，旧名单不迁移。群内可用和能力包继承可能扩大授权。其他渠道、网页权限和资源绑定不变。未保存前原绑定继续有效。<NCheckbox v-model:checked="replaceSource" :disabled="channelLocked" aria-label="确认换绑并重置当前渠道配置">我确认换绑并重置当前渠道配置</NCheckbox></NAlert>
             <ChannelSetupRequirements :provider="provider"/>
             <NAlert v-if="error" type="error" role="alert">{{error}}</NAlert><NAlert v-if="notice" type="info" role="status">{{notice}}</NAlert>
             <ChannelValidationReport v-if="report && (provider!=='wecom'||!report.canContinue)" :report="report"/>
@@ -205,6 +206,14 @@ onUnmounted(() => { controller.abort(); pendingWecomCredentials.value = null; cl
           <NCheckbox v-if="connection.capabilities?.recentGroupContext.supported" v-model:checked="historyEnabled" :disabled="channelLocked" aria-label="保留近期群消息作为上下文">保留近期群消息作为上下文</NCheckbox>
           <p class="field-note">新建默认打开，与上方“群成员在群内使用”和群消息共享分别配置。关闭后不再保留此近期群消息窗口；已获普通群消息权限且渠道可用时，仍接收消息并匹配关键词。仅 @ 或关键词命中且有使用权时回复。<InfoHint label="群上下文范围">每群/话题保留最近100条，不补拉历史。文件、图片和会议以资料引用记录，能否读取取决于资料权限与可用状态。</InfoHint></p>
           <NSpace><NButton attr-type="submit" type="primary" :disabled="channelLocked || policyDirty || sharingDirty || !contextDirty" :loading="busy">保存</NButton><NButton :disabled="busy||directoryBusy||!contextDirty" @click="historyEnabled=connection.context?.groupListenEnabled??false;keywordText=(connection.context?.groupTriggerKeywords??[]).join('\n')">取消</NButton></NSpace>
+        </NForm>
+      </NCard>
+      <NCard v-if="connection && provider==='wecom' && connection.capabilities?.recentGroupContext.supported" title="群消息上下文" size="small">
+        <NForm class="wecom-context-form" @submit.prevent="saveContext">
+          <NCheckbox v-model:checked="wecomRecentContextEnabled" :disabled="channelLocked" aria-label="近期群消息补充上下文">近期群消息补充上下文</NCheckbox>
+          <p class="field-note">默认开启。被 @ 后尝试补充本群近期消息，最多 100 条；无法匹配当前消息或读取失败时，只处理本次消息。关闭后不再补充，不删除已有对话上下文。</p>
+          <p class="field-note">不监听普通群消息，不支持关键词触发；群消息共享单独配置。</p>
+          <NSpace><NButton attr-type="submit" type="primary" :disabled="channelLocked || policyDirty || sharingDirty || !contextDirty" :loading="busy">保存</NButton><NButton :disabled="channelLocked || !contextDirty" @click="wecomRecentContextEnabled=connection.context?.wecomRecentGroupContextEnabled??true">取消</NButton></NSpace>
         </NForm>
       </NCard>
       <GroupSharingSettings v-if="selectedConnection && (provider==='feishu'||provider==='wecom') && connection" :key="base+':sharing:'+connection.sourceId" ref="sharingEditor" :base="base" :disabled="!!disabled||busy||directoryBusy||policyBusy||policyDirty" @busy-changed="v=>sharingBusy=v" @dirty-changed="v=>sharingDirty=v" @changed="emit('changed')" @session-expired="emit('sessionExpired')"/>

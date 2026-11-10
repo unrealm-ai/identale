@@ -15,7 +15,7 @@ export interface DirectoryConnection {
   status: 'verified' | 'pending_verification' | 'invalid' | 'disabled';
   identityEvidence: 'provider_api' | 'authenticated_event_confirmed' | 'authenticated_first_message' | 'app_credentials_only' | 'admin_asserted'; inboundVerified: boolean;
   groupListeningStatus?: {enabled:boolean;permission:string;cachedMessages:number};
-  context: { historyEnabled: boolean; groupListenEnabled?: boolean; groupTriggerKeywords?: string[]; meetingRefs: { kind: 'minutes'; externalId: string }[] };
+  context: { historyEnabled: boolean; groupListenEnabled?: boolean; wecomRecentGroupContextEnabled?: boolean; wecomRecentGroupContextGeneration?: number; groupTriggerKeywords?: string[]; meetingRefs: { kind: 'minutes'; externalId: string }[] };
   directoryStatus: 'available' | 'unavailable'; lastError?: string | null; enabled: boolean;
   directoryMode?:'member_search';
   memberSearchIdentityVerified?:boolean;

@@ -1,3 +1,4 @@
+import {fetchWeComRecentContext} from './wecom-recent-context.js';
 import{workItemNotificationScope}from'./work-item-notification.js';
 import {humanNotificationScope} from './human-notification.js';
 import {triggerResultScope} from './trigger-result.js';
@@ -15,9 +16,10 @@ export interface MessageLoopBinding {
  connectionId:string;workspaceId:string;entityId:string;provider:'feishu'|'dingtalk'|'wecom';appId:string;bindingVersion:string;enabled:boolean;
  connection:ChannelConnection;conversation:ConversationPort;meetingArtifacts?:MeetingArtifactsPort;
  assets?:{ingest(binding:MessageLoopBinding,event:ChannelMessageEvent):ChannelMessageEvent;prefetch(binding:MessageLoopBinding,event:ChannelMessageEvent):Promise<void>};
- policy:{entityMentionId:string;ownSenderIds:readonly string[];groupTriggerKeywords?:readonly string[]};context?:{historyEnabled:boolean;groupListenEnabled?:boolean;listenGeneration?:number;meetingRefs:ChannelResourceRef[]};
+ policy:{entityMentionId:string;ownSenderIds:readonly string[];groupTriggerKeywords?:readonly string[]};context?:{historyEnabled:boolean;groupListenEnabled?:boolean;listenGeneration?:number;wecomRecentGroupContextEnabled?:boolean;wecomRecentGroupContextGeneration?:number;meetingRefs:ChannelResourceRef[]};
 }
 export interface GroupContextPort {
+ reserveSupplement?(b:MessageLoopBinding,e:ChannelMessageEvent,batchId:string,current:string):void;
  assetIds?(batchId:string):readonly string[];
  allowed(b:MessageLoopBinding,e:ChannelMessageEvent):boolean;
  busy(b:MessageLoopBinding,e:ChannelMessageEvent,batchId:string):boolean;
@@ -216,7 +218,17 @@ export class ChannelMessageLoop {
    const conversationId=row.conversationId??this.interaction.create(scope,{operationId:`channel:${row.lane}`},true).conversation.id;
    const turnId=row.turnId??hash([conversationId,`channel:${row.id}`]);this.repository.bindTurn(row.id,token,conversationId,turnId);
    const formatted=row.inputText??await this.messageText(b,event);
-   const build=()=>{let text=formatted,batch=row.historyBatchId;if(row.inputText===undefined&&b.provider==='feishu'&&event.message.conversationKind==='group'&&b.context?.groupListenEnabled&&this.groups){batch=row.id;const reserved=this.groups.reserve(b,event,batch,text);if(reserved===undefined)throw new ChannelError('not_ready','group_batch_reconciliation_required');text=reserved;}return{text,...(batch?{historyBatchId:batch}:{})};};
+   let supplement:string|undefined;
+   if(row.inputText===undefined&&b.provider==='wecom'&&event.message.conversationKind==='group'&&b.context?.wecomRecentGroupContextEnabled&&this.groups?.reserveSupplement){
+    supplement=await fetchWeComRecentContext(b,event,this.now());
+    // Fetch is outside SQLite transactions. Recheck binding and the independent
+    // toggle after I/O; prepared input then durably owns this exact result.
+    const current=await this.connections.resolveBinding(b.connectionId);
+    if(!current?.enabled||current.bindingVersion!==b.bindingVersion)throw new ChannelError('forbidden','channel_binding_changed');
+    if(!current.context?.wecomRecentGroupContextEnabled||current.context.wecomRecentGroupContextGeneration!==b.context.wecomRecentGroupContextGeneration)supplement=undefined;
+    if(!this.repository.ownsInbox(row.id,token))return;
+   }
+   const build=()=>{let text=formatted,batch=row.historyBatchId;if(row.inputText===undefined&&b.provider==='feishu'&&event.message.conversationKind==='group'&&b.context?.groupListenEnabled&&this.groups){batch=row.id;const reserved=this.groups.reserve(b,event,batch,text);if(reserved===undefined)throw new ChannelError('not_ready','group_batch_reconciliation_required');text=reserved;}if(supplement){batch=row.id;this.groups!.reserveSupplement!(b,event,batch,formatted);text=supplement+'\n'+formatted;}return{text,...(batch?{historyBatchId:batch}:{})};};
    const prepared=this.repository.prepareInputAtomically?this.repository.prepareInputAtomically(row.id,token,build):build();if(!prepared)return;const text=prepared.text,batch=prepared.historyBatchId;
    this.repository.prepareInput?.(row.id,token,text,batch);const confirmation=this.repository.beginSubmission?.(row.id,token);
    let timedOut=false;let timeout:ReturnType<typeof setTimeout>|undefined;

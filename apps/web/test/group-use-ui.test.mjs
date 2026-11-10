@@ -261,3 +261,20 @@ for(const provider of ['feishu','wecom','dingtalk'])test(provider+' exposes only
  else{await until(()=>!!document.querySelector('[aria-label="群消息共享"]'));assert.ok(env.requests.some(r=>r.url.endsWith('/group-sharing')));}
  if(provider!=='feishu'){assert.equal(document.querySelector('[aria-label="群聊触发关键词"]'),null);assert.equal(document.querySelector('[aria-label="保留近期群消息作为上下文"]'),null);}
 });
+
+test('WeCom recent context defaults on, saves independently, preserves failed draft and cancels',async t=>{
+ const yes={supported:true,availability:'available'},no={supported:false,availability:'unsupported'};
+ const capabilities={privateMessages:yes,groupMentions:no,directedGroupMessages:yes,ordinaryGroupMessages:no,keywordTriggers:no,recentGroupContext:yes,directoryRead:yes,meetingRead:no,documentRead:no};
+ let current=connection({provider:'wecom',capabilities,context:{historyEnabled:false,meetingRefs:[]}}),fail=true;const dirty=[];
+ const env=await mount(t,'settings',{base,canManage:true,onDirtyChanged:v=>dirty.push(v)},async r=>{
+  if(r.method==='PUT'){if(fail)return{status:409,data:{error:'channel_configuration_changed'}};current={...current,revision:current.revision+1,context:{...current.context,wecomRecentGroupContextEnabled:r.body.wecomRecentGroupContextEnabled}};return current;}
+  if(r.url.endsWith('/channels'))return[current];if(r.url.endsWith('/runtime-status'))return{observedAt:null,employee:null};if(r.url.endsWith('/directory-access'))return{allow:[],deny:[],revision:1,channelPolicies:[]};return{};
+ });
+ await providerTab('企业微信');await until(()=>!!document.querySelector('[aria-label="近期群消息补充上下文"]'));
+ const check=()=>document.querySelector('[aria-label="近期群消息补充上下文"]');
+ assert.equal(check().getAttribute('aria-checked'),'true');assert.equal(document.querySelector('[aria-label="保留近期群消息作为上下文"]'),null);assert.equal(document.querySelector('[aria-label="群聊触发关键词"]'),null);assert.ok(text().includes('不监听普通群消息'));
+ check().click();await flush();assert.equal(dirty.at(-1),true);await click('取消');assert.equal(check().getAttribute('aria-checked'),'true');assert.equal(dirty.at(-1),false);
+ check().click();await flush();await click('保存');await until(()=>text().includes('channel_configuration_changed'));assert.equal(check().getAttribute('aria-checked'),'false');assert.equal(dirty.at(-1),true);
+ fail=false;await click('保存');await until(()=>text().includes('已保存。'));assert.deepEqual(env.requests.filter(r=>r.method==='PUT').at(-1).body,{enabled:true,expectedRevision:1,wecomRecentGroupContextEnabled:false});assert.equal(check().getAttribute('aria-checked'),'false');assert.equal(dirty.at(-1),false);
+ check().click();await flush();await click('返回连接列表');await until(()=>text().includes('当前渠道有未保存的修改'));await click('继续编辑当前渠道');assert.equal(check().getAttribute('aria-checked'),'true');await click('返回连接列表');await click('放弃策略修改并切换');assert.equal(dirty.at(-1),false);await click('查看此连接');assert.equal(check().getAttribute('aria-checked'),'false');
+});
