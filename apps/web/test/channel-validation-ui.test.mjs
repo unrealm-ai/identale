@@ -329,3 +329,70 @@ test('pending Feishu setup cannot switch until local cancellation succeeds and c
   await click('返回自动创建'); assert.match(text(), /已取消本次等待/);
   assert.deepEqual(env.requests.filter(r => r.method === 'POST').map(r => r.url), [`/api${base}/channels/feishu/registration/cancel`]);
 });
+
+for (const provider of ['feishu', 'dingtalk', 'wecom']) test(`${provider}: independent status polling survives connection, disconnect and recovery without touching drafts`, async t => {
+  const connection = { id: 'status-fixture', sourceId: 'status-source', provider, appId: 'status-app', revision: 3, authRevision: 2, enabled: true, status: 'verified', identityEvidence: 'provider_api', inboundVerified: true, tenantId: 'synthetic', tenantIdNamespace: 'tenant_key', directoryStatus: 'unavailable', context: {historyEnabled:false, groupListenEnabled:false, groupTriggerKeywords:[], meetingRefs:[]}, transport: {state:'stopped', changedAt:1} };
+  let state = 'connecting', fail = false, reads = 0;
+  const env = await mount(t, 'settings', {base, canManage:true}, async request => {
+    if (request.url.endsWith('/runtime-status')) { reads++; if(fail) return {status:503,data:{error:'synthetic_unavailable'}}; return {observedAt:Date.now(),employee:{channels:[{...connection,transport:{state,changedAt:2}}]}}; }
+    if(request.url.endsWith('/channels'))return [connection];
+    return {};
+  });
+  await until(()=>document.querySelector('[data-testid="transport-status"]')?.textContent.includes('正在连接'));
+  input('渠道应用密钥','synthetic-unsaved-secret');
+  input('渠道应用 ID','synthetic-unsaved-app'); await flush();
+  const originalSetTimeout = globalThis.setTimeout; let scheduled;
+  globalThis.setTimeout = (fn, delay, ...args) => delay===5000 ? (scheduled=fn, originalSetTimeout(()=>{}, 60_000)) : originalSetTimeout(fn,delay,...args);
+  t.after(()=>{globalThis.setTimeout=originalSetTimeout;});
+  for (const [next,label] of [['connected','已连接'],['reconnecting','正在重连'],['connected','已连接']]) {
+    state=next;
+    if(scheduled){ const tick=scheduled;scheduled=undefined;tick(); } else await click('刷新渠道状态');
+    await until(()=>document.querySelector('[data-testid="transport-status"]')?.textContent.includes(label));
+    assert.equal(document.querySelector('input[aria-label="渠道应用密钥"]').value,'synthetic-unsaved-secret');
+    assert.equal(document.querySelector('input[aria-label="渠道应用 ID"]').value,'synthetic-unsaved-app');
+  }
+  assert.ok(reads>=4); assert.equal(env.requests.filter(r=>r.url.endsWith('/channels')).length,1);
+  fail=true; await click('刷新渠道状态'); await until(()=>text().includes('暂时无法获取运行状态'));
+  assert.ok(!document.querySelector('[data-testid="transport-status"]').textContent.includes('已连接'));
+  fail=false; await click('刷新渠道状态'); await until(()=>document.querySelector('[data-testid="transport-status"]').textContent.includes('已连接'));
+  assert.ok(env.requests.every(r=>r.method==='GET'),'status polling must be read-only');
+  env.props.active=false;await flush();const paused=reads;await click('刷新渠道状态');assert.equal(reads,paused);
+  env.props.active=true;await until(()=>reads>paused);
+  Object.defineProperty(document,'visibilityState',{configurable:true,value:'hidden'});document.dispatchEvent(new Event('visibilitychange'));await flush();
+  const hiddenReads=reads;await click('刷新渠道状态');assert.equal(reads,hiddenReads);
+  Object.defineProperty(document,'visibilityState',{configurable:true,value:'visible'});document.dispatchEvent(new Event('visibilitychange'));await until(()=>reads>hiddenReads);
+  env.app.unmount();
+});
+
+test('status observer discards an old employee response and mismatched credential revisions', async t => {
+  const item = {id:'isolated-status',sourceId:'s',provider:'wecom',appId:'synthetic-bot',revision:4,authRevision:3,enabled:true,status:'verified',identityEvidence:'authenticated_first_message',inboundVerified:true,directoryStatus:'unavailable',context:{historyEnabled:false,meetingRefs:[]},transport:{state:'stopped',changedAt:1}};
+  let hold=false,release; const held=new Promise(r=>release=r);t.after(()=>release());
+  const other=base+'/other'; let mismatched=true;
+  const env=await mount(t,'settings',{base,canManage:true},async r=>{
+    if(r.url.endsWith('/channels'))return[item];
+    if(r.url.endsWith('/runtime-status')){
+      if(hold&&r.url===`/api${base}/runtime-status`)await held;
+      return {observedAt:Date.now(),employee:{channels:[{...item,authRevision:r.url.includes('/other/')&&mismatched?2:3,transport:{state:r.url.includes('/other/')?'reconnecting':'connected',changedAt:2}}]}};
+    }return {};
+  });
+  await until(()=>document.querySelector('[data-testid="transport-status"]')?.textContent.includes('已连接'));
+  hold=true;await click('刷新渠道状态');env.props.base=other;await flush();release();
+  await until(()=>env.requests.some(r=>r.url===`/api${other}/runtime-status`));await flush();
+  assert.ok(document.querySelector('[data-testid="transport-status"]').textContent.includes('状态未知'));
+  mismatched=false;await click('刷新渠道状态');await until(()=>document.querySelector('[data-testid="transport-status"]').textContent.includes('正在重连'));
+});
+
+test('revalidation immediately refreshes runtime using the newly saved revision', async t => {
+  let item={id:'revalidation-status',sourceId:'s',provider:'wecom',appId:'synthetic-bot',revision:4,authRevision:3,enabled:true,status:'verified',identityEvidence:'authenticated_first_message',inboundVerified:true,directoryStatus:'unavailable',context:{historyEnabled:false,meetingRefs:[]},transport:{state:'stopped',changedAt:1}};
+  let reads=0;
+  const env=await mount(t,'settings',{base,canManage:true},async r=>{
+    if(r.url.endsWith('/channels/wecom/revalidate')) {item={...item,revision:5};return item;}
+    if(r.url.endsWith('/channels'))return[item];
+    if(r.url.endsWith('/runtime-status')) {reads++;return {observedAt:Date.now(),employee:{channels:[{...item,transport:{state:item.revision===5?'connecting':'connected',changedAt:2}}]}};}
+    return {};
+  });
+  await until(()=>document.querySelector('[data-testid="transport-status"]')?.textContent.includes('已连接'));
+  const before=reads;await click('重新连接并检查');
+  await until(()=>document.querySelector('[data-testid="transport-status"]')?.textContent.includes('正在连接'));
+  assert.ok(reads>before);assert.equal(env.requests.filter(r=>r.method==='POST').length,1);
+});

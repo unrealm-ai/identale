@@ -38,7 +38,7 @@ async function setup(t,config={}){
   state.calls.push({action,body:JSON.parse(init.body)});
   if(state.hold?.action===action)await state.hold.promise;
   if(action==='poll'&&state.pollFault){if(state.pollFault instanceof Error)throw state.pollFault;return state.pollFault;}
-  return json(action==='init'?{errcode:0,nonce}:action==='begin'?{errcode:0,device_code:device,verification_uri_complete:'https://open.dingtalk.com/verify?ticket=synthetic',expires_in:60,interval:1}:state.poll);
+  return json(action==='init'?{errcode:0,nonce}:action==='begin'?{errcode:0,device_code:device,verification_uri_complete:'https://open.dingtalk.com/verify?ticket=synthetic',expires_in:config.expiresSeconds??60,interval:1}:state.poll);
  };
  const registration=new DingTalkRegistrations(channels,{source:'IDENTALE_TEST',masterKey:Buffer.alloc(32,7),fetch:transport,now:()=>now,...config});
  const app=Fastify({logger:{stream:{write:line=>state.logs.push(line)}}});
@@ -96,7 +96,7 @@ test('route manager enforcement, strict payload, scope isolation and no-store he
 });
 
 test('terminal protocol statuses cannot retain secrets or bind',async t=>{
- for(const payload of [{errcode:0,status:'FAIL'},{errcode:0,status:'EXPIRED'},{errcode:0,status:'UNKNOWN'},{errcode:0,status:'SUCCESS',client_id:'app'},{errcode:0,status:'SUCCESS',client_secret:secret},{errcode:42,errmsg:secret}])await t.test(JSON.stringify(payload).replace(secret,'redacted'),async t=>{
+ for(const payload of [{errcode:0,status:'SUCCESS',client_id:'app'},{errcode:0,status:'SUCCESS',client_secret:secret},{errcode:42,errmsg:secret}])await t.test(JSON.stringify(payload).replace(secret,'redacted'),async t=>{
   const f=await setup(t);f.state.poll=payload;const s=await f.ready();assert.equal(s.status,payload.status==='EXPIRED'?'expired':'failed');assert.equal(f.registration.sessions.get(s.sessionId).secret,undefined);noSecrets(s);noSecrets(f.state.logs);await assert.rejects(f.registration.bind(scope,s.sessionId,false,()=>{}),/not_ready/);
  });
 });
@@ -207,14 +207,14 @@ test('capability GET recovers only same-scope active sessions without external w
  const restored=await f.app.inject({method:'GET',url:base});assert.deepEqual(restored.json().session,ready);noSecrets(restored.body);assert.equal(f.state.verifications,0);
 });
 
-test('capability GET does not recover expired, cancelled, consumed or stale sessions',async t=>{
+test('capability GET preserves terminal diagnostics including consumed marker, never credentials',async t=>{
  for(const status of ['expired','cancelled','consumed','stale'])await t.test(status,async t=>{
   const f=await setup(t),s=status==='consumed'?await f.ready():await f.start();
   if(status==='expired')f.advance(60001);
   if(status==='cancelled')f.registration.cancel(scope,s.sessionId);
   if(status==='consumed')await f.registration.bind(scope,s.sessionId,false,()=>{});
   if(status==='stale')await f.channels.save('w','e','dingtalk','u',{appId:'manual-app',appSecret:'manual-secret',expectedRevision:0});
-  const calls=f.state.calls.length,response=await f.app.inject({method:'GET',url:base});assert.equal(response.statusCode,200);assert.equal(response.json().session,undefined);assert.equal(f.state.calls.length,calls);noSecrets(response.body);
+  const calls=f.state.calls.length,response=await f.app.inject({method:'GET',url:base});assert.equal(response.statusCode,200);assert.equal(response.json().session?.status,status==='expired'?'expired':status==='stale'?'failed':status==='consumed'?'consumed':undefined);assert.equal(response.json().session?.verificationUrl,undefined);assert.equal(f.state.calls.length,calls);noSecrets(response.body);
  });
 });
 
@@ -264,4 +264,106 @@ test('transient poll failure after TTL cannot preserve or revive the session',as
  const hold=deferred();f.state.hold={action:'poll',...hold};f.state.pollFault=new Error('network');
  const job=f.registration.poll(scope,s.sessionId);f.advance(60000);hold.resolve();
  assert.equal((await job).status,'expired');assert.equal(f.registration.sessions.get(s.sessionId).secret,undefined);
+});
+
+test('failed state survives re-entry only for its owner; explicit dismissal does not expose older sessions',async t=>{
+ const f=await setup(t),s=await f.start();f.advance(1001);
+ f.state.pollFault=new Response('',{status:401});await f.registration.poll(scope,s.sessionId);
+ const calls=f.state.calls.length;
+ assert.equal(f.registration.availability(scope).session.status,'failed');
+ assert.equal(f.registration.availability({...scope,actorId:'other'}).session,undefined);
+ assert.equal(f.registration.availability({...scope,entityId:'other'}).session,undefined);
+ assert.equal(f.registration.availability({...scope,workspaceId:'other'}).session,undefined);
+ f.registration.cancel(scope,s.sessionId);assert.equal(f.registration.availability(scope).session,undefined);
+ f.state.pollFault=undefined;const next=await f.start();f.registration.cancel(scope,next.sessionId);
+ assert.equal(f.registration.availability(scope).session,undefined);
+ assert.equal(f.state.calls.length,calls+2);
+ f.advance(1200001);assert.equal(f.registration.sessions.size>0,true);f.registration.availability(scope);assert.equal(f.registration.sessions.size,0);
+});
+
+test('a cancelled unknown start does not hide an existing active scoped session',async t=>{
+ const f=await setup(t),s=await f.start();f.registration.cancel(scope,randomUUID());
+ assert.equal(f.registration.availability(scope).session.sessionId,s.sessionId);
+ assert.equal(f.registration.availability(scope).session.status,'waiting');
+});
+
+test('poll normalizes official string statuses but does not coerce malformed status or credentials',async()=>{
+ const signal=new AbortController().signal;
+ for(const status of ['waiting',' WAITING ',' success ','fail','expired']){
+  const adapter=new DingTalkRegistrationAdapter(async()=>json({errcode:0,status,client_id:'app',client_secret:secret}));
+  assert.equal((await adapter.poll(device,signal)).status,status.trim().toUpperCase());
+ }
+ for(const status of [null,{},['SUCCESS'],42]){
+  const events=[],adapter=new DingTalkRegistrationAdapter(async()=>json({errcode:0,status}),event=>events.push(event));
+  await assert.rejects(adapter.poll(device,signal),/invalid_response/);assert.equal(events[0].reason,'unknown_status');
+ }
+});
+
+test('protocol diagnostics distinguish failure shapes without retaining any raw provider values',async()=>{
+ const signal=new AbortController().signal;
+ for(const [response,reason] of [
+  [new Response(secret),'invalid_json'],[json([secret]),'non_object_body'],
+  [json({errcode:0,status:{value:secret},errmsg:device,[nonce]:secret}),'unknown_status'],
+  [json({errcode:0,status:'SUCCESS',client_id:device,client_secret:{value:secret}}),'invalid_success_credentials'],
+  [json({errcode:0,status:'SUCCESS',client_secret:secret}),'invalid_success_credentials']]){
+  const events=[],adapter=new DingTalkRegistrationAdapter(async()=>response,event=>events.push(event));
+  await assert.rejects(adapter.poll(device,signal),/invalid_response/);
+  assert.equal(events.length,1);assert.equal(events[0].action,'poll');assert.equal(events[0].reason,reason);noSecrets(events);
+  assert.equal(Object.hasOwn(events[0].fields,'errmsg'),false);
+ }
+ const adapter=new DingTalkRegistrationAdapter(async()=>json({errcode:0,status:42}),()=>{throw new Error(secret);});
+ await assert.rejects(adapter.poll(device,signal),/invalid_response/);
+});
+
+test('init and begin shape diagnostics are safe and retain existing protocol bounds',async()=>{
+ for(const action of ['init','begin']){
+  const events=[],adapter=new DingTalkRegistrationAdapter(async url=>json(url.endsWith('/init')&&action==='begin'?{errcode:0,nonce}:{errcode:0,nonce:{value:secret},device_code:device,verification_uri_complete:'https://evil.invalid/'+secret}),event=>events.push(event));
+  await assert.rejects(adapter.begin('IDENTALE_TEST',new AbortController().signal),/invalid_response/);
+  assert.equal(events.length,1);assert.equal(events[0].action,action);noSecrets(events);
+ }
+});
+
+test('terminal-looking provider states recover on the original session across page re-entry',async t=>{
+ for(const status of ['FAIL','EXPIRED','UNKNOWN','undocumented'])await t.test(status,async t=>{
+  const f=await setup(t,{expiresSeconds:600});f.state.poll={errcode:0,status};const s=await f.ready();
+  assert.equal(s.status,'waiting');assert.ok(f.registration.sessions.get(s.sessionId).secret);noSecrets(s);
+  assert.equal(f.registration.availability(scope).session.sessionId,s.sessionId);
+  f.advance(5000);f.state.poll={errcode:0,status:'SUCCESS',client_id:'app',client_secret:secret};
+  assert.equal((await f.registration.poll(scope,s.sessionId)).status,'ready');
+  assert.equal(f.state.calls.filter(c=>c.action==='init').length,1);assert.equal(f.state.calls.filter(c=>c.action==='begin').length,1);
+  assert.ok(f.state.calls.filter(c=>c.action==='poll').every(c=>c.body.device_code===device));
+ });
+});
+
+test('persistent abnormal status expires its 120 second budget without extending the original TTL',async t=>{
+ for(const status of ['FAIL','EXPIRED','UNKNOWN'])await t.test(status,async t=>{
+  const f=await setup(t,{expiresSeconds:600});f.state.poll={errcode:0,status};const s=await f.ready();
+  f.advance(119000);assert.equal((await f.registration.poll(scope,s.sessionId)).status,'waiting');
+  const calls=f.state.calls.length;f.advance(1000);
+  assert.equal((await f.registration.poll(scope,s.sessionId)).status,status==='EXPIRED'?'expired':'failed');
+  assert.equal(f.state.calls.length,calls);assert.equal(f.registration.sessions.get(s.sessionId).secret,undefined);
+ });
+ const f=await setup(t);f.state.poll={errcode:0,status:'UNKNOWN'};const s=await f.ready();f.advance(60000);
+ assert.equal((await f.registration.poll(scope,s.sessionId)).status,'expired');
+});
+
+test('WAITING resets the abnormal status window and malformed success still fails immediately',async t=>{
+ const f=await setup(t,{expiresSeconds:600});f.state.poll={errcode:0,status:'FAIL'};const s=await f.ready();
+ f.advance(100000);f.state.poll={errcode:0,status:'WAITING'};await f.registration.poll(scope,s.sessionId);
+ assert.equal(f.registration.sessions.get(s.sessionId).retryUntil,undefined);
+ f.advance(30000);f.state.poll={errcode:0,status:'UNKNOWN'};assert.equal((await f.registration.poll(scope,s.sessionId)).status,'waiting');
+ f.advance(1000);f.state.poll={errcode:0,status:'SUCCESS',client_id:'app'};
+ assert.equal((await f.registration.poll(scope,s.sessionId)).status,'failed');assert.equal(f.registration.sessions.get(s.sessionId).secret,undefined);
+});
+
+test('cancel, binding changes, and late success cannot bypass the abnormal status budget',async t=>{
+ for(const change of ['cancel','binding','timeout'])await t.test(change,async t=>{
+  const f=await setup(t,{expiresSeconds:600});f.state.poll={errcode:0,status:'UNKNOWN'};const s=await f.ready();
+  f.advance(1000);const gate=deferred();f.state.hold={...gate,action:'poll'};f.state.poll={errcode:0,status:'SUCCESS',client_id:'app',client_secret:secret};
+  const job=f.registration.poll(scope,s.sessionId);while(f.state.calls.filter(c=>c.action==='poll').length<2)await new Promise(r=>setImmediate(r));
+  if(change==='cancel')f.registration.cancel(scope,s.sessionId);
+  if(change==='binding')await f.channels.save('w','e','dingtalk','u',{appId:'other',appSecret:'other-secret',expectedRevision:0});
+  if(change==='timeout')f.advance(120000);
+  gate.resolve();const result=await job;assert.equal(result.status,change==='cancel'?'cancelled':'failed');assert.equal(f.registration.sessions.get(s.sessionId).secret,undefined);
+ });
 });

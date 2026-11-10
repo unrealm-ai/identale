@@ -3,6 +3,7 @@
 import { computed, onUnmounted, ref, watch } from 'vue';
 import { NAlert, NButton, NCard, NCheckbox, NForm, NFormItem, NInput, NSpace, NTag, NPopconfirm, NQrCode } from 'naive-ui';
 import { api, ApiError, errorMessage } from '../../shared/api';
+import { useChannelRuntimeStatus, connectionObservationKey } from './channel-runtime-status';
 import { useDingtalkRegistration } from './dingtalk-registration';
 import DingtalkDirectorySetup from '../directory/DingtalkDirectorySetup.vue';
 import ChannelBrand from './ChannelBrand.vue';
@@ -49,11 +50,10 @@ function guardProvider(value:DirectoryProvider){if(channelLocked.value)return fa
 function selectProvider(value:DirectoryProvider){requestPolicySwitch(()=>provider.value=value);}
 
 const connections = ref<DirectoryConnection[]>([]), provider = ref<DirectoryProvider>('feishu');
-type RuntimeChannel = Pick<DirectoryConnection, 'id' | 'appId' | 'provider' | 'revision' | 'authRevision' | 'transport'>;
-type RuntimeSnapshot = { observedAt: number | null; employee: { channels: RuntimeChannel[] } | null };
-const runtimeSnapshot = ref<RuntimeSnapshot | null>(null);
+const runtimeStatus = useChannelRuntimeStatus({ base: () => props.base, active: () => props.active !== false, connections: () => connections.value, onSessionExpired: () => emit('sessionExpired') });
+const { snapshot: runtimeSnapshot } = runtimeStatus;
 const displayConnections = computed(() => connections.value.map(item => {
-  const observed = runtimeSnapshot.value?.employee?.channels?.find(channel => channel.id === item.id && channel.appId === item.appId && channel.provider === item.provider && channel.revision === item.revision && channel.authRevision === item.authRevision);
+  const observed = runtimeSnapshot.value?.employee?.channels?.find(channel => connectionObservationKey(channel) === connectionObservationKey(item));
   return { ...item, runtimeTransport: observed?.transport ?? null, observedAt: observed?.transport ? runtimeSnapshot.value?.observedAt : null };
 }));
 const evidenceLabel = (value: DirectoryConnection['identityEvidence']) => ({ provider_api: '厂商 API 身份证据', authenticated_event_confirmed: '管理员确认的已认证事件', authenticated_first_message: '首条真实消息自动确认', app_credentials_only: '仅应用凭据', admin_asserted: '管理员同企业声明（非厂商证明）' })[value] ?? '尚无身份验证证据';
@@ -79,6 +79,7 @@ const registration = useDingtalkRegistration({
   active: () => props.active !== false && selectedConnection.value && provider.value === 'dingtalk' && props.canManage,
   locked: () => channelLocked.value || unsaved.value || !loaded.value,
   onSessionExpired: () => emit('sessionExpired'),
+  onConsumed: () => { void load(); },
   onBound: (result, replaced) => {
     connections.value = [...connections.value.filter(item => item.provider !== 'dingtalk'), result];
     clearSecrets(); replaceSource.value = false;
@@ -110,11 +111,7 @@ async function read(signal: AbortSignal) {
   const result = await api<DirectoryConnection[]>(`${props.base}/channels`, signal);
   if (signal.aborted) return;
   connections.value = result; loaded.value = true;
-  const snapshot = await api<RuntimeSnapshot>(`${props.base}/runtime-status`, AbortSignal.any([signal, AbortSignal.timeout(8000)])).catch(cause => {
-    if (!signal.aborted && cause instanceof ApiError && cause.status === 401) emit('sessionExpired');
-    return null;
-  });
-  if (!signal.aborted) runtimeSnapshot.value = snapshot;
+  void runtimeStatus.refresh();
 }
 function mergeIdentityEvidence(evidence: DirectoryIdentityEvidence) {
   const current = connections.value.find(item => item.sourceId === evidence.sourceId && item.authRevision === evidence.authRevision && item.provider === 'wecom');
@@ -171,14 +168,14 @@ onUnmounted(() => { controller.abort(); pendingWecomCredentials.value = null; cl
       <NAlert v-if="error" type="error" role="alert">{{error}}</NAlert>
     </section>
     <div v-show="selectedConnection" class="channel-detail">
-      <div class="channel-detail-toolbar"><NButton size="small" aria-label="返回连接列表" :disabled="channelLocked" @click="requestPolicySwitch(()=>selectedConnection=false)">返回连接列表</NButton><NButton size="small" :disabled="channelLocked" :loading="busy" @click="requestPolicySwitch(()=>{void load()})">刷新渠道状态</NButton></div>
+      <div class="channel-detail-toolbar"><NButton size="small" aria-label="返回连接列表" :disabled="channelLocked" @click="requestPolicySwitch(()=>selectedConnection=false)">返回连接列表</NButton><NButton size="small" @click="runtimeStatus.refresh()">刷新渠道状态</NButton></div>
       <ChannelProviderTabs :before-change="guardProvider" :model-value="provider" @update:model-value="selectProvider" :disabled="disabled || channelLocked" :hide-navigation="!canManage">
         <template v-if="canManage && $slots.automation" #automation><slot name="automation" /></template>
         <section v-for="item in displayConnections.filter(c=>c.provider===provider)" :key="item.id" class="connection-status form-section" aria-label="当前连接状态">
           <div class="form-section-heading"><h3>当前连接</h3><NSpace><NTag size="small">{{directoryStatusLabel(item)}}</NTag><NTag size="small">{{item.directoryMode==='member_search'?'成员搜索':item.directoryStatus==='available'?'通讯录可查询':'通讯录不可用'}}</NTag></NSpace></div>
           <p data-testid="transport-status">长连接：{{item.runtimeTransport?.error==='channel_ingress_standby'?'由另一平台进程维护连接':item.runtimeTransport?transportLabel(item.runtimeTransport.state):'状态未知'}}<InfoHint label="连接状态说明">连接状态与身份、目录和使用权限分别核验。无法获取状态时不能判断为离线。</InfoHint></p>
           <p v-if="item.provider==='wecom'" data-testid="wecom-credential-status">机器人凭据：{{item.runtimeTransport?.state==='connected'?'当前长连接已认证':item.runtimeTransport?.state==='failed'?'连接未通过，请查看连接错误':'等待当前长连接认证结果'}}</p>
-          <p v-if="!item.runtimeTransport" role="status">暂时无法确认此连接的运行状态，请稍后刷新。</p>
+          <p v-if="!item.runtimeTransport" role="status">{{runtimeStatus.unavailable.value?'暂时无法获取运行状态，将自动重试；不代表机器人已离线。':'暂时无法确认此连接的运行状态，正在自动刷新。'}}</p>
           <p v-if="item.runtimeTransport?.error && item.runtimeTransport.error!=='channel_ingress_standby'" role="status">连接错误：{{item.runtimeTransport.error}}</p><p v-if="item.lastError" role="status">{{item.lastError==='channel_identity_revalidation_required'?'机器人身份规则已更新，请先核对未完成任务，再重新验证此钉钉连接。':item.lastError}}</p>
           <details class="connection-diagnostics"><summary>连接诊断</summary><p v-if="item.observedAt">运行状态观测时间：{{formatTime(item.observedAt)}}</p><template v-if="item.runtimeTransport"><p>状态更新时间：{{formatTime(item.runtimeTransport.changedAt)}}</p><p v-if="item.runtimeTransport.lastConnectedAt">最近连接：{{formatTime(item.runtimeTransport.lastConnectedAt)}}</p><p v-if="item.runtimeTransport.lastDisconnectedAt">最近断线：{{formatTime(item.runtimeTransport.lastDisconnectedAt)}}</p><p v-if="item.runtimeTransport.error==='channel_ingress_standby'">当前平台进程处于待命状态，不代表渠道已停用或全局连接离线；此处不推断另一进程的在线状态。</p></template>
             <p>{{item.provider==='wecom'?'BotID':item.provider==='feishu'?'应用 App ID':'应用'}} {{item.appId}} · 版本 {{item.revision}}</p><p>身份证据：{{evidenceLabel(item.identityEvidence)}}</p><p>{{item.provider==='feishu'?'入站确认记录':'首条消息'}}：{{item.inboundVerified?'已确认':item.provider==='feishu'?'尚无确认记录':'尚未确认'}}</p><p v-if="item.botId">{{item.provider==='feishu'?'机器人 open_id':item.provider==='dingtalk'?'机器人 robotCode':item.status==='verified'?'已验证机器人':'配置机器人（待验证）'}} {{item.botId}}</p><p>身份依据：{{item.tenantIdNamespace}} · {{item.tenantId}}</p><p v-if="item.tenantIdNamespace==='app_scoped'||item.tenantIdNamespace==='app_id'">{{item.provider==='feishu'?'租户 tenant_key 尚未确认，应用 App ID 不能代替租户身份。':'仅证明应用身份，不代表企业 corpId 已验证。'}}</p>
@@ -224,7 +221,7 @@ onUnmounted(() => { controller.abort(); pendingWecomCredentials.value = null; cl
                   <NButton v-if="registrationReplacing && !registrationUncertain" type="primary" :loading="registrationBinding" :disabled="channelLocked||policyDirty||sharingDirty||contextDirty||(registrationReplacing&&!registrationReplaceSource)" @click="registration.bind">确认绑定到当前员工</NButton>
                 </template>
                 <NButton v-if="registrationUncertain" :disabled="channelLocked || registrationRequesting" @click="registration.recover">重新检查并保存连接</NButton>
-                <NButton v-if="registrationMessage && !registrationUncertain && !registrationSession" :disabled="channelLocked" @click="registration.cancel();registration.show()">重新检查扫码配置</NButton>
+                <NButton v-if="registrationMessage && !registrationUncertain && !registrationSession" :disabled="channelLocked" @click="registration.recheck">重新检查扫码配置</NButton>
               </template>
             </section>
           <NAlert v-if="notice && !showManualSetup" type="info" role="status">{{notice}}</NAlert>

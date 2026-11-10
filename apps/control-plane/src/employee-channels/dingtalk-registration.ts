@@ -4,7 +4,7 @@ import {DingTalkRegistrationAdapter} from './dingtalk-registration-adapter.js';
 export interface DingTalkRegistrationOptions {source?:string;fetch?:typeof fetch;now?:()=>number;masterKey?:Uint8Array}
 type Scope = {workspaceId:string;entityId:string;actorId:string};
 type Status = 'starting'|'waiting'|'ready'|'failed'|'expired'|'cancelled'|'consumed';
-type Session = Scope & {id:string;expectedRevision:number;bindingId:string|null;status:Status;expiresAt:number;retainUntil:number;nextPollAt:number;intervalMs:number;controller:AbortController;busy:boolean;startedAt?:number;secret?:SealedDirectoryCredential;verificationUrl?:string;clientId?:string;error?:string};
+type Session = Scope & {id:string;expectedRevision:number;bindingId:string|null;status:Status;expiresAt:number;retainUntil:number;nextPollAt:number;intervalMs:number;controller:AbortController;busy:boolean;retryUntil?:number;retryStatus?:'FAIL'|'EXPIRED'|'UNKNOWN';startedAt?:number;secret?:SealedDirectoryCredential;verificationUrl?:string;clientId?:string;error?:string};
 const ttl = 600000, capacity = 500;
 const fail = (status:number,code:string):never => {throw new EmployeeChannelError(status,code);};
 const validId = (id:unknown):id is string => typeof id === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(id);
@@ -30,14 +30,18 @@ export class DingTalkRegistrations {
   if(!/^[a-zA-Z][a-zA-Z0-9_-]{1,63}$/.test(source)||source.toUpperCase()==='DING_DWS_CLAW')return{available:false,reason:'source_invalid' as const};
   if(!this.vault.available)return{available:false,reason:'secret_key_unconfigured' as const};
   this.prune();
-  const session=scope?[...this.sessions.values()].find(s=>sameScope(s,scope)&&active(s)):undefined;
-  if(session){try{this.current(session);return{available:true,session:this.dto(session)};}catch{/* Changed bindings cannot be recovered. */}}
+  const scoped=scope?[...this.sessions.values()].reverse().filter(s=>sameScope(s,scope)):[];
+  const session=scoped.find(active)??scoped[0];
+  if(session&&session.status!=='cancelled'&&(session.status!=='consumed'||this.binding(session))){
+   if(active(session)){try{this.current(session);}catch{/* Return the safe terminal reason, never stale credentials. */}}
+   return{available:true,session:this.dto(session)};
+  }
   return{available:true};
  }
  private source(){return this.options.source?.trim()||'identale';}
  private aad(s:Session){return ['dingtalk-registration-v1',s.workspaceId,s.entityId,s.actorId,s.id,s.bindingId??'',s.expectedRevision];}
- private finish(s:Session,status:Status,error?:string){s.status=status;s.controller.abort();delete s.secret;delete s.verificationUrl;delete s.clientId;if(error)s.error=error;}
- private prune(){for(const [id,s]of this.sessions){if(active(s)&&s.expiresAt<=this.now())this.finish(s,'expired');if(s.retainUntil<=this.now())this.sessions.delete(id);}}
+ private finish(s:Session,status:Status,error?:string){s.status=status;s.controller.abort();delete s.secret;delete s.verificationUrl;delete s.clientId;delete s.retryUntil;delete s.retryStatus;if(error)s.error=error;}
+ private prune(){for(const [id,s]of this.sessions){if(active(s)&&s.expiresAt<=this.now())this.finish(s,'expired');else if(s.status==='waiting'&&s.retryUntil!==undefined&&s.retryUntil<=this.now())this.finish(s,s.retryStatus==='EXPIRED'?'expired':'failed',s.retryStatus==='UNKNOWN'?'dingtalk_registration_invalid_response':'dingtalk_registration_rejected');if(s.retainUntil<=this.now())this.sessions.delete(id);}}
  private binding(scope:Scope){return this.channels.repository.byProvider(scope.workspaceId,scope.entityId,'dingtalk');}
  private current(s:Session){const c=this.binding(s);if((c?.revision??0)!==s.expectedRevision||(c?.id??null)!==s.bindingId){this.finish(s,'failed','channel_configuration_changed');fail(409,'channel_configuration_changed');}}
  private get(scope:Scope,id:string){this.prune();const s=this.sessions.get(id);if(!s||!sameScope(s,scope))return fail(404,'dingtalk_registration_not_found');return s;}
@@ -70,8 +74,12 @@ export class DingTalkRegistrations {
    const result=await this.adapter.poll(deviceCode,s.controller.signal);
    this.prune();if(!active(s)||this.closed)return this.dto(s);this.current(s);
    if(result.status==='SUCCESS'&&result.clientId&&result.clientSecret){s.secret=this.vault.seal(JSON.stringify({appId:result.clientId,appSecret:result.clientSecret}),this.aad(s));s.clientId=result.clientId;delete s.verificationUrl;s.status='ready';}
-   else if(result.status==='EXPIRED')this.finish(s,'expired');
-   else if(result.status!=='WAITING')this.finish(s,'failed','dingtalk_registration_rejected');
+   else if(result.status==='WAITING'){delete s.retryUntil;delete s.retryStatus;}
+   else if(result.status==='FAIL'||result.status==='EXPIRED'||result.status==='UNKNOWN'){
+    // The provider can briefly report a terminal-looking status while creation
+    // settles. Poll only the same encrypted device code, within the original TTL.
+    s.retryUntil??=Math.min(s.expiresAt,this.now()+120000);s.retryStatus=result.status;
+   }
   }catch(error){
    this.prune();
    if(active(s)&&!this.closed){
