@@ -1,3 +1,4 @@
+import {challengeLookup,challengeDelta,withChallengeDelta} from '../employee-channels/wecom-verification-challenges.js';
 import {identityDelta,withIdentityDelta,identityLookup,identityStore,identityScope} from '../employee-channels/wecom-identity-bindings.js';
 import {createHash,randomUUID,timingSafeEqual} from 'node:crypto';
 import type {FastifyInstance} from 'fastify';
@@ -8,18 +9,19 @@ import type {EmployeeChannelRecord,WeComMemberChallenge} from '../employee-chann
 
 const fields=['identity','status','inboundVerified','identityEvidence','eventTenantId','botId','robotCode','previousInstallation','verification','validation','directoryStatus','lastError','wecomContactIdentityRevision','wecomVerifiedContactIds','wecomContactMappings','wecomMemberChallenges'] as const;
 type Observation=Record<typeof fields[number],unknown>;
-interface Report {wecomIdentityDelta?:true;reportId:string;connectionId:string;expected:{revision:number;authRevision:number;stateVersion:number};revisionDelta:0|1;observation:Observation|null;verificationEvents:string[]}
+interface Report {wecomChallengeDelta?:true;wecomIdentityDelta?:true;reportId:string;connectionId:string;expected:{revision:number;authRevision:number;stateVersion:number};revisionDelta:0|1;observation:Observation|null;verificationEvents:string[]}
 const object=(v:unknown):v is Record<string,unknown>=>!!v&&typeof v==='object'&&!Array.isArray(v);
 const id=(v:unknown):v is string=>typeof v==='string'&&v.length>0&&v.length<=4096&&!/[\u0000-\u001f]/.test(v);
 const version=(v:unknown):v is number=>Number.isSafeInteger(v)&&Number(v)>=0;
 const digest=(v:unknown)=>createHash('sha256').update(JSON.stringify(v)).digest('hex');
-function observation(r:EmployeeChannelRecord):Observation{return Object.fromEntries(fields.map(k=>[k,k==='wecomVerifiedContactIds'||k==='wecomContactMappings'?(Object.getOwnPropertyDescriptor(r,k)?.value??null):r[k]??null])) as Observation;}
+function observation(r:EmployeeChannelRecord):Observation{return Object.fromEntries(fields.map(k=>[k,k==='wecomVerifiedContactIds'||k==='wecomContactMappings'||k==='wecomMemberChallenges'?(Object.getOwnPropertyDescriptor(r,k)?.value??null):r[k]??null])) as Observation;}
 function matches(r:EmployeeChannelRecord,expected:Report['expected']){return r.revision===expected.revision&&r.authRevision===expected.authRevision&&r.stateVersion===expected.stateVersion;}
 function valid(value:unknown):value is Report{
- if(!object(value)||Object.keys(value).some(k=>!['reportId','connectionId','expected','revisionDelta','observation','verificationEvents','wecomIdentityDelta'].includes(k))||!id(value['reportId'])||!id(value['connectionId'])||!object(value['expected'])||Object.keys(value['expected']).sort().join()!=='authRevision,revision,stateVersion'||!Object.values(value['expected']).every(version)||![0,1].includes(value['revisionDelta'] as number)||!Array.isArray(value['verificationEvents'])||value['verificationEvents'].length>100||value['verificationEvents'].some(v=>!id(v)||!/^event:|^message:/.test(v)))return false;
+ if(!object(value)||Object.keys(value).some(k=>!['reportId','connectionId','expected','revisionDelta','observation','verificationEvents','wecomIdentityDelta','wecomChallengeDelta'].includes(k))||!id(value['reportId'])||!id(value['connectionId'])||!object(value['expected'])||Object.keys(value['expected']).sort().join()!=='authRevision,revision,stateVersion'||!Object.values(value['expected']).every(version)||![0,1].includes(value['revisionDelta'] as number)||!Array.isArray(value['verificationEvents'])||value['verificationEvents'].length>100||value['verificationEvents'].some(v=>!id(v)||!/^event:|^message:/.test(v)))return false;
+ if(value['wecomChallengeDelta']!==undefined&&value['wecomChallengeDelta']!==true)return false;
  if(value['wecomIdentityDelta']!==undefined&&value['wecomIdentityDelta']!==true)return false;
  const authRevision=value['expected']['authRevision'];
- const o=value['observation'];if(o===null)return value['revisionDelta']===0&&value['wecomIdentityDelta']===undefined;
+ const o=value['observation'];if(o===null)return value['revisionDelta']===0&&value['wecomIdentityDelta']===undefined&&value['wecomChallengeDelta']===undefined;
  if(!object(o)||fields.some(k=>!['wecomContactIdentityRevision','wecomVerifiedContactIds','wecomContactMappings','wecomMemberChallenges'].includes(k)&&!(k in o))||Object.keys(o).some(k=>!(fields as readonly string[]).includes(k)))return false;
  if(value['wecomIdentityDelta']&&(o['wecomContactIdentityRevision']!==authRevision||!Array.isArray(o['wecomVerifiedContactIds'])||!Array.isArray(o['wecomContactMappings'])))return false;
  if(o['wecomContactIdentityRevision']!=null&&(!version(o['wecomContactIdentityRevision'])||o['wecomContactIdentityRevision']!==authRevision))return false;
@@ -27,6 +29,8 @@ function valid(value:unknown):value is Report{
  const maps=o['wecomContactMappings'];
  if(maps!=null&&(!Array.isArray(maps)||maps.some(m=>!object(m)||Object.keys(m).sort().join()!=='callbackUserId,method,requestId,userId,verifiedAt'||!id(m['userId'])||m['userId'].length>256||!id(m['callbackUserId'])||m['callbackUserId'].length>256||!id(m['requestId'])||!version(m['verifiedAt'])||m['method']!=='administrator_relay')||new Set(maps.map(m=>m['userId'])).size!==maps.length||new Set(maps.map(m=>m['callbackUserId'])).size!==maps.length||o['wecomContactIdentityRevision']!==authRevision))return false;
  const challenges=o['wecomMemberChallenges'];
+ if(challenges!=null&&value['wecomChallengeDelta']!==true)return false;
+ if(value['wecomChallengeDelta']&&(!Array.isArray(challenges)||value['revisionDelta']!==0))return false;
  if(challenges!=null&&(!Array.isArray(challenges)||challenges.length>100||challenges.some(c=>!object(c)||Object.keys(c).some(k=>!['requestId','userId','authRevision','phraseHash','createdAt','expiresAt','status','issuedAt','completedAt','method','createdBy'].includes(k))||!id(c['requestId'])||!id(c['userId'])||String(c['userId']).length>256||c['authRevision']!==authRevision||typeof c['phraseHash']!=='string'||!/^[0-9a-f]{64}$/.test(c['phraseHash'])||!version(c['createdAt'])||!version(c['expiresAt'])||c['expiresAt']!==Number(c['createdAt'])+86400000||!['pending','verified','failed'].includes(String(c['status']))||!version(c['issuedAt'])||c['method']!=='administrator_relay'||!id(c['createdBy'])||c['completedAt']!==undefined&&!version(c['completedAt']))||new Set(challenges.map(c=>c['requestId'])).size!==challenges.length))return false;
  if(!object(o['identity'])||Object.keys(o['identity']).sort().join()!=='appId,tenantId,tenantIdNamespace'||!id(o['identity']['appId'])||!id(o['identity']['tenantId'])||!['tenant_key','display_id','corp_id','app_id'].includes(String(o['identity']['tenantIdNamespace']))||!['verified','pending_verification','invalid','disabled'].includes(String(o['status']))||![null,true,false].includes(o['inboundVerified'] as null|boolean)||!['available','unavailable'].includes(String(o['directoryStatus'])))return false;
  for(const k of ['eventTenantId','botId','robotCode','lastError'] as const)if(o[k]!==null&&!id(o[k]))return false;
@@ -40,7 +44,7 @@ function apply(old:EmployeeChannelRecord,report:Report):EmployeeChannelRecord{
  if(!report.observation)return old;
  const next={...old,revision:old.revision+report.revisionDelta};
  if(report.wecomIdentityDelta&&(old.provider!=='wecom'||old.authRevision!==report.expected.authRevision||old.wecomContactIdentityRevision!==undefined&&old.wecomContactIdentityRevision!==old.authRevision))throw Error('channel_observation_invalid');
- for(const field of fields){if(!(field in report.observation))continue;const value=report.observation[field];if(value===null&&field!=='lastError')delete (next as unknown as Record<string,unknown>)[field];else(next as unknown as Record<string,unknown>)[field]=structuredClone(value);}
+ for(const field of fields){if(field==='wecomMemberChallenges'||!(field in report.observation))continue;const value=report.observation[field];if(value===null&&field!=='lastError')delete (next as unknown as Record<string,unknown>)[field];else(next as unknown as Record<string,unknown>)[field]=structuredClone(value);}
  if(report.wecomIdentityDelta){
   const exact=(report.observation.wecomVerifiedContactIds??[]) as string[],maps=(report.observation.wecomContactMappings??[]) as NonNullable<EmployeeChannelRecord['wecomContactMappings']>;
   const additions=new Map<string,string>(),reverse=new Map<string,string>();
@@ -52,6 +56,7 @@ function apply(old:EmployeeChannelRecord,report:Report):EmployeeChannelRecord{
   delete next.wecomVerifiedContactIds;delete next.wecomContactMappings;
   withIdentityDelta(next,{exact,maps});
  }
+ if(report.wecomChallengeDelta)withChallengeDelta(next,report.observation.wecomMemberChallenges as WeComMemberChallenge[]);
  if(next.identity.appId!==old.appId)throw Error('channel_observation_invalid');
  // Only operational downgrades may update a disabled configuration.
  if(!old.enabled&&next.status!=='disabled')throw Error('channel_observation_invalid');
@@ -65,33 +70,33 @@ function mergeWeComIdentity(old:EmployeeChannelRecord,report:Report,retains:(c:W
  if(!report.observation)return old;
  const incoming=apply(old,report),identityFields=new Set(['wecomContactIdentityRevision','wecomVerifiedContactIds','wecomContactMappings','wecomMemberChallenges']);
  for(const field of fields)if(!identityFields.has(field)&&JSON.stringify(incoming[field]??null)!==JSON.stringify(old[field]??null))return;
- const challenges=[...(old.wecomMemberChallenges??[])];
- for(const fact of incoming.wecomMemberChallenges??[]){
-  const index=challenges.findIndex(c=>c.requestId===fact.requestId),issued=challenges[index];
+ const challenges:WeComMemberChallenge[]=[];
+ for(const fact of challengeDelta(incoming)??[]){
+  const issued=challengeLookup(old,'request_id',fact.requestId);
   // Issuance may prune expired history while this runtime still has the prior
   // snapshot. Ignore only out-of-window facts; they cannot authorize any new
   // mapping below. An unknown active/protected challenge remains a conflict.
   if(!issued){if(!retains(fact))continue;return;}
-  if(JSON.stringify(fact)===JSON.stringify(issued))continue;
+  if(JSON.stringify(fact)===JSON.stringify(issued)){challenges.push(issued);continue;}
   for(const field of ['requestId','userId','authRevision','phraseHash','createdAt','expiresAt','issuedAt','method','createdBy'] as const)if(fact[field]!==issued[field])return;
   if(fact.status==='verified'||fact.status==='failed'){
    if(fact.completedAt===undefined||issued.issuedAt===undefined||fact.completedAt<issued.issuedAt||fact.completedAt>issued.expiresAt)return;
    if(issued.status==='failed'&&fact.status==='verified')return;
-   if(issued.status!=='verified'&&issued.status!=='failed')challenges[index]=fact;
-  }
+   if(issued.status!=='verified'&&issued.status!=='failed')challenges.push(fact);else if(JSON.stringify(issued)!==JSON.stringify(fact))return;else challenges.push(issued);
+  }else return;
  }
  const delta=identityDelta(incoming);
  if(delta){
   for(const mapping of delta.maps){
    const existing=identityLookup(old,'user_id',mapping.userId);
    if(existing){if(existing.mapping_json!==JSON.stringify(mapping))return;continue;}
-   const challenge=challenges.find(c=>c.requestId===mapping.requestId&&c.userId===mapping.userId&&c.status==='verified'&&c.completedAt===mapping.verifiedAt&&c.authRevision===old.authRevision);if(!challenge)return;
+   const challenge=challenges.find(c=>c.requestId===mapping.requestId)??challengeLookup(old,'request_id',mapping.requestId);if(!challenge||challenge.userId!==mapping.userId||challenge.status!=='verified'||challenge.completedAt!==mapping.verifiedAt||challenge.authRevision!==old.authRevision)return;
   }
-  return withIdentityDelta({...old,wecomContactIdentityRevision:old.authRevision,wecomMemberChallenges:challenges},delta);
+  return withChallengeDelta(withIdentityDelta({...old,wecomContactIdentityRevision:old.authRevision},delta),challenges);
  }
  // Legacy non-delta operational reports cannot modify relationship evidence.
  if(report.observation.wecomVerifiedContactIds!=null||report.observation.wecomContactMappings!=null)return;
- return {...old,wecomMemberChallenges:challenges};
+ return withChallengeDelta({...old},challenges);
 }
 function auth(header:string|undefined,token:string){const a=Buffer.from(header??''),b=Buffer.from('Bearer '+token);return !!token&&a.length===b.length&&timingSafeEqual(a,b);}
 export function registerChannelObservationApi(server:FastifyInstance,options:{token:string;channels:EmployeeChannelService;store:Store}):void{
@@ -106,7 +111,7 @@ export function registerChannelObservationApi(server:FastifyInstance,options:{to
    const receipt=options.store.one<{body_digest:string;response_json:string}>('SELECT body_digest,response_json FROM channel_observation_receipts WHERE id=?',report.reportId),hash=digest(report);
    if(receipt){if(receipt.body_digest!==hash)throw Error('channel_observation_conflict');return JSON.parse(receipt.response_json) as unknown;}
    const old=options.channels.repository.byId(report.connectionId);if(!old)throw Error('channel_observation_conflict');
-   const next=matches(old,report.expected)?apply(old,report):mergeWeComIdentity(old,report,c=>options.channels.memberVerification.retains(c));if(!next)throw Error('channel_observation_conflict');
+   const next=matches(old,report.expected)&&!report.wecomChallengeDelta?apply(old,report):mergeWeComIdentity(old,report,c=>options.channels.memberVerification.retains(c));if(!next)throw Error('channel_observation_conflict');
    if(report.observation&&!options.channels.repository.save(next,old))throw Error('channel_observation_conflict');
    for(const key of report.verificationEvents)options.store.run('INSERT OR IGNORE INTO employee_channel_verification_events(connection_id,event_id) VALUES(?,?)',old.id,key);
    const result={accepted:true,reportId:report.reportId,revision:next.revision,authRevision:next.authRevision,stateVersion:next.stateVersion};
@@ -127,8 +132,10 @@ export function installChannelObservationReporter(store:Store,repository:Employe
   const delta=record.revision-previous.revision;
   if(record.sourceId!==previous.sourceId||record.authRevision!==previous.authRevision||record.enabled!==previous.enabled||record.appId!==previous.appId||record.provider!==previous.provider||record.id!==previous.id||record.workspaceId!==previous.workspaceId||record.entityId!==previous.entityId||JSON.stringify(record.credential)!==JSON.stringify(previous.credential)||JSON.stringify(record.context)!==JSON.stringify(previous.context))throw Error('runtime_channel_configuration_readonly');
   const report:Report={reportId:randomUUID(),connectionId:record.id,expected:{revision:previous.revision,authRevision:previous.authRevision,stateVersion:previous.stateVersion},revisionDelta:delta as 0|1,observation:observation(record),verificationEvents:[]};
-  // Identity facts are append-only in the runtime. Send only additions; challenge
-  // history remains bounded and is still reported for nonce/CAS verification.
+  // Send only changed challenges; total history is never serialized into a report.
+  const changes=challengeDelta(record)??Object.getOwnPropertyDescriptor(record,'wecomMemberChallenges')?.value as WeComMemberChallenge[]|undefined;
+  if(changes){report.wecomChallengeDelta=true;report.observation!.wecomMemberChallenges=changes.filter(c=>JSON.stringify(challengeLookup(previous,'request_id',c.requestId))!==JSON.stringify(c));}
+  // Identity facts are append-only in the runtime. Send only additions.
   if(record.provider==='wecom'&&record.wecomContactIdentityRevision===record.authRevision){
    let delta=identityDelta(record);
    if(!delta){

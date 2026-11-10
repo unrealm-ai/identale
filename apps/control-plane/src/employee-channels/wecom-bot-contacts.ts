@@ -1,3 +1,4 @@
+import {attachChallenges} from './wecom-verification-challenges.js';
 import {identityStore,identityLookup,identityScope,attachIdentityBindings} from './wecom-identity-bindings.js';
 import {DirectoryError} from '@dentity/application';
 import type {DirectoryAccessRule,DirectoryMemberSearch} from '@dentity/application';
@@ -31,9 +32,9 @@ interface Contact {
   department_paths:string;
   found_at:number;
 }
-const selectionLifetime=10*60_000;
 
-/** Current referenced member profiles plus a bounded, short-lived search cache.
+
+/** Persisted explicitly selected member profiles; search results are never stored here.
  * Retaining a profile neither proves an identity nor grants channel access. */
 const boundContactSql='EXISTS (SELECT 1 FROM wecom_identity_bindings b WHERE b.connection_id=wecom_bot_contacts.connection_id AND b.source_id=wecom_bot_contacts.source_id AND b.auth_revision=wecom_bot_contacts.auth_revision AND b.user_id=wecom_bot_contacts.user_id)';
 export class WeComBotContacts {
@@ -43,21 +44,21 @@ export class WeComBotContacts {
       user_id TEXT NOT NULL, display_name TEXT NOT NULL, department_paths TEXT NOT NULL,
       found_at INTEGER NOT NULL, PRIMARY KEY(connection_id,source_id,auth_revision,user_id)
     )`);
+    if(!store.all<{name:string}>('PRAGMA table_info(wecom_bot_contacts)').some(c=>c.name==='selected'))store.db.exec('ALTER TABLE wecom_bot_contacts ADD COLUMN selected INTEGER NOT NULL DEFAULT 0');
   }
   private current(r:EmployeeChannelRecord):EmployeeChannelRecord|undefined {
     if(!usesWeComBotSearch(r))return;
     const row=this.store.one<{record_json:string}>(`SELECT record_json FROM employee_channel_connections
       WHERE id=? AND workspace_id=? AND entity_id=? AND provider=? AND app_id=?`,r.id,r.workspaceId,r.entityId,r.provider,r.appId);
     const current=row?JSON.parse(row.record_json) as EmployeeChannelRecord:undefined;
-    if(current){delete current.wecomVerifiedContactIds;delete current.wecomContactMappings;attachIdentityBindings(this.store,current);}
+    if(current){delete current.wecomVerifiedContactIds;delete current.wecomContactMappings;attachIdentityBindings(this.store,current);delete current.wecomMemberChallenges;attachChallenges(this.store,current);}
     return current&&usesWeComBotSearch(current)&&current.sourceId===r.sourceId&&current.authRevision===r.authRevision&&
       current.botId===r.botId&&current.identity.tenantId===r.identity.tenantId&&current.eventTenantId===r.eventTenantId?current:undefined;
   }
-  /** Derive retention from current configuration, never from historical searches.
-   * Removed references return to the 500-entry cache on the next search. */
+  /** References retain pre-existing configured profiles without trusting old temporary searches. */
   private retainedIds(r:EmployeeChannelRecord):string[] {
     const ids=new Set<string>();
-    for(const challenge of r.wecomMemberChallenges??[])if(challenge.authRevision===r.authRevision&&challenge.status==='pending'&&challenge.expiresAt>this.now())ids.add(challenge.userId);
+    for(const row of this.store.all<{user_id:string}>("SELECT user_id FROM wecom_member_challenges WHERE connection_id=? AND source_id=? AND auth_revision=? AND status='pending' AND expires_at>?",r.id,r.sourceId,r.authRevision,this.now()))ids.add(row.user_id);
     const addRules=(rules:readonly DirectoryAccessRule[])=>{for(const rule of rules){
       if(rule.sourceId!==r.sourceId||rule.kind!=='channel_user')continue;
       let subject:unknown;try{subject=JSON.parse(rule.subjectId);}catch{continue;}
@@ -85,44 +86,32 @@ export class WeComBotContacts {
     return [...ids];
   }
   get(r:EmployeeChannelRecord,userId:string):Contact|undefined {
-    if(!this.current(r))return;
+    const current=this.current(r);if(!current)return;
     return this.store.one<Contact>(`SELECT user_id,display_name,department_paths,found_at FROM wecom_bot_contacts
-      WHERE connection_id=? AND source_id=? AND auth_revision=? AND user_id=?`,r.id,r.sourceId,r.authRevision,userId);
+      WHERE connection_id=? AND source_id=? AND auth_revision=? AND user_id=?
+      AND (selected=1 OR user_id IN (SELECT value FROM json_each(?)) OR ${boundContactSql})`,r.id,r.sourceId,r.authRevision,userId,JSON.stringify(this.retainedIds(current)));
   }
-  recent(r:EmployeeChannelRecord):Contact[] {
-    if(!this.current(r))return [];
-    return this.store.all<Contact>(`SELECT user_id,display_name,department_paths,found_at FROM wecom_bot_contacts
-      WHERE connection_id=? AND source_id=? AND auth_revision=? AND found_at>=? ORDER BY found_at DESC,user_id LIMIT 500`,
-      r.id,r.sourceId,r.authRevision,this.now()-selectionLifetime);
-  }
-  /** Existing verified/configured people remain visible without refreshing the
-   * selection timestamp. Ordinary new candidates still expire after ten minutes. */
+  /** Initial choices are explicitly selected or currently referenced people, not search history. */
+  recent(r:EmployeeChannelRecord):Contact[] {return this.knownPage(r).items;}
   retained(r:EmployeeChannelRecord):Contact[] {
     const current=this.current(r);if(!current)return [];
     return this.store.all<Contact>(`SELECT user_id,display_name,department_paths,found_at FROM wecom_bot_contacts
-      WHERE connection_id=? AND source_id=? AND auth_revision=? AND (user_id IN (SELECT value FROM json_each(?)) OR ${boundContactSql}) ORDER BY found_at DESC,user_id`,
+      WHERE connection_id=? AND source_id=? AND auth_revision=? AND (selected=1 OR user_id IN (SELECT value FROM json_each(?)) OR ${boundContactSql}) ORDER BY user_id`,
       r.id,r.sourceId,r.authRevision,JSON.stringify(this.retainedIds(current)));
   }
-  selectable(r:EmployeeChannelRecord,userId:string):boolean {
-    const current=this.current(r);if(!current)return false;
-    const contact=this.get(current,userId);
-    return !!contact&&(contact.found_at>=this.now()-selectionLifetime||weComCallbackUserId(current,userId)!==undefined||this.retainedIds(current).includes(userId));
-  }
+  selectable(r:EmployeeChannelRecord,userId:string):boolean {return !!this.get(r,userId);}
+  /** Called only after an explicit authenticated selection (or trusted internal fixture). */
   remember(r:EmployeeChannelRecord,members:Awaited<ReturnType<DirectoryMemberSearch['search']>>['members']){
     this.store.transaction(()=>{
       const current=this.current(r);if(!current)return;
       this.store.run('DELETE FROM wecom_bot_contacts WHERE connection_id=? AND (source_id<>? OR auth_revision<>?)',r.id,r.sourceId,r.authRevision);
-      for(const member of members)this.store.run(`INSERT INTO wecom_bot_contacts VALUES(?,?,?,?,?,?,?)
+      for(const member of members)this.store.run(`INSERT INTO wecom_bot_contacts(connection_id,source_id,auth_revision,user_id,display_name,department_paths,found_at,selected) VALUES(?,?,?,?,?,?,?,1)
         ON CONFLICT(connection_id,source_id,auth_revision,user_id) DO UPDATE SET display_name=excluded.display_name,
-        department_paths=excluded.department_paths,found_at=excluded.found_at`,r.id,r.sourceId,r.authRevision,
+        department_paths=excluded.department_paths,found_at=excluded.found_at,selected=1`,r.id,r.sourceId,r.authRevision,
         member.id,member.displayName,JSON.stringify(member.departmentPaths),this.now());
-      this.store.run(`DELETE FROM wecom_bot_contacts WHERE connection_id=? AND source_id=? AND auth_revision=? AND user_id IN
-        (SELECT user_id FROM wecom_bot_contacts WHERE connection_id=? AND source_id=? AND auth_revision=?
-         AND user_id NOT IN (SELECT value FROM json_each(?)) AND NOT ${boundContactSql} ORDER BY found_at DESC,user_id LIMIT -1 OFFSET 500)`,
-        r.id,r.sourceId,r.authRevision,r.id,r.sourceId,r.authRevision,JSON.stringify(this.retainedIds(current)));
     });
   }
-  /** Local binding facts are independent of the short-lived name search cache.
+  /** Local binding facts are independent of selected display profiles.
    * Delivery may still be rejected by the provider; this guard grants no use right. */
   async verifyRecipient(r:EmployeeChannelRecord,userId:string,_adapter?:DirectoryMemberSearch){
     const current=this.current(r),searchId=current?weComSearchUserId(current,userId):undefined;
@@ -139,8 +128,8 @@ export class WeComBotContacts {
     const where=keywords.length?' AND ('+keywords.map(()=>'(instr(lower(display_name),?)>0 OR instr(lower(user_id),?)>0 OR instr(lower(department_paths),?)>0)').join(' OR ')+')':'';
     const rows=this.store.all<Contact>(`SELECT user_id,display_name,department_paths,found_at FROM wecom_bot_contacts
       WHERE connection_id=? AND source_id=? AND auth_revision=?
-      AND (found_at>=? OR user_id IN (SELECT value FROM json_each(?)) OR ${boundContactSql}) AND user_id>?${where}
-      ORDER BY user_id LIMIT ?`,r.id,r.sourceId,r.authRevision,this.now()-selectionLifetime,
+      AND (selected=1 OR user_id IN (SELECT value FROM json_each(?)) OR ${boundContactSql}) AND user_id>?${where}
+      ORDER BY user_id LIMIT ?`,r.id,r.sourceId,r.authRevision,
       JSON.stringify(this.retainedIds(current)),input.after??'',...keywords.flatMap(k=>[k,k,k]),limit+1);
     const items=rows.slice(0,limit);return {items,exhausted:rows.length<=limit,...(rows.length>limit?{nextAfter:items.at(-1)!.user_id}:{})};
   }

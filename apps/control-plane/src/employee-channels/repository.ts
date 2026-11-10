@@ -1,3 +1,4 @@
+import {initializeChallenges,attachChallenges,writeChallenges} from './wecom-verification-challenges.js';
 import {initializeIdentityBindings,attachIdentityBindings,writeIdentityBindings,identityRecordJson} from './wecom-identity-bindings.js';
 import type {Store} from '../store.js';
 import type {EmployeeChannelRecord} from './types.js';
@@ -6,7 +7,7 @@ export class ChannelBindingConflict extends Error { constructor(){super('channel
 export class ChannelBindingMigrationConflict extends Error { constructor(){super('channel_binding_migration_conflict');} }
 const canonical = (r:Pick<EmployeeChannelRecord,'provider'|'appId'> & {robotCode?:string}) => r.provider==='dingtalk'&&r.robotCode?`robot:${r.robotCode}`:`app:${r.appId}`;
 export class EmployeeChannelRepository {
- constructor(readonly store:Store){store.db.exec(`CREATE TABLE IF NOT EXISTS employee_channel_connections(id TEXT PRIMARY KEY,workspace_id TEXT NOT NULL REFERENCES workspaces(id),entity_id TEXT NOT NULL REFERENCES entities(id),provider TEXT NOT NULL,app_id TEXT NOT NULL,bot_id TEXT,revision INTEGER NOT NULL,state_version INTEGER NOT NULL,record_json TEXT NOT NULL,UNIQUE(entity_id,provider),UNIQUE(workspace_id,provider,app_id),UNIQUE(workspace_id,provider,bot_id));CREATE TABLE IF NOT EXISTS employee_channel_verification_events(connection_id TEXT NOT NULL,event_id TEXT NOT NULL,PRIMARY KEY(connection_id,event_id));CREATE TABLE IF NOT EXISTS employee_channel_audit(id INTEGER PRIMARY KEY AUTOINCREMENT,workspace_id TEXT NOT NULL,entity_id TEXT NOT NULL,connection_id TEXT NOT NULL,actor_id TEXT NOT NULL,action TEXT NOT NULL,revision INTEGER NOT NULL,created_at INTEGER NOT NULL);`);this.initializeGlobalBindings();initializeIdentityBindings(store);}
+ constructor(readonly store:Store){store.db.exec(`CREATE TABLE IF NOT EXISTS employee_channel_connections(id TEXT PRIMARY KEY,workspace_id TEXT NOT NULL REFERENCES workspaces(id),entity_id TEXT NOT NULL REFERENCES entities(id),provider TEXT NOT NULL,app_id TEXT NOT NULL,bot_id TEXT,revision INTEGER NOT NULL,state_version INTEGER NOT NULL,record_json TEXT NOT NULL,UNIQUE(entity_id,provider),UNIQUE(workspace_id,provider,app_id),UNIQUE(workspace_id,provider,bot_id));CREATE TABLE IF NOT EXISTS employee_channel_verification_events(connection_id TEXT NOT NULL,event_id TEXT NOT NULL,PRIMARY KEY(connection_id,event_id));CREATE TABLE IF NOT EXISTS employee_channel_audit(id INTEGER PRIMARY KEY AUTOINCREMENT,workspace_id TEXT NOT NULL,entity_id TEXT NOT NULL,connection_id TEXT NOT NULL,actor_id TEXT NOT NULL,action TEXT NOT NULL,revision INTEGER NOT NULL,created_at INTEGER NOT NULL);`);this.initializeGlobalBindings();initializeIdentityBindings(store);initializeChallenges(store);}
  initializeGlobalBindings(){this.store.transaction(()=>{
   // Do not rewrite/delete legacy identities or ciphertext to make a new constraint pass.
   if(this.store.one('SELECT 1 FROM employee_channel_connections GROUP BY provider,app_id HAVING count(*)>1 LIMIT 1')||this.store.one(`SELECT 1 FROM employee_channel_connections GROUP BY provider,${canonicalSql} HAVING count(*)>1 LIMIT 1`))throw new ChannelBindingMigrationConflict();
@@ -17,7 +18,7 @@ export class EmployeeChannelRepository {
  all():EmployeeChannelRecord[]{return this.store.all<{record_json:string}>('SELECT record_json FROM employee_channel_connections').map(r=>this.decode(r.record_json));}
  list(workspaceId:string,entityId:string):EmployeeChannelRecord[]{return this.store.all<{record_json:string}>('SELECT record_json FROM employee_channel_connections WHERE workspace_id=? AND entity_id=?',workspaceId,entityId).map(r=>this.decode(r.record_json));}
  byId(id:string):EmployeeChannelRecord|undefined {const r=this.store.one<{record_json:string}>('SELECT record_json FROM employee_channel_connections WHERE id=?',id);return r?this.decode(r.record_json):undefined;}
- decode(json:string):EmployeeChannelRecord{const r=JSON.parse(json) as EmployeeChannelRecord;delete r.wecomVerifiedContactIds;delete r.wecomContactMappings;return attachIdentityBindings(this.store,r);}
+ decode(json:string):EmployeeChannelRecord{const r=JSON.parse(json) as EmployeeChannelRecord;delete r.wecomVerifiedContactIds;delete r.wecomContactMappings;delete r.wecomMemberChallenges;return attachChallenges(this.store,attachIdentityBindings(this.store,r));}
  byProvider(workspaceId:string,entityId:string,provider:string){return this.list(workspaceId,entityId).find(r=>r.provider===provider);}
  save(record:EmployeeChannelRecord,previous:EmployeeChannelRecord|undefined):boolean {
   return this.store.transaction(()=>{
@@ -27,7 +28,7 @@ export class EmployeeChannelRepository {
   this.assertAvailable(record);
   const next={...record,stateVersion:(previous?.stateVersion??0)+1};
   const changed=previous?this.store.run('UPDATE employee_channel_connections SET app_id=?,bot_id=?,revision=?,state_version=?,record_json=? WHERE id=? AND workspace_id=? AND entity_id=? AND state_version=?',next.appId,next.botId??null,next.revision,next.stateVersion,identityRecordJson(next),next.id,next.workspaceId,next.entityId,previous.stateVersion).changes:this.store.run('INSERT INTO employee_channel_connections(id,workspace_id,entity_id,provider,app_id,bot_id,revision,state_version,record_json) VALUES(?,?,?,?,?,?,?,?,?)',next.id,next.workspaceId,next.entityId,next.provider,next.appId,next.botId??null,next.revision,next.stateVersion,identityRecordJson(next)).changes;
-  if(changed){writeIdentityBindings(this.store,record,previous);record.stateVersion=next.stateVersion;}return !!changed;
+  if(changed){writeIdentityBindings(this.store,record,previous);writeChallenges(this.store,record,previous);record.stateVersion=next.stateVersion;}return !!changed;
   });
  }
  remove(record:EmployeeChannelRecord):boolean{return this.store.transaction(()=>{const changed=!!this.store.run('DELETE FROM employee_channel_connections WHERE id=? AND workspace_id=? AND entity_id=? AND state_version=?',record.id,record.workspaceId,record.entityId,record.stateVersion).changes;if(changed)this.store.run('DELETE FROM wecom_identity_bindings WHERE connection_id=?',record.id);return changed;});}

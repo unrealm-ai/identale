@@ -92,7 +92,7 @@ test('WeCom wizard accepts the real top-level validation contract without any di
   assert.ok(!text().includes('按部门授权'));assert.ok(!text().includes('同企业'));
   input('渠道应用 ID','synthetic-bot');input('渠道应用 Secret','synthetic-bot-secret');
   await channelCard('validate');await click('验证渠道凭据');await until(()=>text().includes('渠道草稿已准备'));
-  assert.equal(ready.at(-1),true);assert.ok(text().includes('新建默认空白名单'));assert.ok(text().includes('长连接结果为准'));
+  assert.equal(ready.at(-1),true);assert.ok(text().includes('新建数字员工首次接入默认全员 + 空黑名单'));assert.ok(text().includes('长连接结果为准'));
   assert.deepEqual(env.requests.find(r=>r.method==='POST').body,{provider:'wecom',appId:'synthetic-bot',appSecret:'synthetic-bot-secret'});
   await click('验证渠道凭据');await until(()=>env.requests.filter(r=>r.method==='POST').length===2);
   assert.equal(env.requests.filter(r=>r.method==='DELETE').length,1);

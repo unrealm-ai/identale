@@ -33,7 +33,7 @@ export function writeIdentityBindings(store:Store,r:EmployeeChannelRecord,previo
   for(const v of values){const user=typeof v==='string'?v:v.userId,callback=typeof v==='string'?v:v.callbackUserId,json=typeof v==='string'?null:JSON.stringify(v);const old=store.one<{callback_user_id:string;mapping_json:string|null}>('SELECT callback_user_id,mapping_json FROM wecom_identity_bindings WHERE connection_id=? AND source_id=? AND auth_revision=? AND user_id=?',...identityScope(r),user);if(old&&(old.callback_user_id!==callback||old.mapping_json!==json))throw Error('wecom_identity_binding_conflict');if(!old)store.run('INSERT INTO wecom_identity_bindings VALUES(?,?,?,?,?,?)',...identityScope(r),user,callback,json);}
  }
 }
-export function identityRecordJson(r:EmployeeChannelRecord){return JSON.stringify(r,(key,value)=>key==='wecomVerifiedContactIds'||key==='wecomContactMappings'?undefined:value);}
+export function identityRecordJson(r:EmployeeChannelRecord){return JSON.stringify(r,(key,value)=>key==='wecomMemberChallenges'||key==='wecomVerifiedContactIds'||key==='wecomContactMappings'?undefined:value);}
 export interface IdentityDelta {exact:string[];maps:WeComContactMapping[]}
 const deltas=new WeakMap<EmployeeChannelRecord,IdentityDelta>();
 export function withIdentityDelta(r:EmployeeChannelRecord,delta:IdentityDelta){deltas.set(r,delta);return r;}

@@ -57,7 +57,19 @@ async function load(more = false) {
   } catch (cause) { if (!signal.aborted) { error.value = cause instanceof PickerError ? cause.message : errorMessage(cause); items.value = []; cursor.value = undefined; exhausted.value = true; } }
   finally { if (!signal.aborted) busy.value = false; }
 }
-function select(item: DirectoryItem) { if (!source.value || props.disabled || props.readonly || props.rules.some(rule => key(rule) === key({ ...item, sourceId: source.value!.sourceId }))) return; emit('update:rules', [...props.rules, { sourceId: source.value.sourceId, kind: item.kind, subjectId: item.subjectId, ...(item.kind === 'department' ? { includeDescendants: false } : {}), conversationKinds: [...(props.employeeScope?['private','group'] as ConversationKind[]:props.defaultConversationKinds??['private'])] }]); }
+async function select(item: DirectoryItem) {
+  const current=source.value;
+  if (!current || busy.value || props.disabled || props.readonly || props.rules.some(rule => key(rule) === key({ ...item, sourceId: current.sourceId }))) return;
+  const signal=controller.signal;
+  if(current.provider==='wecom'){
+    busy.value=true;error.value='';
+    try{await api(props.base+'/channels/wecom/member-selection',signal,{sourceId:current.sourceId,userId:item.externalId,...(item.selectionToken?{selectionToken:item.selectionToken}:{})},'POST');}
+    catch(cause){if(!signal.aborted)error.value=errorMessage(cause);return;}
+    finally{if(!signal.aborted)busy.value=false;}
+    if(signal.aborted||source.value?.sourceId!==current.sourceId||source.value?.authRevision!==current.authRevision)return;
+  }
+  emit('update:rules', [...props.rules, { sourceId: current.sourceId, kind: item.kind, subjectId: item.subjectId, ...(item.kind === 'department' ? { includeDescendants: false } : {}), conversationKinds: [...(props.employeeScope?['private','group'] as ConversationKind[]:props.defaultConversationKinds??['private'])] }]);
+}
 function ruleMember(rule: DirectoryAccessRule) {
   const connection = props.subjects.sources.find(value => value.sourceId === rule.sourceId && value.provider === 'wecom');
   if (!connection || rule.kind !== 'channel_user') return;

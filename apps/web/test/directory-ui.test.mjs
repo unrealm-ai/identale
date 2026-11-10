@@ -481,7 +481,7 @@ test('DingTalk requirements separate Stream receive, proactive send and scoped d
 
 test('WeCom requirements use only robot credentials and default effective-message access',async t=>{
  const env=await mount(t,'requirements',{provider:'wecom'});
- for(const value of ['BotID / Secret','新建默认空白名单，群内可用','私聊需加入白名单','首条通过校验的真实消息自动确认身份'])assert.ok(text().includes(value),value);
+ for(const value of ['BotID / Secret','新建数字员工首次接入默认全员 + 空黑名单，群内可用','换绑重置为空白名单','首条通过校验的真实消息自动确认身份'])assert.ok(text().includes(value),value);
  assert.equal(env.requests.length,0);assert.equal(document.querySelector('.channel-guide-dots'),null);
 });
 
@@ -597,9 +597,10 @@ test('S01 WeCom picker searches multiple names and shows paths without departmen
  const wecom=connection({provider:'wecom',directoryMode:'member_search',status:'pending_verification',directoryStatus:'unavailable'});
  const env=await mount(t,'picker',{base,subjects:{sources:[wecom],users:[],departments:[]},rules:[],label:'企微权限'},async request=>{
   assert.equal(request.method,'POST');
+  if(request.url.endsWith('/member-selection')){assert.equal(request.body.selectionToken,'signed-candidate');return {ok:true};}
   if(!request.body.keywords.length)return page([],{provider:'wecom'});
   assert.deepEqual(request.body,{keywords:['测试甲','测试乙']});
-  return page([{externalId:'member-1',subjectId:'member-1',kind:'channel_user',displayName:'测试甲',departmentPaths:['测试部门 / 开发']}],{provider:'wecom',limited:true});
+  return page([{externalId:'member-1',subjectId:'member-1',kind:'channel_user',displayName:'测试甲',selectionToken:'signed-candidate',departmentPaths:['测试部门 / 开发']}],{provider:'wecom',limited:true});
  });
  await until(()=>!!document.querySelector('input[aria-label="企微权限成员关键词"]'));
  input('企微权限成员关键词','测试甲，测试乙');await click('搜索企微成员');
@@ -607,6 +608,7 @@ test('S01 WeCom picker searches multiple names and shows paths without departmen
  assert.equal(document.querySelector('[aria-label="企微权限查询类型"]'),null);
  assert.ok(text().includes('结果可能不完整'));
  assert.ok(env.requests.some(request=>request.url.endsWith('/channels/wecom/member-search')));
+ await click('选择人员');await until(()=>env.requests.some(request=>request.url.endsWith('/channels/wecom/member-selection')));
 });
 
 test('WeCom credential status follows current authenticated transport independently of first-message identity',async t=>{
@@ -667,3 +669,13 @@ test('directory newer query status cannot be overwritten by an older status requ
  const env=await mount(t,'sync',{endpoint:base+'/channels/feishu/directory',connectionId:'connection-1',autoLoad:true},async()=>{await pending;return syncTask({snapshotVersion:1,running:true});});
  env.props.initial=syncTask({snapshotVersion:2,running:false,progress:{userCount:23,departmentCount:4}});await flush();release();await flush();assert.ok(text().includes('23 人、4 个部门'));assert.equal(text().includes('通讯录正在同步'),false);assert.equal(env.requests.length,1);
 });
+
+ test('WeCom picker does not add a person when candidate validation fails',async t=>{
+ const wecom=connection({provider:'wecom',directoryMode:'member_search',status:'pending_verification',directoryStatus:'unavailable'});
+ const env=await mount(t,'picker',{base,subjects:{sources:[wecom],users:[],departments:[]},rules:[],label:'企微权限'},async request=>{
+ if(request.url.endsWith('/member-selection'))return {status:400,data:{error:'invalid_member_search_candidate'}};
+ return page([{externalId:'member-1',subjectId:'member-1',kind:'channel_user',displayName:'候选成员',selectionToken:'expired'}],{provider:'wecom'});
+ });
+ await until(()=>text().includes('候选成员'));await click('选择人员');await until(()=>text().includes('成员选择已过期或来源已变化'));
+ assert.equal(env.props.rules.length,0);
+ });

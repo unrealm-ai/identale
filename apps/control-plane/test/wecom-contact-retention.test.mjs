@@ -43,7 +43,8 @@ async function fixture(t){
   channels.observeFirstInbound(c.id,{appId:c.appId,botId:c.appId,tenantId:c.appId,tenantNamespace:'app_id'});return current(c);
  };
  const search=(c,keywords)=>channels.searchWeComMembers(c.workspaceId,c.entityId,keywords);
- const seed=async(c,ids)=>{for(const id of ids)catalog.set(id,{userid:id,name:'Member '+id,departments:['Engineering']});return search(c,ids);};
+ const select=(c,person)=>channels.selectWeComMember(c.workspaceId,c.entityId,{sourceId:c.sourceId,userId:person.externalId,selectionToken:person.selectionToken});
+ const seed=async(c,ids)=>{for(const id of ids)catalog.set(id,{userid:id,name:'Member '+id,departments:['Engineering']});const page=await search(c,ids);for(const person of page.items)select(c,person);return page;};
  const bulk=async(c,count=7)=>{for(let i=0;i<count;i++){clock++;assert.equal((await search(c,['batch:'+batch++])).items.length,100);}};
  const rule=(c,id)=>({sourceId:c.sourceId,kind:'channel_user',subjectId:channelSubject('channel_user',id,'user_id',c.appId),conversationKinds:['private']});
  const policy=(c,allow=[],deny=[],mode='allowlist')=>capabilities.patchDirectoryAccess(c.workspaceId,c.entityId,{sourceId:c.sourceId,mode,allow:allow.map(id=>rule(c,id)),deny:deny.map(id=>rule(c,id)),allowGroupMembers:false,expectedRevision:capabilities.getDirectoryAccess(c.workspaceId,c.entityId).channelPolicies.find(p=>p.sourceId===c.sourceId).revision});
@@ -56,163 +57,78 @@ async function fixture(t){
  const bind=async(c,id)=>accept(c,id,await start(c,id));
  const savePackage=(c,id,enabled=true)=>capabilities.save(c.workspaceId,c.entityId,{name:'Package '+id,enabled,mode:'inherit',allowMemberIds:[],denyMemberIds:[],resourceIds:[],directoryAccess:{allow:[],deny:[],channelPolicies:[{sourceId:c.sourceId,mode:'inherit',allow:[rule(c,id)],deny:[]}]}});
  const count=c=>store.one('SELECT count(*) n FROM wecom_bot_contacts WHERE connection_id=?',c.id).n;
- return {root,file,store,options,repository,channels,capabilities,app,state,catalog,current,ready,search,seed,bulk,rule,policy,target,candidates,saveHuman,start,accept,bind,savePackage,count,advance:ms=>clock+=ms};
+ return {root,file,store,options,repository,channels,capabilities,app,state,catalog,current,ready,search,select,seed,bulk,rule,policy,target,candidates,saveHuman,start,accept,bind,savePackage,count,advance:ms=>clock+=ms};
 }
 
-test('thousands of searches retain verified, exact-ID and pending members plus 500 ordinary candidates',async t=>{
- const f=await fixture(t),c=await f.ready();await f.seed(c,['mapped','exact','pending','ordinary']);
- await f.bind(c,'mapped');f.channels.observeWeComContact(c.id,'exact');const pending=await f.start(c,'pending');
- f.policy(c,['mapped','exact']);await f.bulk(c,21);
- assert.equal(f.count(c),503);assert.equal(f.channels.botContacts.get(f.current(c),'ordinary'),undefined);
- for(const id of ['mapped','exact','pending'])assert.equal(f.channels.botContacts.get(f.current(c),id).display_name,'Member '+id);
- f.advance(600001);assert.equal(f.channels.botContacts.recent(f.current(c)).length,0);
- const choices=await f.candidates(c);assert.deepEqual(choices.map(x=>x.target.directoryUserId).sort(),['exact','mapped','pending']);
- assert.equal(choices.find(x=>x.target.directoryUserId==='pending').identityVerified,false);
- const queries=f.state.queries.length;
- await f.channels.assertWeComPrivateRecipient(c.id,'callback-mapped');await f.channels.assertWeComPrivateRecipient(c.id,'exact');
- assert.equal(f.state.queries.length,queries,'recipient checks stay local');
- await assert.rejects(f.channels.assertWeComPrivateRecipient(c.id,'mapped'),/authorization_denied/);
- await assert.rejects(f.channels.assertWeComPrivateRecipient(c.id,'pending'),/authorization_denied/);
- f.accept(c,'pending',pending);await f.bulk(c);await f.channels.assertWeComPrivateRecipient(c.id,'callback-pending');
- assert.equal(f.count(c),503);
+test('live searches never persist temporary candidates; explicit selection persists authenticated profiles',async t=>{
+ const f=await fixture(t),c=await f.ready();f.catalog.set('a',{userid:'a',name:'Member A',departments:['Engineering']});
+ const first=await f.search(c,['a']);assert.equal(first.items.length,1);assert.ok(first.items[0].selectionToken);assert.equal(f.count(c),0);
+ assert.equal(f.channels.botContacts.selectable(c,'a'),false);assert.throws(()=>f.channels.validateRules('w','e',[f.rule(c,'a')]),/invalid_member_search_candidate/);await assert.rejects(f.start(c,'a'),/invalid_member_search_candidate/);
+ f.select(c,first.items[0]);assert.equal(f.count(c),1);assert.equal(f.channels.botContacts.selectable(c,'a'),true);
+ f.policy(c,['a']);await f.saveHuman(c,['a']);f.savePackage(c,'a');assert.equal((await f.start(c,'a')).status,'pending');
+ await f.search(c,['a']);assert.equal(f.state.queries.length,2,'new keyword search always calls the official search');
+ await f.bulk(c,21);assert.equal(f.count(c),1);f.advance(86400000);assert.equal(f.channels.botContacts.get(c,'a').display_name,'Member A');
+ assert.deepEqual((await f.search(c,[])).items.map(p=>p.externalId),['a']);
 });
 
-test('saved inactive lists, disabled packages and unverified human choices retain profiles without binding or authorization',async t=>{
- const f=await fixture(t),c=await f.ready();await f.seed(c,['allow','deny','package','confirmer','ordinary']);
- f.policy(c,['allow'],['deny'],'all');const pkg=f.savePackage(c,'package',false);await f.saveHuman(c,['confirmer']);
- await f.bulk(c);f.advance(600001);
- for(const id of ['allow','deny','package','confirmer'])assert.equal(f.channels.botContacts.get(f.current(c),id).display_name,'Member '+id);
- assert.equal(f.count(c),504);assert.equal(f.channels.botContacts.get(f.current(c),'ordinary'),undefined);
- const choices=await f.candidates(c);assert.equal(choices.length,4);assert.ok(choices.every(x=>!x.identityVerified));
- assert.equal(f.current(c).wecomContactMappings,undefined);assert.equal(f.current(c).wecomVerifiedContactIds,undefined);
- const binding=await f.channels.resolveBinding(c.id);
- for(const id of ['allow','package','confirmer']){
-  await assert.rejects(f.channels.assertWeComPrivateRecipient(c.id,id),/authorization_denied/);
-  assert.equal(await f.capabilities.authorizeChannel({workspaceId:c.workspaceId,entityId:c.entityId,requesterKind:'channel_user',requesterId:id,requesterIdentity:{idNamespace:'user_id',applicationId:c.appId},conversationKind:'private'},binding.connection,'private'),false);
- }
- assert.equal(f.capabilities.list('w','e').find(p=>p.id===pkg.id).enabled,false);
- assert.equal((await f.start(c,'confirmer')).status,'pending','saved unverified selection remains bindable');
+test('selection evidence rejects tampering, expiration, user substitution and cross employee scope',async t=>{
+ const f=await fixture(t),c=await f.ready(),other=await f.ready('e2');f.catalog.set('a',{userid:'a',name:'A',departments:[]});const person=(await f.search(c,['a'])).items[0];
+ assert.throws(()=>f.select(c,{...person,selectionToken:person.selectionToken.slice(0,-8)+'AAAAAAAA'}),/invalid_member_search_candidate/);
+ assert.throws(()=>f.select(c,{...person,externalId:'other'}),/invalid_member_search_candidate/);assert.throws(()=>f.select(other,person),/invalid_member_search_candidate/);
+ f.advance(30*60_000);assert.throws(()=>f.select(c,person),/invalid_member_search_candidate/);assert.equal(f.count(c),0);
+ f.select(c,(await f.search(c,['a'])).items[0]);assert.equal(f.count(c),1);
 });
 
-test('retained selections can be reused but deleted references and retired challenges are not pinned forever',async t=>{
- const f=await fixture(t),c=await f.ready();await f.seed(c,['configured','package','confirmer','pending','mapped']);
- f.policy(c,['configured']);const pkg=f.savePackage(c,'package');await f.saveHuman(c,['confirmer']);const pending=await f.start(c,'pending');await f.bind(c,'mapped');
- const found=f.channels.botContacts.get(f.current(c),'configured').found_at;
- await f.bulk(c);f.advance(600001);
- assert.equal(f.channels.botContacts.get(f.current(c),'configured').found_at,found);
- assert.equal(f.channels.botContacts.selectable(f.current(c),'configured'),true);
- assert.deepEqual(f.channels.validateRules('w','e',[f.rule(c,'configured')]),[f.rule(c,'configured')]);
- assert.deepEqual(f.channels.validateRules('w','e',[f.rule(c,'configured')],[f.rule(c,'configured')]),[f.rule(c,'configured')]);
- f.policy(c);f.store.run('DELETE FROM capability_packages WHERE id=?',pkg.id);await f.saveHuman(c,[],1);
- const before=f.current(c);f.repository.save({...before,wecomContactMappings:[]},before);
- f.advance(pending.expiresAt-f.options.now());await f.bulk(c);
- assert.equal(f.count(c),500);
- for(const id of ['configured','package','confirmer','pending','mapped'])assert.equal(f.channels.botContacts.get(f.current(c),id),undefined);
+test('search failure is not disguised as cached success and late credentials cannot persist results',async t=>{
+ const f=await fixture(t),c=await f.ready();await f.seed(c,['a']);f.state.beforeSearch=async()=>{throw Error('provider unavailable');};
+ await assert.rejects(f.search(c,['a']),/unavailable/);assert.equal(f.count(c),1);
+ f.state.beforeSearch=async()=>{f.state.beforeSearch=undefined;await f.channels.save('w','e','wecom','u',{appId:c.appId,appSecret:'new-secret',expectedRevision:f.current(c).revision});};
+ await assert.rejects(f.search(c,['a']),/channel_configuration_changed/);assert.equal(f.count(c),0);
 });
 
-test('recipient uses the persisted identity, never a name search or same-name substitution',async t=>{
- const f=await fixture(t),c=await f.ready();await f.seed(c,['one','two']);await f.bind(c,'one');
- f.catalog.get('two').name='Member one';await f.search(c,['two']);
- await f.bulk(c);f.state.removed.add('one');
- const queries=f.state.queries.length;await f.channels.assertWeComPrivateRecipient(c.id,'callback-one');
- assert.equal(f.state.queries.length,queries);await assert.rejects(f.channels.assertWeComPrivateRecipient(c.id,'two'),/authorization_denied/);
- assert.equal(weComCallbackUserId(f.current(c),'two'),undefined);
- assert.equal(weComCallbackUserId(f.current(c),'one'),'callback-one');
-});
-
-test('profile cache loss does not erase a persisted recipient binding',async t=>{
- const f=await fixture(t),c=await f.ready();await f.seed(c,['mapped']);await f.bind(c,'mapped');
- const mapping=f.current(c).wecomContactMappings;f.store.run('DELETE FROM wecom_bot_contacts WHERE connection_id=?',c.id);
- await f.channels.assertWeComPrivateRecipient(c.id,'callback-mapped');
- await f.seed(c,['mapped']);await f.bulk(c);await f.channels.assertWeComPrivateRecipient(c.id,'callback-mapped');
- assert.deepEqual(f.current(c).wecomContactMappings,mapping);assert.equal((await f.start(c,'mapped')).status,'verified');
+test('selected profiles, pending verification and bindings survive search age and SQLite reopen without external recheck',async t=>{
+ const f=await fixture(t),c=await f.ready();await f.seed(c,['mapped','confirmer']);await f.bind(c,'mapped');await f.saveHuman(c,['confirmer']);await f.bulk(c);f.advance(600001);
+ const store=new Store(f.file),repository=new EmployeeChannelRepository(store),channels=new EmployeeChannelService(repository,f.options);
+ try{const current=repository.byId(c.id);assert.deepEqual(channels.botContacts.retained(current).map(p=>p.user_id),['confirmer','mapped']);assert.equal(channels.botContacts.recent(current).length,2);const queries=f.state.queries.length;await channels.assertWeComPrivateRecipient(c.id,'callback-mapped');assert.equal(f.state.queries.length,queries);}finally{store.close();}
 });
 
 for(const change of ['workspace','entity','bot','application','namespace','source','credentials'])test(`contact reads and writes reject ${change} scope confusion`,async t=>{
  const f=await fixture(t),c=await f.ready();await f.seed(c,['member']);await f.bind(c,'member');
  const current=f.current(c),patch={workspace:{workspaceId:'w2'},entity:{entityId:'e2'},bot:{botId:'other-bot'},application:{appId:'other-app'},namespace:{identity:{...current.identity,tenantIdNamespace:'corp_id'}},source:{sourceId:'other-source'},credentials:{authRevision:current.authRevision+1}}[change],foreign={...current,...patch};
  assert.equal(f.channels.botContacts.get(foreign,'member'),undefined);assert.deepEqual(f.channels.botContacts.recent(foreign),[]);assert.deepEqual(f.channels.botContacts.retained(foreign),[]);
- f.channels.botContacts.remember(foreign,[{id:'member',displayName:'Wrong scope',departmentPaths:[]}]);
- assert.equal(f.channels.botContacts.get(current,'member').display_name,'Member member');
- await assert.rejects(f.channels.botContacts.verifyRecipient(foreign,'callback-member',{search:async()=>{throw Error('must not query foreign scope');}}),/authorization_denied/);
+ f.channels.botContacts.remember(foreign,[{id:'member',displayName:'Wrong scope',departmentPaths:[]}]);assert.equal(f.channels.botContacts.get(current,'member').display_name,'Member member');
+ await assert.rejects(f.channels.botContacts.verifyRecipient(foreign,'callback-member'),/authorization_denied/);
 });
 
-test('foreign workspace/entity/source/app/auth references do not pin unrelated search history',async t=>{
- const f=await fixture(t),c=await f.ready(),other=await f.ready('e2'),foreign=await f.ready('e3','w2');
- await f.seed(c,['foreign-entity','foreign-workspace','foreign-source','foreign-app','foreign-auth','old-challenge','old-mapping']);
- await f.seed(other,['foreign-entity']);await f.seed(foreign,['foreign-workspace']);f.policy(other,['foreign-entity']);f.policy(foreign,['foreign-workspace']);
- const rules=[{...f.rule(c,'foreign-source'),sourceId:other.sourceId},{...f.rule(c,'foreign-app'),subjectId:channelSubject('channel_user','foreign-app','user_id',other.appId)}];
- f.store.run('UPDATE entity_directory_policies SET allow_json=? WHERE entity_id=?',JSON.stringify(rules),c.entityId);
- f.store.run('INSERT INTO employee_human_rules VALUES(?,?,1,?)',c.workspaceId,c.entityId,JSON.stringify([{questionScope:'*',target:{...f.target(c,'foreign-auth'),authRevision:c.authRevision+1}}]));
- const before=f.current(c);f.repository.save({...before,wecomContactIdentityRevision:c.authRevision-1,wecomVerifiedContactIds:['old-mapping'],wecomMemberChallenges:[{userId:'old-challenge',authRevision:c.authRevision-1,status:'pending',expiresAt:f.options.now()+1000000}]},before);
- await f.bulk(c);assert.equal(f.count(c),500);assert.equal(f.channels.botContacts.retained(f.current(c)).length,0);
- await f.bulk(other);await f.bulk(foreign);
- assert.equal(f.channels.botContacts.get(f.current(other),'foreign-entity').display_name,'Member foreign-entity');assert.equal(f.channels.botContacts.get(f.current(foreign),'foreign-workspace').display_name,'Member foreign-workspace');
-});
-
-for(const change of ['revalidate','credentials','replacement','unbind'])test(`${change} clears retained profiles and fences stale restoration`,async t=>{
- const f=await fixture(t),c=await f.ready();await f.seed(c,['mapped','configured','pending']);await f.bind(c,'mapped');f.policy(c,['configured']);await f.start(c,'pending');await f.bulk(c);
- const before=f.current(c);assert.equal(f.count(c),503);
+for(const change of ['revalidate','credentials','replacement','unbind'])test(`${change} clears selected profiles and fences stale selection tokens`,async t=>{
+ const f=await fixture(t),c=await f.ready();const person=(await f.seed(c,['member'])).items[0];const before=f.current(c);
  if(change==='revalidate')await f.channels.revalidate('w','e','wecom','u',before.revision);
  else if(change==='unbind')f.channels.unbind('w','e','wecom','u',{expectedRevision:before.revision});
  else await f.channels.save('w','e','wecom','u',{appId:change==='replacement'?'synthetic-replacement':c.appId,appSecret:'rotated-synthetic',expectedRevision:before.revision,...(change==='replacement'?{replaceSource:true}:{})});
- assert.equal(f.count(c),0);assert.equal(f.channels.botContacts.get(before,'mapped'),undefined);
- f.channels.botContacts.remember(before,[{id:'mapped',displayName:'Stale result',departmentPaths:[]}]);assert.equal(f.count(c),0);
- if(change!=='unbind'){const after=f.current(c);assert.equal(weComCallbackUserId(after,'mapped'),undefined);assert.deepEqual(f.channels.botContacts.retained(after),[]);}
+ assert.equal(f.count(c),0);assert.equal(f.channels.botContacts.get(before,'member'),undefined);assert.throws(()=>f.select(c,person));assert.equal(f.count(c),0);
 });
 
-test('retained profiles persist across a reopened SQLite service without refreshing search age',async t=>{
- const f=await fixture(t),c=await f.ready();await f.seed(c,['mapped','confirmer']);await f.bind(c,'mapped');await f.saveHuman(c,['confirmer']);await f.bulk(c);f.advance(600001);
- const store=new Store(f.file),repository=new EmployeeChannelRepository(store),channels=new EmployeeChannelService(repository,f.options);
- try{const current=repository.byId(c.id);assert.deepEqual(channels.botContacts.retained(current).map(p=>p.user_id).sort(),['confirmer','mapped']);assert.equal(channels.botContacts.recent(current).length,0);await channels.assertWeComPrivateRecipient(c.id,'callback-mapped');}
- finally{store.close();}
+test('selected people are pageable beyond 500; no arbitrary count or selection-age limit',async t=>{
+ const f=await fixture(t),c=await f.ready();for(let i=0;i<6;i++){const page=await f.search(c,['batch:saved'+i]);for(const p of page.items)f.select(c,p);}
+ assert.equal(f.count(c),600);f.advance(86400000);let cursor,ids=[];do{const page=await f.channels.searchWeComMembers('w','e',[],cursor);ids.push(...page.items.map(p=>p.externalId));cursor=page.nextCursor;}while(cursor);
+ assert.equal(ids.length,600);assert.equal(new Set(ids).size,600);assert.equal(f.channels.botContacts.knownPage(c,{keywords:['saved0']}).items.length,50);
 });
 
-test('recipient check reads the current mapping and rejects revocation without external lookup',async t=>{
- const f=await fixture(t),c=await f.ready();await f.seed(c,['mapped']);await f.bind(c,'mapped');
- const queries=f.state.queries.length,before=f.current(c);f.repository.save({...before,wecomContactMappings:[]},before);
- await assert.rejects(f.channels.assertWeComPrivateRecipient(c.id,'callback-mapped'),/authorization_denied/);assert.equal(f.state.queries.length,queries);
+test('legacy temporary rows cannot authorize selections but currently referenced profiles remain usable',async t=>{
+ const f=await fixture(t),c=await f.ready();await f.seed(c,['saved','temporary']);f.policy(c,['saved']);f.store.run('UPDATE wecom_bot_contacts SET selected=0 WHERE connection_id=?',c.id);
+ assert.equal(f.channels.botContacts.get(c,'temporary'),undefined);assert.equal(f.channels.botContacts.selectable(c,'temporary'),false);assert.equal(f.channels.botContacts.selectable(c,'saved'),true);assert.deepEqual((await f.search(c,[])).items.map(p=>p.externalId),['saved']);
 });
 
-test('an in-flight first inbound does not discard a search started before bot confirmation',async t=>{
- const f=await fixture(t),c=await f.channels.save('w','e','wecom','u',{appId:'synthetic-before-inbound',appSecret:'synthetic-secret'});
- assert.equal(c.status,'pending_verification');
+test('an in-flight first inbound does not invalidate a search and selection started before confirmation',async t=>{
+ const f=await fixture(t),c=f.current(await f.channels.save('w','e','wecom','u',{appId:'synthetic-before-inbound',appSecret:'synthetic-secret'}));
  f.state.beforeSearch=async()=>{f.state.beforeSearch=undefined;f.channels.observeFirstInbound(c.id,{appId:c.appId,botId:c.appId,tenantId:c.appId,tenantNamespace:'app_id'});};
- const result=await f.seed(f.current(c),['member']);assert.equal(result.items.length,1);
- assert.equal(f.channels.botContacts.get(f.current(c),'member').display_name,'Member member');
- assert.equal(f.channels.botContacts.selectable(f.current(c),'member'),true);
+ await f.seed(c,['member']);assert.equal(f.channels.botContacts.selectable(f.current(c),'member'),true);
 });
 
-test('split configuration projects all retained members beyond 500 and clears them after rotation',async t=>{
- const {configurationSnapshot,ConfigurationPoller,deriveRuntimeConfigurationKey}=await import('../dist/split/config-sync.js');
- const f=await fixture(t),c=await f.ready();
- for(let i=0;i<6;i++){
-  const result=await f.search(c,['batch:snapshot'+i]);
-  f.capabilities.save('w','e',{name:'Retained batch '+i,enabled:false,mode:'inherit',allowMemberIds:[],denyMemberIds:[],resourceIds:[],directoryAccess:{allow:[],deny:[],channelPolicies:[{sourceId:c.sourceId,mode:'inherit',allow:result.items.map(person=>f.rule(c,person.externalId)),deny:[]}]}});
- }
- await f.seed(c,['mapped','pending']);await f.bind(c,'mapped');await f.start(c,'pending');await f.bulk(c);
- assert.equal(f.count(c),1102);f.advance(600001);
- const token='synthetic-configuration-token',runtime=new Store(join(f.root,'runtime.sqlite'),{role:'runtime'}),repository=new EmployeeChannelRepository(runtime),channels=new EmployeeChannelService(repository,{...f.options,masterKey:deriveRuntimeConfigurationKey(token)});
- const snapshot=()=>configurationSnapshot({store:f.store,masterKey:f.options.masterKey,token,now:f.options.now});
- assert.equal(snapshot().tables.find(table=>table.name==='wecom_bot_contacts').rows.length,1102);
- const poller=new ConfigurationPoller({store:runtime,baseUrl:'http://127.0.0.1:9999',token,now:f.options.now,fetch:async()=>{const value=snapshot();return Response.json(value,{headers:{etag:'"'+value.epoch+'"'}});}});
- try{
-  assert.equal(await poller.poll(),true);assert.equal(poller.ready,true);
-  const current=repository.byId(c.id);assert.equal(runtime.one('SELECT count(*) n FROM wecom_bot_contacts').n,1102);
-  assert.equal(channels.botContacts.retained(current).length,602);assert.equal(channels.botContacts.recent(current).length,0);
-  await channels.assertWeComPrivateRecipient(c.id,'callback-mapped');
-  await f.channels.revalidate('w','e','wecom','u',f.current(c).revision);assert.equal(await poller.poll(),true);
-  assert.equal(runtime.one('SELECT count(*) n FROM wecom_bot_contacts').n,0);assert.equal(channels.botContacts.get(current,'mapped'),undefined);
- }finally{poller.stop();runtime.close();}
-});
-
-
-test('local known people are pageable and retained identities survive search age without becoming an organization snapshot',async t=>{
- const f=await fixture(t),c=await f.ready();await f.seed(c,['a','b','c']);await f.bind(c,'a');f.policy(c,['b']);
- let page=f.channels.botContacts.knownPage(f.current(c),{limit:2});assert.deepEqual(page.items.map(p=>p.user_id),['a','b']);assert.equal(page.exhausted,false);
- page=f.channels.botContacts.knownPage(f.current(c),{after:page.nextAfter,limit:2});assert.deepEqual(page.items.map(p=>p.user_id),['c']);assert.equal(page.exhausted,true);
- f.advance(600001);page=f.channels.botContacts.knownPage(f.current(c),{keywords:['Member']});assert.deepEqual(page.items.map(p=>p.user_id),['a','b']);
- assert.equal(f.channels.botContacts.knownPage(f.current(c),{keywords:['Engineering']}).items.length,2);
- assert.equal(f.channels.botContacts.knownPage({...f.current(c),authRevision:c.authRevision+1}).items.length,0);
- assert.throws(()=>f.channels.botContacts.knownPage(f.current(c),{limit:101}),/invalid_response/);
-});
+ test('fresh search updates selected profile instead of overwriting it with old local metadata',async t=>{
+ const f=await fixture(t),c=await f.ready();await f.seed(c,['renamed']);
+ f.catalog.set('renamed',{userid:'renamed',name:'New display name',departments:['New team']});
+ const page=await f.search(c,['renamed']),person=page.items.find(p=>p.externalId==='renamed');
+ assert.equal(person.displayName,'New display name');assert.deepEqual(person.departmentPaths,['New team']);
+ f.select(c,person);assert.equal(f.channels.botContacts.get(f.current(c),'renamed').display_name,'New display name');
+ });

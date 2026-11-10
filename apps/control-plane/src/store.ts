@@ -99,6 +99,8 @@ export class Store {
     if (!this.all<{name:string}>('PRAGMA table_info(entities)').some(column => column.name === 'model_settings_revision')) this.db.exec('ALTER TABLE entities ADD COLUMN model_settings_revision INTEGER NOT NULL DEFAULT 0');
     this.db.exec('CREATE TABLE IF NOT EXISTS web_conversation_previews(conversation_id TEXT PRIMARY KEY REFERENCES conversations(id) ON DELETE CASCADE,message_id TEXT NOT NULL,message_rowid INTEGER NOT NULL,excerpt TEXT NOT NULL CHECK(length(excerpt)<=160),created_at INTEGER NOT NULL,expires_at INTEGER NOT NULL)');
     if (!this.all<{name:string}>('PRAGMA table_info(entities)').some(column => column.name === 'avatar_preset')) this.db.exec('ALTER TABLE entities ADD COLUMN avatar_preset TEXT');
+    // Existing employees stay restrictive; only the entity creation path opts in to first-channel defaults.
+    if (!this.all<{name:string}>('PRAGMA table_info(entities)').some(column => column.name === 'initial_channel_defaults_json')) this.db.exec("ALTER TABLE entities ADD COLUMN initial_channel_defaults_json TEXT NOT NULL DEFAULT '{}'");
     if (!this.all<{name:string}>('PRAGMA table_info(entities)').some(column => column.name === 'description')) this.db.exec("ALTER TABLE entities ADD COLUMN description TEXT NOT NULL DEFAULT ''");
     if (!this.all<{name:string}>('PRAGMA table_info(task_operations)').some(column => column.name === 'receipt_json')) this.db.exec('ALTER TABLE task_operations ADD COLUMN receipt_json TEXT');
     if (!this.all<{name:string}>('PRAGMA table_info(tasks)').some(column => column.name === 'snapshot_expires_at')) this.db.exec("ALTER TABLE tasks ADD COLUMN snapshot_expires_at INTEGER; UPDATE tasks SET snapshot_expires_at=0 WHERE snapshot_json!='[]';");

@@ -16,13 +16,13 @@ export const CONFIGURATION_MODULES = {
   permissions: ['entity_web_policies', 'entity_directory_policies', 'employee_handoff_policies', 'capability_packages'],
   models: ['model_profiles', 'model_catalog', 'entity_model_bindings', 'workspace_model_defaults', 'model_selection_epochs'],
   resources: ['skill_resource_versions', 'skill_resource_state', 'workspace_mcp_versions', 'workspace_mcp_state'],
-  channels: ['employee_group_sharing_rules', 'employee_channel_connections', 'employee_channel_verification_events','wecom_bot_contacts','wecom_identity_bindings'],
+  channels: ['employee_group_sharing_rules', 'employee_channel_connections', 'employee_channel_verification_events','wecom_bot_contacts','wecom_identity_bindings','wecom_member_challenges'],
   directory: ['directory_sync_tasks', 'directory_snapshot_users', 'directory_snapshot_aliases', 'directory_alias_projection_meta', 'directory_snapshot_departments', 'directory_snapshot_search', 'directory_snapshot_memberships', 'directory_snapshot_scope', 'directory_sync_part_state'],
   triggers: ['trigger_bindings', 'trigger_credentials'],
 } as const;
 export type ConfigurationModule = keyof typeof CONFIGURATION_MODULES;
 export type ConfigurationRow = Record<string, SQLInputValue>;
-export interface ConfigurationTable { name: string; sql: string; rows: ConfigurationRow[] }
+export interface ConfigurationTable { name: string; sql: string; rows: ConfigurationRow[]; page?: {count:number; digest:string} }
 export interface ConfigurationSnapshot {
   schemaVersion: 1; epoch: string; generatedAt: number;
   moduleRevisions: Record<ConfigurationModule, string>;
@@ -104,6 +104,9 @@ export function configurationSnapshot(options: ConfigurationApiOptions): Configu
 }
 export function registerConfigurationApi(app: FastifyInstance, options: ConfigurationApiOptions): void {
   const prefix = '/internal/config';
+  // Bounded immutable generation cache. A final epoch check prevents mixed/stale apply.
+  const pages=new Map<string,{at:number;rows:ConfigurationRow[]}>();
+  const pageSize=100, pageTtl=60000;
   app.addHook('onRequest', async (request, reply) => {
     if (request.url.split('?')[0]?.startsWith(prefix + '/') && !authorized(request.headers.authorization, options.token)) return reply.code(401).send({ error: 'configuration_unauthorized' });
   });
@@ -111,8 +114,22 @@ export function registerConfigurationApi(app: FastifyInstance, options: Configur
     try {
       const snapshot = configurationSnapshot(options), etag = '"' + snapshot.epoch + '"';
       reply.header('cache-control', 'no-store').header('etag', etag);
-      return request.headers['if-none-match'] === etag ? reply.code(304).send() : snapshot;
+      if(request.headers['if-none-match']===etag)return reply.code(304).send();
+      const table=snapshot.tables.find(t=>t.name==='wecom_member_challenges');
+      if(table&&table.rows.length){
+        const now=(options.now??Date.now)();for(const [epoch,p]of pages)if(now-p.at>pageTtl)pages.delete(epoch);
+        pages.set(snapshot.epoch,{at:now,rows:table.rows});while(pages.size>3)pages.delete(pages.keys().next().value!);
+        table.page={count:table.rows.length,digest:digest(table.rows)};table.rows=[];
+      }
+      return snapshot;
     } catch { return reply.code(503).send({ error: 'configuration_unavailable' }); }
+  });
+  app.post(prefix+'/challenge-page',(request,reply)=>{
+    reply.header('cache-control','no-store');const b=request.body;
+    if(!object(b)||Object.keys(b).sort().join()!=='epoch,offset'||typeof b['epoch']!=='string'||!Number.isSafeInteger(b['offset'])||Number(b['offset'])<0||Number(b['offset'])%pageSize!==0)return reply.code(400).send({error:'configuration_page_invalid'});
+    const page=pages.get(b['epoch']);if(!page||(options.now??Date.now)()-page.at>pageTtl)return reply.code(409).send({error:'configuration_generation_expired'});
+    const offset=Number(b['offset']);if(offset>=page.rows.length)return reply.code(400).send({error:'configuration_page_invalid'});
+    const rows=page.rows.slice(offset,offset+pageSize);return{epoch:b['epoch'],offset,rows,nextOffset:offset+rows.length<page.rows.length?offset+rows.length:null};
   });
   app.post(prefix + '/model', async (request, reply) => {
     try {
@@ -170,6 +187,7 @@ function validateSnapshot(value: unknown): asserts value is ConfigurationSnapsho
   const seen = new Set<string>();
   for (const table of value['tables']) {
     if (!object(table) || typeof table['name'] !== 'string' || !allowedTables.has(table['name']) || seen.has(table['name']) || typeof table['sql'] !== 'string' || !Array.isArray(table['rows'])) throw Error('configuration_table_forbidden');
+    if(table['page']!==undefined&&(!object(table['page'])||table['name']!=='wecom_member_challenges'||table['rows'].length!==0||Object.keys(table['page']).sort().join()!=='count,digest'||!Number.isSafeInteger(table['page']['count'])||Number(table['page']['count'])<1||typeof table['page']['digest']!=='string'||!(/^[a-f0-9]{64}$/).test(table['page']['digest'])))throw Error('configuration_page_invalid');
     const schema = table['sql'];
     const match = schema.match(/^\s*CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?["`\[]?([a-zA-Z_][a-zA-Z_0-9]*)["`\]]?\s*\(/i);
     if (!match || match[1] !== table['name'] || /;|--|\/\*|\b(?:ATTACH|DETACH|PRAGMA|VIRTUAL|TRIGGER|LOAD_EXTENSION)\b/i.test(schema)) throw Error('configuration_schema_invalid');
@@ -236,6 +254,23 @@ export class ConfigurationPoller {
       const value: unknown = await response.json(); validateSnapshot(value);
       if (response.headers.get('etag') !== '"' + value.epoch + '"') throw Error('configuration_etag_invalid');
       if (generation !== this.stoppedGeneration) return false;
+      let paged=false;
+      for(const table of value.tables){if(!table.page)continue;paged=true;const expected=table.page,loaded:ConfigurationRow[]=[];
+        while(loaded.length<expected.count){
+          const pageResponse=await(this.options.fetch??fetch)(this.options.baseUrl+'/internal/config/challenge-page',{method:'POST',headers:{authorization:'Bearer '+this.options.token,'content-type':'application/json'},body:JSON.stringify({epoch:value.epoch,offset:loaded.length}),redirect:'error',signal:AbortSignal.any([this.controller.signal,AbortSignal.timeout(10000)])});
+          if(!pageResponse.ok)throw Error('configuration_page_unavailable');const page:unknown=await pageResponse.json();
+          if(!object(page)||page['epoch']!==value.epoch||page['offset']!==loaded.length||!Array.isArray(page['rows'])||page['rows'].length!==Math.min(100,expected.count-loaded.length))throw Error('configuration_page_invalid');
+          for(const row of page['rows']){validateRow(row);loaded.push(row);}
+          if(page['nextOffset']!==(loaded.length<expected.count?loaded.length:null))throw Error('configuration_page_invalid');
+          if(generation!==this.stoppedGeneration)return false;
+        }
+        if(digest(loaded)!==expected.digest)throw Error('configuration_page_digest_invalid');table.rows=loaded;delete table.page;
+      }
+      if(paged){
+        const recheck=await(this.options.fetch??fetch)(this.options.baseUrl+'/internal/config/snapshot',{headers:{authorization:'Bearer '+this.options.token,'if-none-match':'"'+value.epoch+'"'},redirect:'error',signal:AbortSignal.any([this.controller.signal,AbortSignal.timeout(10000)])});
+        if(recheck.status!==304||recheck.headers.get('etag')!=='"'+value.epoch+'"')throw Error('configuration_generation_changed');
+      }
+      if(generation!==this.stoppedGeneration)return false;
       const rows: Record<string, ConfigurationRow[]> = Object.fromEntries(value.tables.map(t => [t.name, t.rows]));
       for (const table of value.privateCredentials.tables) rows[table.name] = table.rows;
       for (const name of this.tableNames) if (!(name in rows)) rows[name] = [];

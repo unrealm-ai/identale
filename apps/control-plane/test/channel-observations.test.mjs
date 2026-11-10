@@ -192,7 +192,7 @@ test('WeCom administrator-relay proof crosses split observations with no clear c
 test('WeCom completed proof safely merges with a concurrent platform challenge without discarding either',async t=>{
  const phrase='000456',now=Date.now(),hash=(await import('../dist/employee-channels/wecom-member-verification.js')).weComMemberCodeHash('fixture-secret',{id:'c',sourceId:'source',authRevision:1},phrase);
  const challenge={requestId:'22222222-2222-4222-8222-222222222222',userId:'search-a',authRevision:1,phraseHash:hash,createdAt:now-1000,expiresAt:now+86399000,status:'pending',method:'administrator_relay',createdBy:'manager',issuedAt:now-500};
- const f=fixture(t,r=>({...r,provider:'wecom',botId:'app',eventTenantId:'app',status:'verified',inboundVerified:true,directoryStatus:'unavailable',verification:undefined,wecomMemberChallenges:[challenge,{...challenge,requestId:'44444444-4444-4444-8444-444444444444',userId:'historical-failure',status:'failed'}]}));
+ const f=fixture(t,r=>({...r,provider:'wecom',botId:'app',eventTenantId:'app',status:'verified',inboundVerified:true,directoryStatus:'unavailable',verification:undefined,wecomMemberChallenges:[challenge,{...challenge,requestId:'44444444-4444-4444-8444-444444444444',userId:'historical-failure',phraseHash:'f'.repeat(64),status:'failed'}]}));
  const {WeComMemberVerification}=await import('../dist/employee-channels/wecom-member-verification.js');let tick=now;const verification=new WeComMemberVerification(f.runtime.repository,()=>++tick,{secret:()=> 'fixture-secret'});
  verification.accept(f.runtime.repository.byId('c'),{text:phrase,callbackUserId:'callback-a',eventId:'merge-event',messageId:'merge-message',privateMessage:true});
  const before=f.platform.repository.byId('c'),other={...challenge,requestId:'33333333-3333-4333-8333-333333333333',userId:'search-b',phraseHash:'c'.repeat(64)};
@@ -209,6 +209,7 @@ for(const unexpected of ['expired-history','active-challenge','history-with-new-
  const historical={...challenge,requestId:'old-request',userId:'old-person',phraseHash:'a'.repeat(64),createdAt:now-4*day-1000,expiresAt:now-3*day-1000,issuedAt:now-4*day-1000};
  const f=fixture(t,r=>({...r,provider:'wecom',botId:'app',eventTenantId:'app',status:'verified',inboundVerified:true,directoryStatus:'unavailable',verification:undefined,wecomMemberChallenges:[historical,challenge]}));
  const current=f.platform.repository.byId('c');
+ f.platform.store.run("DELETE FROM wecom_member_challenges WHERE request_id='old-request'");
  f.platform.repository.save({...current,wecomMemberChallenges:[challenge,{...challenge,requestId:'newly-issued',userId:'new-person',phraseHash:'b'.repeat(64)}]},current);
  const verifier=new WeComMemberVerification(f.runtime.repository,()=>now,{secret:()=> 'fixture-secret'});
  assert.equal(verifier.accept(f.runtime.repository.byId('c'),{text:phrase,callbackUserId:'callback-current',eventId:'prune-proof',messageId:'prune-message',privateMessage:true}),'verified');
@@ -281,4 +282,22 @@ test('relational identity writes are atomic with CAS, scoped, and ignore legacy 
  f.platform.repository.save({...current,authRevision:2,wecomContactIdentityRevision:undefined},current);assert.equal(f.platform.store.one('SELECT count(*) n FROM wecom_identity_bindings').n,0);
  const fresh=f.platform.repository.byId('c');f.platform.store.run('UPDATE employee_channel_connections SET record_json=? WHERE id=?',JSON.stringify({...fresh,wecomContactIdentityRevision:2,wecomVerifiedContactIds:['legacy-only']}),'c');
  assert.equal(identityLookup(f.platform.repository.byId('c'),'user_id','legacy-only'),undefined);assert.equal(f.platform.repository.byId('c').wecomVerifiedContactIds,undefined);
+});
+
+test('thousands of challenge rows produce only a single changed nonce in the observation',async t=>{
+ const {withChallengeDelta,challengeLookup}=await import('../dist/employee-channels/wecom-verification-challenges.js');
+ const now=Date.now(),challenges=Array.from({length:1001},(_,i)=>({requestId:'nonce-'+i,userId:'person-'+i,authRevision:1,phraseHash:String(i).padStart(64,'0'),createdAt:now-1000,expiresAt:now+86399000,issuedAt:now-1000,status:'pending',method:'administrator_relay',createdBy:'manager'}));
+ const f=fixture(t,r=>({...r,provider:'wecom',botId:'app',eventTenantId:'app',status:'verified',inboundVerified:true,directoryStatus:'unavailable',verification:undefined,wecomMemberChallenges:challenges}));
+ const before=f.runtime.repository.byId('c');
+ const all=f.runtime.store.all.bind(f.runtime.store);f.runtime.store.all=(sql,...args)=>{if(sql.includes('FROM wecom_member_challenges'))throw Error('full challenge enumeration');return all(sql,...args);};
+ f.runtime.repository.save(withChallengeDelta({...before},[{...challenges[1000],status:'failed',completedAt:now}]),before);
+ const report=JSON.parse(f.runtime.store.one('SELECT body_json FROM channel_state_reports').body_json);assert.equal(report.wecomChallengeDelta,true);assert.equal(report.observation.wecomMemberChallenges.length,1);assert.ok(JSON.stringify(report).length<4096);
+ await f.reporter.flush();assert.equal(challengeLookup(f.platform.repository.byId('c'),'request_id','nonce-1000').status,'failed');assert.equal(f.platform.store.one('SELECT count(*) n FROM wecom_member_challenges').n,1001);f.runtime.store.all=all;
+});
+
+test('challenge delta must match platform-issued nonce even when the configuration CAS matches',async t=>{
+ const {withChallengeDelta}=await import('../dist/employee-channels/wecom-verification-challenges.js');const now=Date.now();
+ const f=fixture(t,r=>({...r,provider:'wecom',botId:'app',eventTenantId:'app',status:'verified',inboundVerified:true,directoryStatus:'unavailable',verification:undefined}));
+ const before=f.runtime.repository.byId('c');f.runtime.repository.save(withChallengeDelta({...before},[{requestId:'unissued',userId:'attacker',authRevision:1,phraseHash:'b'.repeat(64),createdAt:now-1000,expiresAt:now+86399000,issuedAt:now-1000,status:'verified',completedAt:now,method:'administrator_relay',createdBy:'manager'}]),before);
+ await f.reporter.flush();assert.equal(f.reporter.status()[0].status,'conflict');assert.equal(f.platform.store.one('SELECT count(*) n FROM wecom_member_challenges').n,0);
 });

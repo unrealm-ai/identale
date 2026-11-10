@@ -94,7 +94,7 @@ async function mutate(action: 'connect' | 'revalidate' | 'settings') {
       const result = await channelApi<DirectoryConnection & {validation?:ChannelValidation}>(`${props.base}/channels/${selected}${action === 'connect' ? '' : `/${action}`}`, signal, body, action === 'revalidate' ? 'POST' : 'PUT');
       if (signal.aborted) return;
       report.value = result.validation ?? null;
-      notice.value = rebinding ? '换绑已保存。本渠道已恢复新建默认配置，旧名单未迁移；请核对新连接状态与使用范围。' : action === 'settings' ? (current?.enabled ? '已提交停用，请刷新核对连接状态。' : '已提交启用，请重新验证凭据并等待连接。') : current ? '已提交重新验证或连接。使用范围、能力包、群共享和上下文设置均保留，停用状态不变；请核对连接状态。' : '配置已保存：空白名单、群内可用，能力包继承本渠道范围。请核对连接状态。';
+      notice.value = rebinding ? '换绑已保存。本渠道已重置为空白名单配置，旧名单未迁移；请核对新连接状态与使用范围。' : action === 'settings' ? (current?.enabled ? '已提交停用，请刷新核对连接状态。' : '已提交启用，请重新验证凭据并等待连接。') : current ? '已提交重新验证或连接。使用范围、能力包、群共享和上下文设置均保留，停用状态不变；请核对连接状态。' : '配置已保存，能力包继承本渠道范围。请核对连接状态与使用范围。';
       if(rebinding)emit('rebound');
     } finally { if (!signal.aborted) { await read(signal); if (!signal.aborted) emit('changed'); } }
   });
@@ -156,7 +156,7 @@ onUnmounted(() => { controller.abort(); clearSecrets();emit('dirtyChanged',false
               <p v-if="provider==='feishu'" class="field-note">App ID 标识应用；机器人 open_id 标识应用内的机器人，由官方 API 自动读取，无需手填。未取得可信 open_id 时不能完成连接验证。</p>
               <p class="field-note">{{provider==='wecom'?'仅需本员工独立机器人的 BotID 和 Secret。':'每位员工使用独立机器人应用。'}}<InfoHint label="凭据保存与更换">密钥只写入，提交后清空。相同机器人重新验证、重连或轮换密钥保留所有配置和停用状态。更换机器人须确认换绑并保存；转绑其他员工前须先解除原绑定。</InfoHint></p>
             </NForm>
-            <NAlert v-if="replacing" type="warning" aria-label="换绑授权重置提醒">保存换绑后，启用新连接，仅当前渠道恢复新建默认值：空白名单、群内可用、能力包继承员工使用范围；飞书近期群消息上下文默认打开。当前渠道的人员名单、能力包渠道限制、群共享规则与缓存会重置，旧名单不迁移。群内可用和能力包继承可能扩大授权。其他渠道、网页权限和资源绑定不变。未保存前原绑定继续有效。<NCheckbox v-model:checked="replaceSource" :disabled="channelLocked" aria-label="确认换绑并重置当前渠道配置">我确认换绑并重置当前渠道配置</NCheckbox></NAlert>
+            <NAlert v-if="replacing" type="warning" aria-label="换绑授权重置提醒">保存换绑后，启用新连接，仅当前渠道恢复换绑默认值：空白名单、群内可用、能力包继承员工使用范围；飞书近期群消息上下文默认打开。当前渠道的人员名单、能力包渠道限制、群共享规则与缓存会重置，旧名单不迁移。群内可用和能力包继承可能扩大授权。其他渠道、网页权限和资源绑定不变。未保存前原绑定继续有效。<NCheckbox v-model:checked="replaceSource" :disabled="channelLocked" aria-label="确认换绑并重置当前渠道配置">我确认换绑并重置当前渠道配置</NCheckbox></NAlert>
             <ChannelSetupRequirements :provider="provider"/>
             <NAlert v-if="error" type="error" role="alert">{{error}}</NAlert><NAlert v-if="notice" type="info" role="status">{{notice}}</NAlert>
             <ChannelValidationReport v-if="report && (provider!=='wecom'||!report.canContinue)" :report="report"/>

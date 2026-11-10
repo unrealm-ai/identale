@@ -54,7 +54,7 @@ test('canonical callback resolves through both directions of the current mapping
  const f=await fixture(t);f.contact('search-a','Correct searched person');f.contact('callback-a','Wrong callback collision');f.contact('same-name','Correct searched person');f.map('search-a','callback-a');
  f.request('mapped',f.canonical('search-a','callback-a'));f.request('legacy',f.canonical('search-a','callback-a',false));f.request('homonym',f.target('same-name'));f.request('unmapped',f.canonical('none','same-name',false));
  let rows=await f.list();assert.equal(rows.find(row=>row.requestId==='mapped').recipientLabel,'Correct searched person · 企业微信');assert.equal(rows.find(row=>row.requestId==='legacy').recipientKey,rows.find(row=>row.requestId==='mapped').recipientKey);assert.notEqual(rows.find(row=>row.requestId==='homonym').recipientKey,rows.find(row=>row.requestId==='mapped').recipientKey);assert.equal(rows.find(row=>row.requestId==='unmapped').recipientLabel,'same-name · 企业微信');assert.ok(!JSON.stringify(rows).includes('Wrong callback collision'));
- f.map('other-search','callback-a');rows=await f.list();assert.equal(rows.find(row=>row.requestId==='mapped').recipientLabel,'callback-a · 企业微信');assert.equal(rows.find(row=>row.requestId==='legacy').recipientLabel,'callback-a · 企业微信');
+ assert.throws(()=>f.map('other-search','callback-a'));rows=await f.list();assert.equal(rows.find(row=>row.requestId==='mapped').recipientLabel,'Correct searched person · 企业微信');assert.equal(rows.find(row=>row.requestId==='legacy').recipientLabel,'Correct searched person · 企业微信');
 });
 
 test('directory names are fenced by workspace, employee, bot, source, credentials, tenant and namespace',async t=>{
@@ -66,13 +66,13 @@ test('directory names are fenced by workspace, employee, bot, source, credential
 
 test('changed or disabled connections and stale, missing or ambiguous mappings cannot reveal a canonical name',async t=>{
  const f=await fixture(t);f.contact('search-b','Current secret name');f.map('search-b','callback-b');f.request('canonical',f.canonical('search-b','callback-b'));
- const original=f.channels.repository.byId(f.current.id),changes=[{sourceId:'changed-source'},{authRevision:2},{wecomContactIdentityRevision:0},{wecomContactMappings:[]},{enabled:false,status:'disabled'},{status:'pending_verification'},{identity:{...original.identity,tenantIdNamespace:'corp_id'}},{wecomContactMappings:[...original.wecomContactMappings,{userId:'search-b',callbackUserId:'other-callback'}]}];
- for(const change of changes){const previous=f.channels.repository.byId(f.current.id);assert.equal(f.channels.repository.save({...original,...change},previous),true);assert.equal((await f.list())[0].recipientLabel,'callback-b · 企业微信');}
+ const original=f.channels.repository.byId(f.current.id),originalMappings=[...original.wecomContactMappings],changes=[{sourceId:'changed-source'},{authRevision:2},{wecomContactIdentityRevision:0},{wecomContactMappings:[]},{enabled:false,status:'disabled'},{status:'pending_verification'},{identity:{...original.identity,tenantIdNamespace:'corp_id'}}];
+ for(const change of changes){let previous=f.channels.repository.byId(f.current.id);assert.equal(f.channels.repository.save({...original,wecomContactMappings:originalMappings},previous),true);previous=f.channels.repository.byId(f.current.id);assert.equal(f.channels.repository.save({...previous,...change},previous),true);assert.equal((await f.list())[0].recipientLabel,'callback-b · 企业微信');}
 });
 
 test('a saved choice survives cache age but missing or foreign-scope cache falls back to ID, not a guessed person',async t=>{
  const f=await fixture(t);f.contact('search-b','Known B');f.request('b',f.target());f.store.run('UPDATE wecom_bot_contacts SET found_at=0');assert.equal((await f.list())[0].recipientLabel,'Known B · 待验证');
- f.store.run('DELETE FROM wecom_bot_contacts WHERE connection_id=?',f.current.id);f.contact('search-b','Foreign cache',f.other);f.store.run('INSERT INTO wecom_bot_contacts VALUES(?,?,?,?,?,?,?)',f.current.id,'old-source',0,'search-b','Stale name','[]',Date.now());assert.equal((await f.list())[0].recipientLabel,'search-b · 待验证');
+ f.store.run('DELETE FROM wecom_bot_contacts WHERE connection_id=?',f.current.id);f.contact('search-b','Foreign cache',f.other);f.store.run('INSERT INTO wecom_bot_contacts(connection_id,source_id,auth_revision,user_id,display_name,department_paths,found_at) VALUES(?,?,?,?,?,?,?)',f.current.id,'old-source',0,'search-b','Stale name','[]',Date.now());assert.equal((await f.list())[0].recipientLabel,'search-b · 待验证');
 });
 
 test('rule replacement or unmatched candidate reports configuration changed without substituting A',async t=>{

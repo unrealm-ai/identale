@@ -93,7 +93,17 @@ export function registerEmployeeCreationRoutes(app: FastifyInstance, services: {
       if (typeof body['channelDraftId'] === 'string') connectionId = channelDrafts.persist(workspaceId, userId, body['channelDraftId'], entity.id);
       if (model?.['kind'] === 'existing') profiles.select(workspaceId, entity.id, model['profileId'] as string);
       if (body['webAccess'] !== undefined) capabilities.saveWebAccess(workspaceId, entity.id, body['webAccess']);
-      if (body['directoryAccess'] !== undefined) capabilities.saveDirectoryAccess(workspaceId, entity.id, body['directoryAccess']);
+      if (body['directoryAccess'] !== undefined) {
+        const access = capabilities.saveDirectoryAccess(workspaceId, entity.id, body['directoryAccess']);
+        // Explicit creation-time allow rules must not be ignored by the new all-user default.
+        const requested = body['directoryAccess'] as Record<string, unknown>;
+        if (requested['channelPolicies'] === undefined && Array.isArray(requested['allow']) && requested['allow'].length) {
+          for (const policy of access.channelPolicies ?? []) if (policy.allow.length) capabilities.patchDirectoryAccess(workspaceId, entity.id, {
+            sourceId: policy.sourceId, mode: 'allowlist', allow: policy.allow, deny: policy.deny,
+            allowGroupMembers: policy.allowGroupMembers, expectedRevision: policy.revision,
+          });
+        }
+      }
       const triggerMap=new Map<string,string>();const triggerService=services.trigger?.();if((drafts.length||body['triggerHistoryPolicy']!==undefined)&&!triggerService)fail(503,'trigger_unavailable');if(triggerService){if(body['triggerHistoryPolicy']!==undefined)triggerService.setPolicy(workspaceId,entity.id,{policy:body['triggerHistoryPolicy'],expectedVersion:1});for(const d of drafts){const{draftId,...input}=d;const t=triggerService.save(workspaceId,entity.id,input);triggerMap.set(String(draftId),t.id);}}
       for (const draft of packages){const p=draft as Record<string,unknown>,usage=p['triggerUsageScope'] as {mode:string;allowTriggerIds:string[];denyTriggerIds:string[]}|undefined;capabilities.save(workspaceId,entity.id,usage?{...p,triggerUsageScope:{...usage,allowTriggerIds:Array.isArray(usage.allowTriggerIds)?usage.allowTriggerIds.map(id=>triggerMap.get(id)??id):usage.allowTriggerIds,denyTriggerIds:Array.isArray(usage.denyTriggerIds)?usage.denyTriggerIds.map(id=>triggerMap.get(id)??id):usage.denyTriggerIds}}:draft);}
       store.run('INSERT INTO employee_creation_operations(user_id,workspace_id,operation_id,request_hash,entity_id) VALUES(?,?,?,?,?)', userId, workspaceId, operationId, hash, entity.id);

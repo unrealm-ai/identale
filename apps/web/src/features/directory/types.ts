@@ -21,7 +21,7 @@ export interface DirectoryConnection {
   memberSearchIdentityVerified?:boolean;
   memberSearchVerifiedUserIds?:string[];
 }
-export interface DirectoryItem { identityVerified?: boolean; externalId: string; subjectId: string; displayName: string; kind: 'channel_user' | 'department'; departmentPaths?:string[] }
+export interface DirectoryItem { selectionToken?: string; identityVerified?: boolean; externalId: string; subjectId: string; displayName: string; kind: 'channel_user' | 'department'; departmentPaths?:string[] }
 export interface DirectoryPage { sourceId: string; provider: DirectoryProvider; appId: string; items: DirectoryItem[]; nextCursor?: string; exhausted: boolean; limited?:boolean; snapshotVersion?:number; sync?:DirectorySyncStatus }
 export interface DirectorySubjects { sources: DirectoryConnection[]; users: never[]; departments: never[] }
 export interface DirectoryAccessRule {

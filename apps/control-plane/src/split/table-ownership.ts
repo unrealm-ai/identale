@@ -10,7 +10,7 @@ export const PLATFORM_TABLES = [
   'skill_resource_state', 'workspace_mcp_versions', 'workspace_mcp_state',
   'employee_channel_connections', 'employee_channel_verification_events', 'wecom_identity_bindings',
   'employee_channel_audit', 'employee_channel_directory_credentials', 'feishu_app_registrations',
-  'wecom_bot_contacts', 'wecom_member_verification_requests',
+  'wecom_bot_contacts', 'wecom_member_verification_requests', 'wecom_member_challenges',
   'channel_observation_receipts',
   'directory_sync_tasks', 'directory_snapshot_users', 'directory_snapshot_aliases',
   'directory_alias_projection_meta', 'directory_snapshot_departments', 'directory_snapshot_search', 'directory_snapshot_memberships', 'directory_snapshot_scope',

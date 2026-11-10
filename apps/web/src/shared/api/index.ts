@@ -79,7 +79,7 @@ const errors: Record<string, string> = {
   channel_member_search_timeout: '企微成员搜索超时，请稍后重试。',
   invalid_member_verification_request: '核验目标或连接来源已变化，请刷新后重新选择。',
   member_verification_request_conflict: '这次核验请求与已有目标不一致，请重新查询状态。',
-  member_verification_limit: '身份核验数量已达容量上限，请检查现有待验证人员和绑定记录。',
+  member_verification_limit: '暂时无法生成不重复的验证码，请稍后重试。',
   member_verification_expired: '验证码已过期，页面将获取新码；旧码不再有效。',
   member_verification_receiver_not_ready: '机器人接收连接尚未就绪，未提供验证码。请确认连接在线后重试。',
   member_verification_unavailable: '身份核验暂不可用，请检查服务配置。',

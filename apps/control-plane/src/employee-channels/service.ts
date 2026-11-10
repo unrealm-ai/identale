@@ -1,3 +1,4 @@
+import {challengeLookup} from './wecom-verification-challenges.js';
 import {withIdentityDelta} from './wecom-identity-bindings.js';
 import {identityLookup} from './wecom-identity-bindings.js';
 import {initializeChannelSourceAccess,resetChannelSourceAccess} from '../capability-config.js';
@@ -138,7 +139,7 @@ export class EmployeeChannelService {
   if(p!=='wecom')return this.save(w,e,p,actor,{appId:r.appId,...this.secret(r),expectedRevision:r.revision});
   if(!usesWeComBotSearch(r))fail(409,'wecom_bot_reconfiguration_required');
   // Keep this bot source and its saved policy; fence the prior session evidence.
-  const secret=this.secret(r),{verification:_verification,wecomContactIdentityRevision:_contacts,wecomVerifiedContactIds:_contactIds,wecomContactMappings:_contactMappings,wecomMemberChallenges:_memberChallenges,...base}=r;
+  const secret=this.secret(r),{verification:_verification,wecomContactIdentityRevision:_contacts,wecomVerifiedContactIds:_contactIds,wecomContactMappings:_contactMappings,...base}=r;
   const next:EmployeeChannelRecord={...base,revision:r.revision+1,authRevision:r.authRevision+1,status:r.enabled?'pending_verification':'disabled',inboundVerified:false,lastError:null,updatedBy:actor};
   next.credential=this.vault.seal(JSON.stringify(secret),this.scope(next));
   this.write(next,r,actor,'wecom_robot_revalidation_started');return this.dto(next,true);
@@ -210,10 +211,29 @@ export class EmployeeChannelService {
   let remote: {id:string;displayName:string;departmentPaths:readonly string[]}[]=[],limited=false;
   if(keywords.length&&!cursor){try{const result=await this.botSearch(r).search(keywords);remote=[...result.members];limited=result.limited;}
    catch(error){if(error instanceof DirectoryRequestError&&error.details.reason==='timeout')throw new EmployeeChannelError(504,'channel_member_search_timeout');throw new EmployeeChannelError(502,safe(error));}
-   this.repository.store.transaction(()=>{const current=this.current(r);if(current.sourceId!==r.sourceId||current.authRevision!==r.authRevision)fail(409,'channel_configuration_changed');this.botContacts.remember(current,remote);});
+   this.repository.store.transaction(()=>{const current=this.current(r);if(current.sourceId!==r.sourceId||current.authRevision!==r.authRevision)fail(409,'channel_configuration_changed');/* Search is read-only: candidates are authenticated in the response, not persisted. */});
   }
-  const current=this.current(r),local=this.botContacts.knownPage(current,{keywords,...(after?{after}:{})}),members=[...new Map([...remote,...local.items.map(p=>({id:p.user_id,displayName:p.display_name,departmentPaths:JSON.parse(p.department_paths) as string[]}))].map(p=>[p.id,p])).values()];
-  return{sourceId:r.sourceId,provider:r.provider,appId:r.appId,exhausted:local.exhausted,limited,...(local.nextAfter?{nextCursor:this.memberCursors.encode(cursorScope,local.nextAfter)}:{}),items:members.map(member=>({kind:'channel_user' as const,subjectId:channelSubject('channel_user',member.id,'user_id',r.appId),externalId:member.id,displayName:member.displayName,departmentPaths:member.departmentPaths,identityVerified:weComSearchIdentityVerified(current,member.id)}))};
+  const current=this.current(r),local=this.botContacts.knownPage(current,{keywords,...(after?{after}:{})}),members=[...new Map([...local.items.map(p=>({id:p.user_id,displayName:p.display_name,departmentPaths:JSON.parse(p.department_paths) as string[]})),...remote].map(p=>[p.id,p])).values()];
+  return{sourceId:r.sourceId,provider:r.provider,appId:r.appId,exhausted:local.exhausted,limited,...(local.nextAfter?{nextCursor:this.memberCursors.encode(cursorScope,local.nextAfter)}:{}),items:members.map(member=>({kind:'channel_user' as const,subjectId:channelSubject('channel_user',member.id,'user_id',r.appId),externalId:member.id,displayName:member.displayName,departmentPaths:member.departmentPaths,identityVerified:weComSearchIdentityVerified(current,member.id),selectionToken:this.memberSelectionToken(current,member)}))};
+ }
+ private memberSelectionScope(r:EmployeeChannelRecord){return ['wecom-member-selection-v1',r.workspaceId,r.entityId,r.id,r.sourceId,r.appId,r.authRevision];}
+ private memberSelectionToken(r:EmployeeChannelRecord,member:{id:string;displayName:string;departmentPaths:readonly string[]}){
+  return Buffer.from(JSON.stringify(this.vault.seal(JSON.stringify({member,expiresAt:this.now()+30*60_000}),this.memberSelectionScope(r)))).toString('base64url');
+ }
+ selectWeComMember(w:string,e:string,input:{sourceId?:unknown;userId?:unknown;selectionToken?:unknown}){
+  const r=this.require(w,e,'wecom');this.current(r);
+  if(!usesWeComBotSearch(r)||input.sourceId!==r.sourceId||!validId(input.userId))fail(400,'invalid_member_search_candidate');
+  return this.repository.store.transaction(()=>{
+   const current=this.current(r);
+   if(input.selectionToken===undefined&&this.botContacts.selectable(current,input.userId as string))return {ok:true};
+   let payload:{member:{id:string;displayName:string;departmentPaths:string[]};expiresAt:number};
+   try{
+    if(typeof input.selectionToken!=='string'||input.selectionToken.length>40_000)throw Error();
+    payload=JSON.parse(this.vault.open(JSON.parse(Buffer.from(input.selectionToken,'base64url').toString('utf8')),this.memberSelectionScope(current)));
+    if(!Number.isSafeInteger(payload.expiresAt)||payload.expiresAt<=this.now()||payload.member?.id!==input.userId||typeof payload.member.displayName!=='string'||!Array.isArray(payload.member.departmentPaths))throw Error();
+   }catch{fail(400,'invalid_member_search_candidate');}
+   this.botContacts.remember(current,[payload!.member]);return {ok:true};
+  });
  }
  memberVerificationStatus(w:string,e:string,input:{userId?:unknown;sourceId?:unknown}){
   const r=this.require(w,e,'wecom');this.current(r);
@@ -224,7 +244,7 @@ export class EmployeeChannelService {
   const r=this.require(w,e,'wecom');this.current(r);
   if(input.replace!==undefined&&typeof input.replace!=='boolean'||!validId(input.userId)||input.sourceId!==r.sourceId||typeof input.requestId!=='string'||!/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(input.requestId))fail(400,'invalid_member_verification_request');
   const userId=input.userId as string,requestId=input.requestId as string;
-  if(!this.botContacts.get(r,userId)&&!r.wecomMemberChallenges?.some(c=>c.requestId===requestId&&c.userId===userId))fail(400,'invalid_member_search_candidate');
+  if(!this.botContacts.get(r,userId)&&challengeLookup(r,'request_id',requestId)?.userId!==userId)fail(400,'invalid_member_search_candidate');
   try{const io={ready:async(record:EmployeeChannelRecord,id:string)=>this.memberVerificationReceiver?this.memberVerificationReceiver(record,id):this.memberVerificationReady(record.id,record.sourceId,record.authRevision,id,record.stateVersion)};return await this.memberVerification.start(r,userId,requestId,actor,io,input.replace===true);}
   catch(error){if(error instanceof WeComMemberVerificationError)throw new EmployeeChannelError(error.status,error.code);throw error;}
  }

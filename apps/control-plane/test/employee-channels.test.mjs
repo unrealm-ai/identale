@@ -5,6 +5,7 @@ import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {DirectoryError} from '@dentity/application';
 import {Store} from '../dist/store.js';
+import {SqliteEntityRepository} from '../dist/adapters/sqlite/entity-repository.js';
 import {EmployeeChannelRepository} from '../dist/employee-channels/repository.js';
 import {EmployeeChannelService,channelSubject} from '../dist/employee-channels/service.js';
 import {EmployeeApplicationTransport} from '../dist/employee-channels/provider.js';
@@ -249,4 +250,39 @@ test('a published snapshot or explicit directory revocation invalidates cached a
   denied=true;await sync();assert.equal(snapshots.status(c.id).hasSnapshot,false);assert.equal(await f.capabilities.authorizeChannel(scope(c),connection(c),'group'),false,'explicit permission denial invalidates the cached allow immediately');
   assert.equal(f.capabilities.getDirectoryAccess('w','e').revision,policyRevision,'no policy mutation was used to evict the cache');
  }finally{await snapshots.stop();}
+});
+
+
+test('new employee first channel defaults are consumed per provider; legacy, rotation and rebind stay isolated',async t=>{
+ const f=setup(t);
+ new SqliteEntityRepository(f.store).insert({id:'new-employee',workspaceId:'w',name:'New employee',ownerMemberId:'m',createdByMemberId:'m',ownWebUse:true,webUseUserId:'u',interactionRuntime:'builtin',description:'',executionThinkingLevel:'medium'});
+ assert.deepEqual(JSON.parse(f.store.one('SELECT initial_channel_defaults_json FROM entities WHERE id=?','e').initial_channel_defaults_json),{});
+ for(const provider of ['feishu','dingtalk','wecom']){
+  if(provider!=='wecom')await assert.rejects(f.service.save('w','new-employee',provider,'u',{appId:provider+'-fresh',appSecret:'bad',expectedRevision:0}),code('authentication_failed'));
+  assert.equal(JSON.parse(f.store.one('SELECT initial_channel_defaults_json FROM entities WHERE id=?','new-employee').initial_channel_defaults_json)[provider],'denylist');
+  const c=await ready(f,provider,'new-employee',provider+'-fresh');
+  const policy=f.capabilities.getDirectoryAccess('w','new-employee').channelPolicies.find(p=>p.sourceId===c.sourceId);
+  assert.equal(policy.mode,'denylist');assert.deepEqual(policy.allow,[]);assert.deepEqual(policy.deny,[]);assert.equal(policy.allowGroupMembers,true);
+  assert.equal(JSON.parse(f.store.one('SELECT initial_channel_defaults_json FROM entities WHERE id=?','new-employee').initial_channel_defaults_json)[provider],undefined);
+  const rotated=await f.service.save('w','new-employee',provider,'u',{appId:c.appId,appSecret:'new-secret',expectedRevision:c.revision});
+  assert.deepEqual(f.capabilities.getDirectoryAccess('w','new-employee').channelPolicies.find(p=>p.sourceId===c.sourceId),policy);
+  const rebound=await f.service.save('w','new-employee',provider,'u',{appId:c.appId+'-replacement',appSecret:'new-secret',expectedRevision:rotated.revision,replaceSource:true});
+  assert.equal(f.capabilities.getDirectoryAccess('w','new-employee').channelPolicies.find(p=>p.sourceId===rebound.sourceId).mode,'allowlist');
+  f.service.unbind('w','new-employee',provider,'u',{expectedRevision:rebound.revision});
+  const reconnected=await ready(f,provider,'new-employee',provider+'-after-unbind');
+  assert.equal(f.capabilities.getDirectoryAccess('w','new-employee').channelPolicies.find(p=>p.sourceId===reconnected.sourceId).mode,'allowlist');
+ }
+ assert.deepEqual(JSON.parse(f.store.one('SELECT initial_channel_defaults_json FROM entities WHERE id=?','new-employee').initial_channel_defaults_json),{});
+});
+
+test('first channel default marker rolls back with policy transaction failure',async t=>{
+ const f=setup(t);
+ new SqliteEntityRepository(f.store).insert({id:'new-employee',workspaceId:'w',name:'New employee',ownerMemberId:'m',createdByMemberId:'m',ownWebUse:true,webUseUserId:'u',interactionRuntime:'builtin',description:'',executionThinkingLevel:'medium'});
+ f.store.db.exec("CREATE TRIGGER reject_new_policy BEFORE INSERT ON entity_directory_policies BEGIN SELECT RAISE(ABORT,'fixture policy failure'); END");
+ await assert.rejects(ready(f,'feishu','new-employee','rollback-app'),code('channel_connection_conflict'));
+ assert.equal(f.repository.byProvider('w','new-employee','feishu'),undefined);
+ assert.equal(JSON.parse(f.store.one('SELECT initial_channel_defaults_json FROM entities WHERE id=?','new-employee').initial_channel_defaults_json).feishu,'denylist');
+ f.store.db.exec('DROP TRIGGER reject_new_policy');
+ const c=await ready(f,'feishu','new-employee','rollback-app');
+ assert.equal(f.capabilities.getDirectoryAccess('w','new-employee').channelPolicies.find(p=>p.sourceId===c.sourceId).mode,'denylist');
 });

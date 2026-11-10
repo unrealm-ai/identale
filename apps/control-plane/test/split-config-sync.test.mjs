@@ -176,3 +176,32 @@ test('independent WeCom identity bindings project to runtime memory and refresh 
  assert.equal(await poller.poll(),true);
  assert.equal(f.runtime.one('SELECT user_id FROM wecom_identity_bindings WHERE connection_id=?','synthetic-wecom'),undefined,'withdrawn identity disappears on next coherent projection');
 });
+
+function seedChallenges(store,count){
+ for(let i=0;i<count;i++)store.run('INSERT INTO wecom_member_challenges VALUES(?,?,?,?,?,?,?,?,?,?)','ch','source',1,'request-'+i,'person-'+i,String(i).padStart(64,'0'),'pending',86400000,86400000,JSON.stringify({requestId:'request-'+i,phraseHash:String(i).padStart(64,'0')}));
+}
+test('verification challenges use bounded pages, remain memory-only and never project encrypted code material',async t=>{
+ const f=await fixture(t);seedChallenges(f.platform,251);
+ const manifest=(await f.app.inject({url:'/internal/config/snapshot',headers:auth})).json();
+ const table=manifest.tables.find(t=>t.name==='wecom_member_challenges');assert.equal(table.rows.length,0);assert.equal(table.page.count,251);
+ assert.equal(manifest.tables.some(t=>t.name==='wecom_member_verification_requests'),false);
+ const requests=[];const poller=new ConfigurationPoller({store:f.runtime,baseUrl:'http://127.0.0.1:9999',token,fetch:async(...args)=>{const response=await f.fetch(...args);if(String(args[0]).endsWith('challenge-page'))requests.push(await response.clone().json());return response;},now:f.clock});
+ assert.equal(await poller.poll(),true,JSON.stringify(poller.status));assert.deepEqual(requests.map(p=>p.rows.length),[100,100,51]);
+ assert.equal(f.runtime.one('SELECT count(*) n FROM wecom_member_challenges').n,251);assert.equal(f.runtime.one("SELECT name FROM main.sqlite_master WHERE name='wecom_member_challenges'"),undefined);
+ assert.equal((await f.app.inject({method:'POST',url:'/internal/config/challenge-page',payload:{epoch:manifest.epoch,offset:0}})).statusCode,401);
+ assert.equal((await f.app.inject({method:'POST',url:'/internal/config/challenge-page',headers:auth,payload:{epoch:manifest.epoch,offset:1}})).statusCode,400);
+ poller.stop();
+});
+test('challenge paging rejects changed generations and preserves prior coherent configuration',async t=>{
+ const f=await fixture(t);seedChallenges(f.platform,101);let mutate=false;
+ const poller=new ConfigurationPoller({store:f.runtime,baseUrl:'http://127.0.0.1:9999',token,fetch:async(...args)=>{const response=await f.fetch(...args);if(mutate&&String(args[0]).endsWith('challenge-page')){mutate=false;f.platform.run("DELETE FROM wecom_member_challenges WHERE request_id='request-0'");}return response;},now:f.clock});
+ assert.equal(await poller.poll(),true);const before=poller.status.epoch;
+ f.platform.run("UPDATE entities SET name='Changed' WHERE id='e'");mutate=true;
+ assert.equal(await poller.poll(),false);assert.equal(poller.status.epoch,before);assert.equal(f.runtime.one('SELECT count(*) n FROM wecom_member_challenges').n,101);assert.equal(f.runtime.one("SELECT name FROM entities WHERE id='e'").name,'Employee');
+ assert.equal(await poller.poll(),true);assert.equal(f.runtime.one('SELECT count(*) n FROM wecom_member_challenges').n,100);poller.stop();
+});
+test('challenge paging rejects corrupt pages without partial apply',async t=>{
+ const f=await fixture(t);seedChallenges(f.platform,101);
+ const poller=new ConfigurationPoller({store:f.runtime,baseUrl:'http://127.0.0.1:9999',token,fetch:async(...args)=>{const response=await f.fetch(...args);if(String(args[0]).endsWith('challenge-page')){const page=await response.json();page.rows[0].user_id='tampered';return new Response(JSON.stringify(page));}return response;},now:f.clock});
+ assert.equal(await poller.poll(),false);assert.equal(poller.ready,false);poller.stop();
+});
