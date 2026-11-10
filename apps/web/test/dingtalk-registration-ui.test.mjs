@@ -58,7 +58,7 @@ async function setup(t, handler, extra={}) {
   });
   await choose('钉钉'); return env;
 }
-async function openStart(){if([...document.querySelectorAll('button')].some(b=>visible(b)&&b.textContent.trim()==='扫码创建新机器人'))await click('扫码创建新机器人');await click('开始扫码创建');}
+async function openStart(){await click('扫码创建新机器人');}
 
 test('unbound defaults to automatic creation and manual input is an explicit alternative',async t=>{
  const env=await setup(t,async request=>({available:false,reason:'source_invalid'}));
@@ -91,7 +91,7 @@ test('double start click is single flight and close fences a pending start; late
   if(request.url.endsWith('/start')){signal=options.signal;return pending.promise;}
   if(request.method==='DELETE')return {status:'cancelled'};
  });
- button('开始扫码创建').click();button('开始扫码创建').click();await flush();
+ button('扫码创建新机器人').click();button('扫码创建新机器人').click();await flush();
  assert.equal(env.requests.filter(r=>r.url.endsWith('/start')).length,1);
  const id=env.requests.find(r=>r.url.endsWith('/start')).body.sessionId;
  await click('关闭扫码');assert.equal(signal.aborted,true);assert.ok(env.requests.some(r=>r.method==='DELETE'&&r.url.endsWith(id)));
@@ -124,7 +124,7 @@ test('expiry clears QR and failure displays safe fixed fallback, never provider 
   if(request.method==='DELETE')return {status:'cancelled'};
  });
  await openStart();await until(()=>text().includes('扫码会话已过期'));assert.equal(document.querySelector('.dingtalk-registration .n-qr-code svg'),null);
- await click('重新检查扫码配置');await click('开始扫码创建');assert.ok(text().includes('扫码注册未完成'));assert.ok(!text().includes('synthetic-private-sentinel'));
+ await click('重新检查扫码配置');await click('扫码创建新机器人');assert.ok(text().includes('扫码注册未完成'));assert.ok(!text().includes('synthetic-private-sentinel'));
  assert.equal(env.requests.filter(r=>r.url.endsWith('/bind')).length,0);
 });
 
@@ -293,5 +293,21 @@ test('lost successful save response checks consumed state without sending duplic
  await openStart();await until(()=>text().includes('重新检查并保存连接'));
  await click('重新检查并保存连接');assert.ok(text().includes('请刷新渠道状态核对绑定'));
  assert.equal(env.requests.filter(r=>r.url.endsWith('/bind')).length,1);
+ assert.equal(env.requests.filter(r=>r.url.endsWith('/start')).length,1);
+});
+
+test('one click shows a QR with live countdown; expiry never creates another application',async t=>{
+ let id;const expiresAt=Date.now()+2200;
+ const env=await setup(t,async request=>{
+  if(request.method==='GET')return {available:true};
+  if(request.url.endsWith('/start')){id=request.body.sessionId;return session(id,'waiting',{expiresAt});}
+  if(request.url.endsWith('/poll'))return session(id,'waiting',{expiresAt});
+  if(request.method==='DELETE')return {status:'cancelled'};
+ });
+ await click('扫码创建新机器人');assert.ok(document.querySelector('.dingtalk-registration .n-qr-code svg'));
+ const timer=()=>document.querySelector('[role="timer"]');const first=Number(timer().textContent.match(/\d+/)[0]);
+ await new Promise(r=>setTimeout(r,1100));await flush();assert.ok(Number(timer().textContent.match(/\d+/)[0])<first);
+ await until(()=>text().includes('扫码会话已过期'),'expired');
+ assert.equal(document.querySelector('.dingtalk-registration .n-qr-code svg'),null);
  assert.equal(env.requests.filter(r=>r.url.endsWith('/start')).length,1);
 });

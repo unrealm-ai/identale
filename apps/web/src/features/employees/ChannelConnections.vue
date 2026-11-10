@@ -87,7 +87,7 @@ const registration = useDingtalkRegistration({
     emit('changed');
   },
 });
-const { uncertain: registrationUncertain, open: registrationOpen, available: registrationAvailable, checking: registrationChecking,
+const { secondsLeft: registrationSecondsLeft, uncertain: registrationUncertain, open: registrationOpen, available: registrationAvailable, checking: registrationChecking,
   requesting: registrationRequesting, binding: registrationBinding, session: registrationSession,
   message: registrationMessage, replacing: registrationReplacing, replaceSource: registrationReplaceSource } = registration;
 
@@ -202,19 +202,20 @@ onUnmounted(() => { controller.abort(); pendingWecomCredentials.value = null; cl
               <header class="form-section-heading manual-setup-heading"><h3>自动创建钉钉机器人</h3><NButton v-if="!connection" size="small" quaternary :disabled="channelLocked || registrationRequesting || !!registrationSession || registrationUncertain" @click="registration.cancel();dingtalkManual=true">绑定已有应用</NButton></header>
               <p v-if="employeeName" class="field-note">数字员工名称：{{employeeName}} <NButton size="tiny" text @click="copyDingtalkName">复制名称</NButton></p>
               <p v-if="unsaved" class="field-note">已有未保存修改，请切到“绑定已有应用”保存或清空后再创建。</p>
-              <NButton v-if="!registrationOpen" :disabled="channelLocked||!loaded||unsaved" @click="registration.show">扫码创建新机器人</NButton>
+              <NButton v-if="!registrationOpen" :disabled="channelLocked||!loaded||unsaved" @click="registration.begin">扫码创建新机器人</NButton>
               <template v-else>
                 <div class="form-section-heading"><h3>扫码创建新机器人</h3><NButton :disabled="registrationBinding" @click="registration.cancel">关闭扫码</NButton></div>
                 <p class="field-note">用钉钉扫码创建，完成后自动保存连接。名称请在钉钉中填写；取消不会删除已创建的机器人。</p>
                 <p v-if="registrationChecking" role="status">正在检查扫码注册配置…</p>
                 <NAlert v-if="registrationMessage" type="warning" role="status">{{registrationMessage}}</NAlert>
-                <NButton v-if="registrationAvailable&&!registrationSession&&!registrationMessage" :disabled="registrationRequesting||channelLocked" :loading="registrationRequesting" @click="registration.start">开始扫码创建</NButton>
+                <NButton v-if="registrationAvailable&&!registrationSession&&!registrationMessage" :disabled="registrationRequesting||channelLocked" :loading="registrationRequesting" @click="registration.begin">扫码创建新机器人</NButton>
                 <template v-if="registrationSession && ['starting','waiting'].includes(registrationSession.status)">
                   <p role="status">等待在钉钉确认创建机器人…</p>
                   <template v-if="registrationSession.verificationUrl">
                     <NQrCode :value="registrationSession.verificationUrl" :size="192" type="svg" aria-label="钉钉创建机器人二维码"/>
                     <a :href="registrationSession.verificationUrl" target="_blank" rel="noopener noreferrer">打开钉钉官方验证页面 ↗</a>
                   </template>
+                  <p v-if="registrationSession.verificationUrl" role="timer">二维码剩余 {{registrationSecondsLeft}} 秒</p>
                   <p class="field-note">本次扫码有效至 {{formatTime(registrationSession.expiresAt)}}。二维码仅在本地生成。</p>
                 </template>
                 <template v-if="registrationSession?.status==='ready'">

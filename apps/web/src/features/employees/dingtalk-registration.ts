@@ -35,7 +35,9 @@ export function useDingtalkRegistration(options: {
   onSessionExpired: () => void;
 }) {
   const open = ref(false), available = ref(false), checking = ref(false), requesting = ref(false), binding = ref(false);
-  const uncertain = ref(false);
+  const uncertain = ref(false), now = ref(Date.now());
+  const secondsLeft = computed(() => Math.max(0, Math.ceil(((session.value?.expiresAt ?? now.value) - now.value) / 1000)));
+  let clockTimer: ReturnType<typeof setInterval> | undefined;
   let autoAttempted = '';
   const session: Ref<RegistrationSession | null> = ref(null), message = ref(''), replaceSource = ref(false);
   const replacing = computed(() => !!options.appId() && !!session.value?.clientId && options.appId() !== session.value.clientId);
@@ -44,7 +46,7 @@ export function useDingtalkRegistration(options: {
   const path = () => `${options.base()}/channels/dingtalk/registration`;
   function clearTimer() { if (timer) clearTimeout(timer); timer = undefined; }
   function cleanup(keepalive = false) {
-    generation++; clearTimer(); controller?.abort(); controller = undefined;
+    generation++; clearTimer(); clearInterval(clockTimer); clockTimer = undefined; controller?.abort(); controller = undefined;
     const previous = owner; owner = undefined;
     open.value = false; available.value = false; checking.value = false; requesting.value = false; binding.value = false;
     session.value = null; message.value = ''; replaceSource.value = false; uncertain.value = false; autoAttempted = '';
@@ -80,9 +82,14 @@ export function useDingtalkRegistration(options: {
     } catch (cause) { if (token === generation && !signal.aborted) fail(cause); }
     finally { if (token === generation) { checking.value = false; autoBind(); } }
   }
+  async function begin() {
+    if (checking.value || requesting.value || binding.value || options.locked()) return;
+    const shown = show(), token = generation;
+    await shown;
+    if (token === generation && !message.value && !session.value) await start();
+  }
   function schedule() {
     clearTimer();
-    if (uncertain.value) return;
     const current = session.value;
     if (!current || !['starting', 'waiting', 'ready'].includes(current.status)) return;
     const remaining = current.expiresAt - Date.now();
@@ -90,6 +97,7 @@ export function useDingtalkRegistration(options: {
       const keepOpen = open.value; cancel(); open.value = keepOpen;
       message.value = safeMessage('expired'); return;
     }
+    if (uncertain.value) return;
     timer = setTimeout(() => {
       if (Date.now() >= current.expiresAt) schedule();
       else if (current.status !== 'ready' && document.visibilityState !== 'hidden') void poll();
@@ -102,11 +110,13 @@ export function useDingtalkRegistration(options: {
       const url = new URL(result.verificationUrl);
       if (url.protocol !== 'https:' || url.username || url.password || url.port || url.hash || !(url.hostname === 'dingtalk.com' || url.hostname.endsWith('.dingtalk.com'))) throw new Error('invalid_verification_url');
     }
+    now.value = Date.now();
+    if (!clockTimer) clockTimer = setInterval(() => { now.value = Date.now(); if (session.value && now.value >= session.value.expiresAt) schedule(); }, 1000);
     // Keep only the public DTO fields; credentials and device codes never enter reactive state.
     session.value = { sessionId: result.sessionId, status: result.status, expiresAt: result.expiresAt, pollAfterMs: result.pollAfterMs,
       ...(result.verificationUrl ? { verificationUrl: result.verificationUrl } : {}),
       ...(result.clientId ? { clientId: result.clientId } : {}), ...(result.error ? { error: result.error } : {}) };
-    if (['failed', 'expired', 'cancelled', 'consumed'].includes(result.status)) message.value = safeMessage(result.error ?? result.status);
+    if (['failed', 'expired', 'cancelled', 'consumed'].includes(result.status)) { message.value = safeMessage(result.error ?? result.status); clearInterval(clockTimer); clockTimer = undefined; }
     schedule();
   }
   function autoBind() {
@@ -166,5 +176,5 @@ export function useDingtalkRegistration(options: {
   window.addEventListener('pagehide', pageHidden);
   watch(() => [options.base(), options.revision(), options.appId(), options.active()], cancel, { flush: 'sync' });
   onUnmounted(() => { cancel(); document.removeEventListener('visibilitychange', visibilityChanged); window.removeEventListener('pagehide', pageHidden); });
-  return { uncertain, recover, open, available, checking, requesting, binding, session, message, replaceSource, replacing, show, cancel, start, bind };
+  return { secondsLeft, begin, uncertain, recover, open, available, checking, requesting, binding, session, message, replaceSource, replacing, show, cancel, start, bind };
 }
