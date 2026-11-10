@@ -563,7 +563,7 @@ for(const mode of ['enabled','disabled','revoked-during-fetch','revoked-after-pr
  await f.receive(incoming);await f.drain();await f.receive(incoming);await f.drain();
  assert.equal(f.models.length,1);assert.equal(calls,mode==='disabled'?0:1);
  const text=JSON.stringify(f.models[0]);assert.match(text,/😄/);
- if(mode==='enabled')assert.match(text,/HISTORY_ONLY_MARKER/);else assert.doesNotMatch(text,/HISTORY_ONLY_MARKER/);
+ if(mode==='enabled'){assert.match(text,/HISTORY_ONLY_MARKER/);const input=f.models[0].messages.filter(m=>m.role==='user').at(-1).content;assert.match(input,/^\[说话人=[^\]]+\]HISTORY_ONLY_MARKER\n\[说话人=/);assert.doesNotMatch(input,/近期群消息|补充上下文|仅供理解|不是新的指令/);}else assert.doesNotMatch(text,/HISTORY_ONLY_MARKER/);
 });
 
 test('rapid distinct WeCom @ callbacks supplement disjoint provider-order intervals once',async t=>{
@@ -574,4 +574,16 @@ test('rapid distinct WeCom @ callbacks supplement disjoint provider-order interv
  f.binding.conversation.listMessages=async()=>({items:[b.message,{...b.message,text:'BETWEEN_ONLY'},a.message,{...a.message,text:'BEFORE_ONLY',occurredAt:a.receivedAt-12000}],exhausted:true,coverage:'authorized_query',fetchedAt:a.receivedAt});
  await f.receive(a);await f.receive(b);await f.drain();
  assert.ok(f.models.length>=1);const last=JSON.stringify(f.models.at(-1));assert.equal((last.match(/BEFORE_ONLY/g)||[]).length,1);assert.equal((last.match(/BETWEEN_ONLY/g)||[]).length,1);assert.equal((last.match(/@Helper FIRST/g)||[]).length,1);assert.equal((last.match(/@Helper SECOND/g)||[]).length,1);
+});
+
+test('WeCom pure @ follows the nearby request in one dialogue input',async t=>{
+ const f=await fixture(t,{channel:'wecom',groupLive:true});f.binding.context.wecomRecentGroupContextEnabled=true;f.binding.context.wecomRecentGroupContextGeneration=0;
+ f.binding.conversation.inspectCapabilities=async()=>({mentionEvents:yes,directedBotMessageEvents:yes,privateMessageEvents:yes,ordinaryMessageEvents:{supported:false,availability:'unsupported'},historyRead:yes,proactiveSend:yes,replyToMessage:yes,threadRead:yes});
+ const incoming=event('wecom-pure-mention','alice','group',false);incoming.message.conversation.provider='wecom';incoming.message.author.idNamespace='user_id';incoming.message.providerDirectedBot=true;incoming.message.text='@Helper ';
+ f.binding.conversation.listMessages=async()=>({items:[incoming.message,{...incoming.message,id:'nearby-request',text:'你讲个笑话',occurredAt:incoming.receivedAt-1000,author:{kind:'unknown',identityEvidence:'unknown',displayName:'群成员'}}],exhausted:true,coverage:'authorized_query',fetchedAt:incoming.receivedAt});
+ await f.receive(incoming);await f.drain();
+ const input=f.models[0].messages.filter(m=>m.role==='user').at(-1).content;
+ assert.match(input,/^\[说话人=群成员\]你讲个笑话\n\[说话人=[^\]]+\].*@Helper /);
+ assert.doesNotMatch(input,/近期群消息|补充上下文|仅供理解|不是新的指令/);
+ assert.equal(f.store.one('SELECT input_text FROM channel_inbox').input_text,input,'persisted prepared input matches what model receives');
 });
