@@ -85,7 +85,7 @@ test('collapsed confirmation draft keeps application navigation and beforeunload
   await settings(t);
   function button(label){const el=[...document.querySelectorAll('button')].find(el=>el.textContent.trim()===label||el.getAttribute('aria-label')===label);assert.ok(el,label);return el;}
   await until(()=>[...document.querySelectorAll('button')].some(el=>el.textContent.trim()==='人工确认'));
-  button('人工确认').click();await until(()=>!button('添加确认规则').disabled);
+  await until(()=>!button('添加确认规则').disabled);
   button('添加确认规则').click();await until(()=>!!document.querySelector('input[aria-label="确认问题范围"]'));
   const field=document.querySelector('input[aria-label="确认问题范围"]');field.value='折叠中的草稿';field.dispatchEvent(new InputEvent('input',{bubbles:true,inputType:'insertText',data:field.value}));await flush();
   button('人工确认').click();await flush();

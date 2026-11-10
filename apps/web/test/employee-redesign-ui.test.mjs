@@ -29,7 +29,7 @@ function button(label){const e=[...document.querySelectorAll('button')].find(e=>
 async function click(label){await nextTick();button(label).click();await flush();}
 function input(label,value){const el=document.querySelector(`input[aria-label="${label}"],textarea[aria-label="${label}"]`);assert.ok(el,label);el.value=value;el.dispatchEvent(new InputEvent('input',{bubbles:true,inputType:'insertText',data:value}));}
 async function tab(label){const el=[...document.querySelectorAll('[role=tablist][aria-label="员工设置分类"] [role=tab]')].find(e=>e.textContent.trim()===label);assert.ok(el,'tab '+label);el.click();await flush();}
-function defaults(r){if(r.url.endsWith('/group-sharing'))return{revision:0,rules:[]};if(r.url.endsWith('/group-sharing/status'))return{appliedRevision:0};if(r.url.endsWith('/employee-creation-options'))return{members:[{id:'member-self',displayName:'我',role:'member'}],resources:[],directoryCredentials:[]};if(r.url.endsWith('/model-profiles'))return{profiles:[profile],defaultProfileId:profile.id};if(r.url.endsWith('/model-settings'))return{selectedProfileId:profile.id,executionThinkingLevel:'medium',revision:'fixture-revision'};if(r.url.endsWith('/overview'))return{employee:{...entity,channels:2,checkedAt:Date.now()},partialFailures:[]};if(r.url.endsWith('/web-access'))return{allowMemberIds:[],denyMemberIds:[],revision:1};if(r.url.endsWith('/directory-access'))return{allow:[],deny:[],allowGroupMembers:false,revision:1};if(r.url.endsWith('/channels/subjects'))return{sources:[],users:[],departments:[]};if(r.url.endsWith('/runtime-status'))return{status:'unavailable',observedAt:null,configuration:{ready:false,modules:[]},employee:null,error:'temporarily_unavailable'};return[];}
+function defaults(r){if(r.url.endsWith('/human-confirmation'))return{version:0,rules:[],candidates:[],subjects:{sources:[],users:[],departments:[]}};if(r.url.endsWith('/group-sharing'))return{revision:0,rules:[]};if(r.url.endsWith('/group-sharing/status'))return{appliedRevision:0};if(r.url.endsWith('/employee-creation-options'))return{members:[{id:'member-self',displayName:'我',role:'member'}],resources:[],directoryCredentials:[]};if(r.url.endsWith('/model-profiles'))return{profiles:[profile],defaultProfileId:profile.id};if(r.url.endsWith('/model-settings'))return{selectedProfileId:profile.id,executionThinkingLevel:'medium',revision:'fixture-revision'};if(r.url.endsWith('/overview'))return{employee:{...entity,channels:2,checkedAt:Date.now()},partialFailures:[]};if(r.url.endsWith('/web-access'))return{allowMemberIds:[],denyMemberIds:[],revision:1};if(r.url.endsWith('/directory-access'))return{allow:[],deny:[],allowGroupMembers:false,revision:1};if(r.url.endsWith('/channels/subjects'))return{sources:[],users:[],departments:[]};if(r.url.endsWith('/runtime-status'))return{status:'unavailable',observedAt:null,configuration:{ready:false,modules:[]},employee:null,error:'temporarily_unavailable'};return[];}
 async function mount(t,name,initial,handler=defaults){const requests=[],props=reactive(initial);globalThis.fetch=async(url,options={})=>{assert.ok(String(url).startsWith('/api/'));const req={url:String(url),method:options.method??'GET',body:options.body?JSON.parse(options.body):undefined};requests.push(req);const res=await handler(req);return new Response(JSON.stringify(res?.data??res),{status:res?.status??200,headers:{'content-type':'application/json'}});};document.body.innerHTML='<div id="app"></div>';const app=createApp({render:()=>h(components[name],props)});app.mount('#app');await flush();t.after(()=>{app.unmount();document.body.innerHTML='';});return{props,requests,app};}
 
 test('creation exposes only self/workspace and emits dynamic workspace flag without snapshotting members',async t=>{
@@ -178,12 +178,13 @@ const confirmationTarget={kind:'platform',userId:'fixture-confirmation-person'};
 function confirmationPolicy(rules=[]){return{version:7,rules,candidates:[{label:'测试确认人',target:confirmationTarget}],subjects:{sources:[],users:[],departments:[]}};}
 const confirmationInput=()=>document.querySelector('input[aria-label="确认问题范围"]');
 
-test('human confirmation collapse retains draft, dirty navigation protection and lazy loading',async t=>{
+test('human confirmation is initially visible and collapse retains draft and dirty navigation protection',async t=>{
  let recent=0;const locked=[];
  const env=await mount(t,'settings',{entity,workspace,section:'overview',onBusyChanged:v=>locked.push(v),onRecentConversations:()=>recent++},async r=>r.url.endsWith('/human-confirmation')?confirmationPolicy():defaults(r));
  await until(()=>!!document.querySelector('.employee-extensions'));
- assert.equal(env.requests.filter(r=>r.url.endsWith('/human-confirmation')).length,0);
- await click('人工确认');await until(()=>!button('添加确认规则').disabled);await click('添加确认规则');input('确认问题范围','采购审批');await flush();
+ assert.equal(env.requests.filter(r=>r.url.endsWith('/human-confirmation')).length,1);
+ assert.equal(visible(document.querySelector('.human-settings')),true);
+ await until(()=>!button('添加确认规则').disabled);await click('添加确认规则');input('确认问题范围','采购审批');await flush();
  const panel=document.querySelector('.human-settings');const draft=confirmationInput();
  assert.equal(locked.at(-1),true);
  for(let i=0;i<2;i++){
@@ -200,6 +201,13 @@ test('human confirmation collapse retains draft, dirty navigation protection and
  assert.equal(env.requests.filter(r=>r.method==='PUT').length,0);
 });
 
+test('read-only overview does not load or expose confirmation settings',async t=>{
+ const env=await mount(t,'overview',{base:'/workspaces/workspace-a/entities/employee-a',canManage:false});
+ await until(()=>!!document.querySelector('.employee-purpose'));
+ assert.equal(document.querySelector('.human-settings'),null);
+ assert.equal(env.requests.some(r=>r.url.endsWith('/human-confirmation')),false);
+});
+
 test('human confirmation collapse during save retains busy lock and applies the single response',async t=>{
  let release;const pending=new Promise(resolve=>release=resolve);t.after(()=>release());const locked=[];
  const env=await mount(t,'settings',{entity,workspace,section:'overview',onBusyChanged:v=>locked.push(v)},async r=>{
@@ -207,7 +215,7 @@ test('human confirmation collapse during save retains busy lock and applies the 
   if(r.method==='PUT'){await pending;return{version:8,rules:r.body.rules};}
   return confirmationPolicy();
  });
- await until(()=>!!document.querySelector('.employee-extensions'));await click('人工确认');await until(()=>!button('添加确认规则').disabled);await click('添加确认规则');input('确认问题范围','付款确认');await flush();
+ await until(()=>!!document.querySelector('.employee-extensions'));await until(()=>!button('添加确认规则').disabled);await click('添加确认规则');input('确认问题范围','付款确认');await flush();
  await click('保存确认设置');await until(()=>env.requests.some(r=>r.method==='PUT'));
  const panel=document.querySelector('.human-settings');await click('人工确认');
  assert.ok(document.querySelector('.human-settings')===panel,'collapse must retain the mounted panel');assert.equal(visible(panel),false);assert.equal(locked.at(-1),true);
@@ -229,7 +237,7 @@ test('human confirmation save failure while collapsed retains draft until explic
   if(r.method==='PUT'){await pending;return{status:409,data:{error:'version_conflict'}};}
   return confirmationPolicy();
  });
- await until(()=>!!document.querySelector('.employee-extensions'));await click('人工确认');await until(()=>!button('添加确认规则').disabled);await click('添加确认规则');input('确认问题范围','待核对草稿');await flush();
+ await until(()=>!!document.querySelector('.employee-extensions'));await until(()=>!button('添加确认规则').disabled);await click('添加确认规则');input('确认问题范围','待核对草稿');await flush();
  await click('保存确认设置');await click('人工确认');release();await until(()=>!!document.querySelector('.human-settings [role=alert]'));
  assert.equal(locked.at(-1),true);assert.ok(document.querySelector('.employee-dirty-banner'));await click('人工确认');assert.equal(confirmationInput().value,'待核对草稿');
  await click('放弃更改');await until(()=>locked.at(-1)===false);assert.equal(confirmationInput(),null);assert.equal(document.querySelector('.employee-dirty-banner'),null);
@@ -240,11 +248,11 @@ test('human confirmation save failure while collapsed retains draft until explic
 test('standalone overview retains the confirmation panel without a Web slot and resets it for a different employee',async t=>{
  const base='/workspaces/workspace-a/entities/employee-a';const dirty=[];
  const env=await mount(t,'overview',{base,canManage:true,onDirtyChanged:v=>dirty.push(v)},async r=>r.url.endsWith('/human-confirmation')?confirmationPolicy():defaults(r));
- await until(()=>!!document.querySelector('.employee-extensions'));await click('人工确认');await until(()=>!button('添加确认规则').disabled);await click('添加确认规则');input('确认问题范围','旧员工草稿');await flush();
+ await until(()=>!!document.querySelector('.employee-extensions'));await until(()=>!button('添加确认规则').disabled);await click('添加确认规则');input('确认问题范围','旧员工草稿');await flush();
  const panel=document.querySelector('.human-settings');await click('人工确认');assert.ok(document.querySelector('.human-settings')===panel,'collapse must retain the mounted panel');assert.equal(visible(panel),false);assert.equal(dirty.at(-1),true);
- env.props.base='/workspaces/workspace-a/entities/employee-b';await until(()=>!document.querySelector('.human-settings')&&!!document.querySelector('.employee-extensions'));
- assert.equal(dirty.at(-1),false);assert.equal(env.requests.filter(r=>r.url.endsWith('/human-confirmation')).length,1);
- await click('人工确认');await until(()=>!button('添加确认规则').disabled);assert.ok(document.querySelector('.human-settings')!==panel,'a different employee must get a fresh panel');assert.equal(confirmationInput(),null);
+ env.props.base='/workspaces/workspace-a/entities/employee-b';await until(()=>document.querySelector('.human-settings')!==panel&&!!document.querySelector('.employee-extensions'));
+ assert.equal(dirty.at(-1),false);assert.equal(visible(document.querySelector('.human-settings')),true);
+ await until(()=>!button('添加确认规则').disabled);assert.ok(document.querySelector('.human-settings')!==panel,'a different employee must get a fresh panel');assert.equal(confirmationInput(),null);
  assert.equal(env.requests.filter(r=>r.url.endsWith('/human-confirmation')).length,2);
  env.props.canManage=false;await until(()=>!document.querySelector('.human-settings'));assert.equal(document.querySelector('.overview-access-stack'),null);
  assert.equal(env.requests.filter(r=>r.method==='PUT').length,0);
