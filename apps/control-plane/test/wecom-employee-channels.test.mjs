@@ -39,7 +39,8 @@ test('same BotID credential rotation preserves source, fences session evidence a
  assert.equal(next.id,first.id);assert.equal(next.sourceId,first.sourceId);assert.equal(next.authRevision,first.authRevision+1);assert.equal(next.status,'pending_verification');assert.equal(next.inboundVerified,false);
  assert.equal(f.service.currentBindingVersion(first.id),undefined);
  f.service.observeFirstInbound(first.id,{appId:first.appId,botId:first.appId,tenantId:first.appId,tenantNamespace:'app_id'});
- assert.notEqual(f.service.currentBindingVersion(first.id),oldVersion);
+ // Same bot credential rotation fences transport auth, not the persistent identity mapping.
+ assert.equal(f.service.currentBindingVersion(first.id),oldVersion);
  const disabled=f.service.settings('w','e','wecom','u',{enabled:false,expectedRevision:next.revision});
  const retry=await f.service.revalidate('w','e','wecom','u',disabled.revision);
  assert.equal(retry.status,'disabled');assert.equal(retry.sourceId,first.sourceId);

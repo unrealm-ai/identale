@@ -24,16 +24,16 @@ test('default isolation, mutual sets, direct edges, union and independent disabl
  const p=person('U'),direct=rule(['A'],[p]);assert.equal(sharingAllows(snapshot(p,[direct]),group('A')),true);assert.equal(sharingAllows(snapshot('U',[direct]),group('A')),false);
  for(const change of[{appId:'other'},{tenantId:'other'},{connectionId:'other'},{bindingVersion:'other'}])assert.equal(sharingAllows(snapshot('B',[ab]),group('A',change)),false);
 });
-async function fixture(t){
+async function fixture(t,provider='feishu'){
  const root=await mkdtemp(join(tmpdir(),'identity-group-sharing-')),store=new Store(join(root,'isolated.sqlite'));t.after(async()=>{store.close();await rm(root,{recursive:true,force:true});});
  store.run("INSERT INTO users(id,username,display_name) VALUES('synthetic-user','synthetic-user','Synthetic')");
  store.run("INSERT INTO workspaces(id,name,created_by) VALUES('workspace','Isolated','synthetic-user')");
  store.run("INSERT INTO members(id,workspace_id,user_id,role) VALUES('member','workspace','synthetic-user','member')");
  store.run("INSERT INTO entities(id,workspace_id,name,owner_member_id,created_by_member_id,own_web_use,web_use_user_id,interaction_runtime) VALUES('employee','workspace','Synthetic employee','member','member',1,'synthetic-user','builtin-interaction')");
  const repository=new SqliteTaskRepository(store);repository.insertTask('task',{workspaceId:'workspace',entityId:'employee',userId:'synthetic-user'},null,'operation','hash','read','new','snapshot','[]','{}','run',1,1);repository.insertRun('run','task','session',1);
- const record={id:'connection',workspaceId:'workspace',entityId:'employee',provider:'feishu',enabled:true,status:'verified',appId:'app',eventTenantId:'tenant',revision:1,authRevision:1,stateVersion:1};
+ const record={id:'connection',workspaceId:'workspace',entityId:'employee',provider,enabled:true,status:'verified',appId:'app',eventTenantId:'tenant',revision:1,authRevision:1,stateVersion:1};
  let current=true,calls=0,handler=async()=>({items:[],exhausted:true,coverage:'authorized_query',fetchedAt:1000000000});
- const binding={provider:'feishu',connectionId:'connection',appId:'app',workspaceId:'workspace',entityId:'employee',bindingVersion:'binding',connection:{provider:'feishu',workspaceId:'workspace',connectionId:'connection',tenantId:'tenant',identity:{kind:'bot',externalId:'bot'},credentialRef:'private-fixture'},conversation:{async listMessages(ref,q){calls++;return handler(ref,q);},async listJoinedGroups(){return{items:[{id:'A',name:'Group A'},{id:'B',name:'Group B'}]};}}};
+ const binding={provider,connectionId:'connection',appId:'app',workspaceId:'workspace',entityId:'employee',bindingVersion:'binding',connection:{provider:'feishu',workspaceId:'workspace',connectionId:'connection',tenantId:'tenant',identity:{kind:'bot',externalId:'bot'},credentialRef:'private-fixture'},conversation:{async listMessages(ref,q){calls++;return handler(ref,q);},async listJoinedGroups(){return{items:[{id:'A',name:'Group A'},{id:'B',name:'Group B'}]};}}};
  const channels={repository:{byId:id=>id==='connection'?record:undefined,list:()=>[record]},currentBindingVersion:()=>current?'binding':undefined,resolveBinding:async()=>binding,resolveHistoryBinding:async()=>binding};
  const journal=new JsonlJournal({root:join(root,'journal'),ownerId:store.databaseId,serialize:fn=>store.transaction(fn)});
  const configuration=new GroupSharingConfiguration(store,channels,'synthetic-selection-secret',()=>1000000000),service=new GroupHistoryService(store,configuration,()=>1000000000,journal);
@@ -95,4 +95,28 @@ test('new verified topic grant lists its thread, parent group and direct sources
  const thread=contexts.find(x=>x.type==='thread');assert.notEqual(thread.groupRef,ref('B'));let seen;f.handler(async(r,q)=>{seen={r,q};return{items:[{...message('thread-message'),threadId:'trusted-topic'}],exhausted:true,coverage:'authorized_query',fetchedAt:1000000000};});
  assert.equal((await f.service.read(auth,{groupRef:thread.groupRef})).messages.length,1);assert.equal(seen.r.externalId,'B');assert.equal(seen.q.threadId,'trusted-topic');
  const wrong=f.auth('B',[],{destinationThreadId:'trusted-topic',topicRead:{...proof,chatId:'other'}});assert.equal(sharingAllows(wrong.snapshot,group('B')),false);assert.equal(f.service.list(wrong).items.length,0);
+});
+test('WeCom snapshots remain channel isolated and provider oversized pages persist remainders without losing duplicate text',async t=>{
+ const f=await fixture(t,'wecom'),a=group('A',{provider:'wecom'}),b=group('B',{provider:'wecom'}),r={...rule([],[]),sources:[a],targets:[b],type:'directed'};
+ const auth=f.auth(b,[r]),groupRef=createHash('sha256').update(sharingTargetKey(a)).digest('hex');
+ const signed=f.configuration.issue('workspace','employee',a);assert.equal(f.configuration.selection('workspace','employee',signed).provider,'wecom');
+ assert.throws(()=>f.configuration.selection('workspace','employee',f.configuration.issue('workspace','employee',group('A'))));
+ let received;f.handler(async(ref)=>{received=ref;return{items:[message('record-0','same'),message('record-1','same'),message('record-2','third')],exhausted:true,coverage:'authorized_query',fetchedAt:1000000000};});
+ const first=await f.service.read(auth,{groupRef,startAt:999990000,endAt:1000000000,limit:1});assert.equal(first.range.order,'desc');assert.equal(received.provider,'wecom');assert.ok(first.nextCursor);assert.equal(f.calls,1);
+ const restarted=new GroupHistoryService(f.store,f.configuration,()=>1000000000,f.journal);
+ const second=await restarted.read(auth,{groupRef,cursor:first.nextCursor});assert.equal(second.messages[0].text,'same');assert.notEqual(second.messages[0].id,first.messages[0].id);assert.equal(f.calls,1,'persisted provider page is not refetched after service restart');
+ const third=await restarted.read(auth,{groupRef,cursor:second.nextCursor});assert.equal(third.messages[0].text,'third');assert.equal(third.exhausted,true);assert.equal(third.nextCursor,undefined);assert.equal(f.calls,1);
+ assert.equal(f.service.list(auth).provider,'wecom');assert.deepEqual(f.service.list(auth).queryHints.orders,['desc']);
+ const scope={workspaceId:'workspace',entityId:'employee',principal:{kind:'channel',identityNamespace:'user_id',externalUserId:'callback-user'},source:{channelType:'wecom',connectionId:'connection',applicationId:'app',tenantId:'tenant',bindingVersion:'binding',conversationKind:'private',conversationId:'callback-user'}};
+ const personal=f.configuration.snapshot(scope);assert.equal(personal.destination.namespace,'user_id');assert.equal(personal.destination.provider,'wecom');
+});
+test('WeCom derived group restrictions survive a different bot pseudo-tenant',async t=>{
+ const f=await fixture(t,'wecom'),a=group('A',{provider:'wecom'}),b=group('B',{provider:'wecom'}),ruleAB={...rule([],[]),type:'directed',sources:[a],targets:[b]};
+ const groupRef=g=>createHash('sha256').update(sharingTargetKey(g)).digest('hex');
+ f.handler(async()=>({items:[message('r')],exhausted:true,coverage:'authorized_query',fetchedAt:1000000000}));
+ await f.service.read(f.auth(b,[ruleAB]),{groupRef:groupRef(a)});
+ const bOther={...b,appId:'bot-2',tenantId:'bot-2',connectionId:'connection-2'},cOther={...bOther,id:'C'};
+ const auth=f.auth(cOther,[{...ruleAB,sources:[bOther],targets:[cOther]}]);
+ await assert.rejects(f.service.read(auth,{groupRef:groupRef(bOther)}),{code:'history_derived_source_forbidden'},'lineage rejection occurs before new bot binding/provider read');
+ assert.equal(f.calls,1);
 });

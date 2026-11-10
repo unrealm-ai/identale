@@ -1,3 +1,4 @@
+import{weComCallbackUserId}from'../employee-channels/wecom-bot-contacts.js';
 import{createHmac,timingSafeEqual,randomUUID}from'node:crypto';
 import type{GroupSharingRule,SharingDestination,GroupSharingSnapshot}from'@dentity/contracts';
 import{TaskError,sharingIdentityKey,sharingTargetKey,sharingSources,type TaskScope}from'@dentity/application';
@@ -14,7 +15,7 @@ export class GroupSharingConfiguration{
  selection(w:string,e:string,v:unknown):SharingDestination{
   try{const proof=(v as{proof:string}).proof;if(typeof proof!=='string'||proof.length>16000)throw Error();const[p,s,...rest]=proof.split('.');if(!p||!s||rest.length)throw Error();const a=Buffer.from(s,'base64url'),b=this.mac(p);if(a.length!==b.length||!timingSafeEqual(a,b))throw Error();const data=JSON.parse(Buffer.from(p,'base64url').toString())as{w:string;e:string;ref:SharingDestination};if(data.w!==w||data.e!==e)throw Error();this.assertCurrent(w,e,data.ref);return data.ref;}catch{throw new TaskError(400,'invalid_sharing_selection');}
  }
- assertCurrent(w:string,e:string,ref:SharingDestination){const c=this.channels.repository.byId(ref.connectionId);if(ref.provider!=='feishu'||!c||c.workspaceId!==w||c.entityId!==e||c.appId!==ref.appId||c.eventTenantId!==ref.tenantId||this.channels.currentBindingVersion(c.id)!==ref.bindingVersion)throw new TaskError(409,'sharing_binding_changed');}
+ assertCurrent(w:string,e:string,ref:SharingDestination){const c=this.channels.repository.byId(ref.connectionId);if(!['feishu','wecom'].includes(ref.provider)||!c||c.provider!==ref.provider||c.workspaceId!==w||c.entityId!==e||c.appId!==ref.appId||c.eventTenantId!==ref.tenantId||this.channels.currentBindingVersion(c.id)!==ref.bindingVersion)throw new TaskError(409,'sharing_binding_changed');}
  save(w:string,e:string,actor:string,value:unknown){
   const b=value as{expectedRevision:number;rules:{id?:string;name:string;enabled:boolean;type:'mutual'|'directed';sources:unknown[];targets:unknown[]}[]};
   if(!b||Object.keys(b).some(k=>!['expectedRevision','rules'].includes(k))||!Number.isSafeInteger(b.expectedRevision)||!Array.isArray(b.rules)||b.rules.length>50)throw new TaskError(400,'invalid_sharing_rules');
@@ -35,19 +36,27 @@ export class GroupSharingConfiguration{
  }
  view(w:string,e:string){const c=this.get(w,e);const edges=(r:GroupSharingRule)=>{const destinations=r.type==='mutual'?r.sources:r.targets;return new Set(destinations.flatMap(d=>r.sources.filter(s=>sharingTargetKey(s)!==sharingTargetKey(d)).map(s=>JSON.stringify([sharingTargetKey(s),sharingTargetKey(d)]))));};const expanded=c.rules.map(r=>({rule:r,edges:edges(r)}));return{...c,rules:c.rules.map(r=>({...r,overlappingRules:expanded.filter(other=>other.rule.id!==r.id&&other.rule.enabled&&[...edges(r)].some(edge=>other.edges.has(edge))).map(other=>({id:other.rule.id,name:other.rule.name})),sources:r.sources.map(ref=>this.issue(w,e,ref)),targets:r.targets.map(ref=>this.issue(w,e,ref)),historyReady:r.sources.every(ref=>{const record=this.channels.repository.byId(ref.connectionId);return !!record&&groupHistoryPermission(record);}),available:[...r.sources,...r.targets].every(ref=>{try{this.assertCurrent(w,e,ref);return true;}catch{return false;}})}))};}
  snapshot(scope:TaskScope):GroupSharingSnapshot|undefined{
-  const s=scope.source;if(!s||!scope.principal||s.channelType!=='feishu')return;const r=this.channels.repository.byId(s.connectionId);if(!r||r.appId!==s.applicationId||r.eventTenantId!==s.tenantId||this.channels.currentBindingVersion(r.id)!==s.bindingVersion)return;
-  const identity={provider:'feishu' as const,connectionId:s.connectionId,appId:s.applicationId,tenantId:s.tenantId,bindingVersion:s.bindingVersion};
-  const destination:SharingDestination=s.conversationKind==='group'?{...identity,kind:'group',id:s.conversationId,label:'当前群'}:{...identity,kind:'person',id:scope.principal.externalUserId,namespace:'open_id',label:'当前私聊'};
-  if(s.conversationKind==='private'&&scope.principal.identityNamespace!=='open_id')return;
+  const s=scope.source;if(!s||!scope.principal||!['feishu','wecom'].includes(s.channelType))return;const r=this.channels.repository.byId(s.connectionId);if(!r||r.provider!==s.channelType||r.appId!==s.applicationId||r.eventTenantId!==s.tenantId||this.channels.currentBindingVersion(r.id)!==s.bindingVersion)return;
+  const identity={provider:s.channelType as 'feishu'|'wecom',connectionId:s.connectionId,appId:s.applicationId,tenantId:s.tenantId,bindingVersion:s.bindingVersion};
+  const destination:SharingDestination=s.conversationKind==='group'?{...identity,kind:'group',id:s.conversationId,label:'当前群'}:{...identity,kind:'person',id:scope.principal.externalUserId,namespace:s.channelType==='wecom'?'user_id':'open_id',label:'当前私聊'};
+  if(s.conversationKind==='private'&&scope.principal.identityNamespace!==(s.channelType==='wecom'?'user_id':'open_id'))return;
   const cfg=this.get(scope.workspaceId,scope.entityId);return{version:1,revision:cfg.revision,workspaceId:scope.workspaceId,entityId:scope.entityId,destination,...(s.threadId?{destinationThreadId:s.threadId,...(s.conversationKind==='group'&&s.replyToMessageId?{topicRead:{threadId:s.threadId,chatId:s.conversationId,messageId:s.replyToMessageId}}:{})}:{}),sources:sharingSources(cfg.rules,destination)};
  }
  async candidates(w:string,e:string,q:Record<string,unknown>){
   if(Object.keys(q).some(k=>!['connectionId','cursor','q','peopleCursor','peopleOnly'].includes(k))||q.connectionId!==undefined&&typeof q.connectionId!=='string'||q.cursor!==undefined&&typeof q.cursor!=='string'||q.q!==undefined&&(typeof q.q!=='string'||q.q.length>100)||q.peopleCursor!==undefined&&typeof q.peopleCursor!=='string'||q.peopleOnly!==undefined&&q.peopleOnly!=='true')throw new TaskError(400,'invalid_sharing_query');
-  const records=this.channels.repository.list(w,e).filter(c=>c.provider==='feishu'&&c.enabled&&c.status==='verified'&&c.eventTenantId);const connections=records.map(c=>({id:c.id,appId:c.appId,label:'飞书 · '+c.appId}));if(!q.connectionId)return{connections,groups:[],people:[],nextCursor:null};
+  const records=this.channels.repository.list(w,e).filter(c=>['feishu','wecom'].includes(c.provider)&&c.enabled&&c.status==='verified'&&c.eventTenantId);const connections=records.map(c=>({id:c.id,appId:c.appId,provider:c.provider,label:(c.provider==='wecom'?'企微':'飞书')+' · '+c.appId}));if(!q.connectionId)return{connections,groups:[],people:[],nextCursor:null};
   const record=records.find(c=>c.id===q.connectionId);if(!record)throw new TaskError(404,'sharing_connection_not_found');const binding=await this.channels.resolveBinding(record.id);if(!binding?.conversation.listJoinedGroups)throw new TaskError(409,'sharing_channel_unavailable');
-  const base={provider:'feishu' as const,connectionId:record.id,appId:record.appId,tenantId:binding.connection.tenantId,bindingVersion:binding.bindingVersion};
+  const base={provider:record.provider as 'feishu'|'wecom',connectionId:record.id,appId:record.appId,tenantId:binding.connection.tenantId,bindingVersion:binding.bindingVersion};
   // Provider page tokens never establish a read grant; this endpoint is manager-only.
   const page=q.peopleOnly==='true'?{items:[],nextCursor:undefined}:await binding.conversation.listJoinedGroups(q.cursor?{cursor:String(q.cursor)}:{});this.assertCurrent(w,e,{...base,kind:'group',id:'validation',label:''});
+  if(record.provider==='wecom'){
+   if(typeof q.q==='string'&&q.q.length>64||typeof q.peopleCursor==='string'&&q.peopleCursor.length>256)throw new TaskError(400,'invalid_sharing_query');
+   const known=this.channels.botContacts.knownPage(record,{...(typeof q.q==='string'&&q.q?{keywords:[q.q]}:{}),...(typeof q.peopleCursor==='string'?{after:q.peopleCursor}:{})});
+   const people=known.items.flatMap(person=>{
+    const callback=weComCallbackUserId(record,person.user_id);return callback?[this.issue(w,e,{...base,kind:'person',id:callback,namespace:'user_id',label:person.display_name})]:[];
+   });
+   return{connections,groups:page.items.map(g=>this.issue(w,e,{...base,kind:'group',id:g.id,label:g.name??'未提供群名'})),people,nextPeopleCursor:known.nextAfter??null,peopleTruncated:false,nextCursor:page.nextCursor??null,coverage:'recent_queryable_groups'};
+  }
   const directory=await this.channels.discovery(w,e,'feishu',{kind:'users',...(q.q?{q:String(q.q)}:{}),...(q.peopleCursor?{cursor:String(q.peopleCursor)}:{})},false);
   const people=directory.items.flatMap(item=>{
    const person=this.channels.directoryPerson(record.id,item.subjectId);if(!person||person.status==='inactive')return[];

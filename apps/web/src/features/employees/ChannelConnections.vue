@@ -207,7 +207,7 @@ onUnmounted(() => { controller.abort(); pendingWecomCredentials.value = null; cl
           <NSpace><NButton attr-type="submit" type="primary" :disabled="channelLocked || policyDirty || sharingDirty || !contextDirty" :loading="busy">保存</NButton><NButton :disabled="busy||directoryBusy||!contextDirty" @click="historyEnabled=connection.context?.groupListenEnabled??false;keywordText=(connection.context?.groupTriggerKeywords??[]).join('\n')">取消</NButton></NSpace>
         </NForm>
       </NCard>
-      <GroupSharingSettings v-if="selectedConnection && provider==='feishu' && connection" :key="base+':sharing:'+connection.sourceId" ref="sharingEditor" :base="base" :disabled="!!disabled||busy||directoryBusy||policyBusy||policyDirty" @busy-changed="v=>sharingBusy=v" @dirty-changed="v=>sharingDirty=v" @changed="emit('changed')" @session-expired="emit('sessionExpired')"/>
+      <GroupSharingSettings v-if="selectedConnection && (provider==='feishu'||provider==='wecom') && connection" :key="base+':sharing:'+connection.sourceId" ref="sharingEditor" :base="base" :disabled="!!disabled||busy||directoryBusy||policyBusy||policyDirty" @busy-changed="v=>sharingBusy=v" @dirty-changed="v=>sharingDirty=v" @changed="emit('changed')" @session-expired="emit('sessionExpired')"/>
           <p v-if="connection&&!connection.enabled" class="field-note">渠道已停用。启用后请重新验证凭据。</p>
         </template><p v-else class="field-note">当前没有渠道编辑权限，不展示凭据。</p>
       </ChannelProviderTabs>

@@ -6,11 +6,11 @@ import{api,ApiError,errorMessage}from'../../shared/api';
 import InfoHint from'../../shared/ui/InfoHint.vue';
 import ActionBar from'../../shared/ui/ActionBar.vue';
 import DirectorySyncStatus from '../directory/DirectorySyncStatus.vue';
-type Ref={kind:'group'|'person';provider:'feishu';connectionId:string;appId:string;tenantId:string;bindingVersion:string;id:string;label:string;namespace?:'open_id'};
+type Ref={kind:'group'|'person';provider:'feishu'|'wecom';connectionId:string;appId:string;tenantId:string;bindingVersion:string;id:string;label:string;namespace?:'open_id'|'user_id'};
 type Selection={ref:Ref;proof:string};
 type Rule={id?:string;revision?:number;name:string;enabled:boolean;type:'mutual'|'directed';sources:Selection[];targets:Selection[];available?:boolean;historyReady?:boolean;overlappingRules?:{id:string;name:string}[]};
 type Config={revision:number;rules:Rule[]};
-type Candidates={connections:{id:string;appId:string;label:string}[];groups:Selection[];people:Selection[];nextCursor:string|null;nextPeopleCursor?:string|null;peopleTruncated?:boolean};
+type Candidates={connections:{id:string;appId:string;label:string;provider?:'feishu'|'wecom'}[];groups:Selection[];people:Selection[];nextCursor:string|null;nextPeopleCursor?:string|null;peopleTruncated?:boolean};
 const props=defineProps<{base:string;disabled?:boolean}>();
 const emit=defineEmits<{'busyChanged':[boolean];'dirtyChanged':[boolean];changed:[];sessionExpired:[]}>();
 const config=ref<Config>({revision:0,rules:[]}),loading=ref(false),saving=ref(false),error=ref(''),notice=ref(''),applied=ref<number|null>(null),statusError=ref(false),unknown=ref(false),loaded=ref(false);
@@ -25,6 +25,7 @@ const valid=computed(()=>!!edit.value?.name.trim()&&(edit.value.type==='mutual'?
 const selectedSources=computed(()=>new Set(edit.value?.sources.map(key))),selectedTargets=computed(()=>new Set(edit.value?.targets.map(key)));
 const visibleGroups=computed(()=>groups.value.filter(s=>s.ref.label.includes(search.value)||s.ref.id.includes(search.value)));
 const visiblePeople=computed(()=>people.value.filter(s=>s.ref.label.includes(search.value)));
+const selectedProvider=computed(()=>connections.value.find(c=>c.id===connection.value)?.provider??groups.value.find(g=>g.ref.connectionId===connection.value)?.ref.provider??edit.value?.sources.find(g=>g.ref.connectionId===connection.value)?.ref.provider??'feishu');
 async function status(){try{const value=await api<{appliedRevision:number}>(props.base+'/group-sharing/status',abort.signal);applied.value=value.appliedRevision;statusError.value=false;}catch{statusError.value=true;applied.value=null;}}
 async function load(){const g=++generation;loading.value=true;error.value='';try{const value=await api<Config>(props.base+'/group-sharing',abort.signal);if(g!==generation||abort.signal.aborted)return;config.value=value;loaded.value=true;if(unknown.value){edit.value=null;confirmDiscard.value=false;}unknown.value=false;await status();}catch(cause){if(g===generation&&!abort.signal.aborted){error.value=errorMessage(cause);if(cause instanceof ApiError&&cause.status===401)emit('sessionExpired');}}finally{if(g===generation)loading.value=false;}}
 async function save(rules:Rule[]){saving.value=true;error.value='';notice.value='';try{const value=await api<Config>(props.base+'/group-sharing',abort.signal,{expectedRevision:config.value.revision,rules:rules.map(r=>({...r,id:r.id,name:r.name,enabled:r.enabled,type:r.type,sources:r.sources,targets:r.type==='mutual'?[]:r.targets,revision:undefined,available:undefined,historyReady:undefined,overlappingRules:undefined}))},'PUT');if(abort.signal.aborted)return;config.value=value;edit.value=null;unknown.value=false;notice.value='共享规则已保存。';emit('changed');await status();}catch(cause){if(!abort.signal.aborted){error.value=errorMessage(cause);unknown.value=!(cause instanceof ApiError)||cause.status>=500;if(cause instanceof ApiError&&cause.status===401)emit('sessionExpired');}}finally{saving.value=false;}}
@@ -43,7 +44,7 @@ onBeforeUnmount(()=>{generation++;candidateGeneration++;abort.abort();emit('dirt
 </script>
 <template>
  <section class="group-sharing form-section" aria-label="群消息共享">
-  <header class="sharing-heading"><div><h3>群消息共享<InfoHint label="群共享规则说明">默认不同群和私聊隔离。仅选定的群互通，或将选定源群提供给指定群或个人私聊。共享用于按需读取，不自动转发；不传递授权。仅支持同一飞书应用的文本历史。</InfoHint></h3><p class="field-note">这是不同群之间的上下文隔离与共享配置，不是员工使用范围。默认不共享；仅限同一飞书应用，其他渠道身份互不共享。</p></div><NButton :disabled="disabled||busy||!loaded||unknown" type="primary" @click="open()">新增共享规则</NButton></header>
+  <header class="sharing-heading"><div><h3>群消息共享<InfoHint label="群共享规则说明">默认不同群和私聊隔离。仅选定的群互通，或将选定源群提供给指定群或个人私聊。共享用于按需读取，不自动转发；不传递授权。支持同一飞书或企微应用内的文本历史，不跨应用共享。</InfoHint></h3><p class="field-note">这是不同群之间的上下文隔离与共享配置，不是员工使用范围。默认不共享；仅限同一渠道应用，其他渠道身份互不共享。</p></div><NButton :disabled="disabled||busy||!loaded||unknown" type="primary" @click="open()">新增共享规则</NButton></header>
   <NAlert v-if="error" type="error" role="alert">{{error}}<NButton :disabled="busy" @click="load">刷新并核对</NButton></NAlert>
   <NAlert v-if="unknown" type="warning" role="status">保存结果尚未确认，请先刷新核对，不要重复提交。</NAlert>
   <p v-if="notice" role="status">{{notice}}</p>
@@ -52,7 +53,7 @@ onBeforeUnmount(()=>{generation++;candidateGeneration++;abort.abort();emit('dirt
    <div class="sharing-observation"><span v-if="statusError">运行侧应用状态暂不可用</span><span v-else-if="pending">已保存，等待运行侧应用</span><span v-else>运行侧已应用 · 配置版本 {{config.revision}}</span><NButton size="small" :disabled="busy" @click="status">核对应用状态</NButton></div>
    <NEmpty v-if="!config.rules.length" description="尚未配置跨群共享"><template #extra>同群按原授权读取，不同群和私聊保持隔离。</template></NEmpty>
    <div v-for="(rule,index) in config.rules" :key="rule.id" class="sharing-rule">
-    <div class="sharing-rule-content"><h4>{{rule.name}} <NTag size="small" :bordered="false">{{rule.type==='mutual'?'选定群互通':'定向共享'}}</NTag></h4><p>{{rule.sources.map(s=>s.ref.label).join('、')}}{{rule.type==='mutual'?'之间互相共享':' → '+rule.targets.map(s=>s.ref.label+(s.ref.kind==='person'?'（私聊）':'')).join('、')}}</p><p v-if="rule.available===false" class="sharing-invalid">应用或对象身份已失效，请重新选择来源和目标。</p><p v-else-if="rule.historyReady===false" class="field-note">飞书历史读取权限尚未确认，请在连接诊断中核对。</p><p v-if="rule.overlappingRules?.length" class="field-note">部分共享方向仍由规则「{{rule.overlappingRules.map(r=>r.name).join('、')}}」允许。</p><span class="field-note">规则版本 {{rule.revision}}</span></div>
+    <div class="sharing-rule-content"><h4>{{rule.name}} <NTag size="small" :bordered="false">{{rule.type==='mutual'?'选定群互通':'定向共享'}}</NTag></h4><p>{{rule.sources.map(s=>s.ref.label).join('、')}}{{rule.type==='mutual'?'之间互相共享':' → '+rule.targets.map(s=>s.ref.label+(s.ref.kind==='person'?'（私聊）':'')).join('、')}}</p><p v-if="rule.available===false" class="sharing-invalid">应用或对象身份已失效，请重新选择来源和目标。</p><p v-else-if="rule.historyReady===false" class="field-note">历史读取权限尚未确认，请核对渠道连接与访问权限。</p><p v-if="rule.overlappingRules?.length" class="field-note">部分共享方向仍由规则「{{rule.overlappingRules.map(r=>r.name).join('、')}}」允许。</p><span class="field-note">规则版本 {{rule.revision}}</span></div>
     <div class="sharing-rule-actions"><NSwitch :value="rule.enabled" :disabled="disabled||busy||!!edit||unknown||rule.available===false&&!rule.enabled" :aria-label="'启用共享规则 '+rule.name" @update:value="v=>toggle(index,v)"/><NButton size="small" :disabled="disabled||busy||unknown" @click="open(index)">编辑</NButton></div>
    </div>
    <p v-if="config.rules.length" class="field-note">多个启用规则合并生效。停用一条不影响其他规则；改动只影响新任务，已运行任务保留接纳时范围。</p>
@@ -65,8 +66,9 @@ onBeforeUnmount(()=>{generation++;candidateGeneration++;abort.abort();emit('dirt
     <form class="settings-form" @submit.prevent="commit">
      <NFormItem label="规则名称"><NInput v-model:value="edit.name" :maxlength="100" :disabled="busy||unknown"  :input-props="{'aria-label':'共享规则名称'}"/></NFormItem>
      <NFormItem label="共享方式"><NSelect v-model:value="edit.type" :disabled="busy||unknown" :options="[{value:'mutual',label:'选定的群之间互通'},{value:'directed',label:'源群共享给指定群或个人'}]" aria-label="共享方式" @update:value="()=>{if(edit)edit.targets=[]}"/></NFormItem>
-     <NFormItem label="飞书应用"><NSelect :value="connection" :disabled="busy||unknown" :options="connections.map(c=>({value:c.id,label:c.label}))" placeholder="选择已接入的飞书应用" aria-label="共享飞书应用" @update:value="v=>{connection=v;void candidates()}"/></NFormItem>
-     <p v-if="!connections.length&&!candidateLoading&&!candidateError" class="field-note">请先接入并验证飞书应用。钉钉和企业微信暂不支持历史共享。</p>
+     <NFormItem label="渠道应用"><NSelect :value="connection" :disabled="busy||unknown" :options="connections.map(c=>({value:c.id,label:c.label}))" placeholder="选择已接入的飞书或企微应用" aria-label="共享渠道应用" @update:value="v=>{connection=v;void candidates()}"/></NFormItem>
+     <p v-if="!connections.length&&!candidateLoading&&!candidateError" class="field-note">请先接入并验证飞书或企微应用。钉钉暂不支持历史共享。</p>
+     <p v-if="selectedProvider==='wecom'" class="field-note">企微显示最近可查询群，不代表完整群目录。共享用于主动读取历史，不开启群监听或关键词触发。</p>
      <div class="sharing-search"><NInput v-model:value="search" :disabled="busy||unknown" placeholder="搜索已加载群或目录人员" :input-props="{'aria-label':'搜索共享对象'}"/><NButton :disabled="busy||unknown" @click="candidates()">刷新</NButton></div>
      <NAlert v-if="candidateError" type="error" role="alert">{{candidateError}}<NButton :disabled="busy" @click="candidates()">重试</NButton></NAlert>
      <p v-if="candidateLoading" role="status">正在查询可选对象…</p>
@@ -75,10 +77,10 @@ onBeforeUnmount(()=>{generation++;candidateGeneration++;abort.abort();emit('dirt
      <div class="sharing-options" role="group" aria-label="共享源群"><NCheckbox v-for="s in visibleGroups" :key="key(s)" :checked="selectedSources.has(key(s))" :disabled="busy||unknown||otherApp(s)" @update:checked="v=>choose(s,false,v)">{{s.ref.label}}<span class="field-note"> · {{s.ref.id.slice(-8)}}</span></NCheckbox></div>
      <NEmpty v-if="!visibleGroups.length&&!candidateLoading" description="没有找到可选群"/>
      <NButton v-if="next" :disabled="busy||unknown" @click="candidates(true)">加载更多群</NButton>
-     <template v-if="edit.type==='directed'"><h4>目标群或指定个人私聊</h4><DirectorySyncStatus v-if="connection" :key="connection" :endpoint="base+'/channels/feishu/directory'" :connection-id="connection" :disabled="disabled||unknown" auto-load @completed="candidates(false,true)"/><div class="sharing-selected"><NTag v-for="s in edit.targets" :key="key(s)" :closable="!busy&&!unknown" @close="choose(s,true,false)">{{s.ref.label}}{{s.ref.kind==='person'?' · 私聊':''}}</NTag></div>
+     <template v-if="edit.type==='directed'"><h4>目标群或指定个人私聊</h4><DirectorySyncStatus v-if="connection&&selectedProvider==='feishu'" :key="connection" :endpoint="base+'/channels/feishu/directory'" :connection-id="connection" :disabled="disabled||unknown" auto-load @completed="candidates(false,true)"/><p v-if="selectedProvider==='wecom'" class="field-note">个人目标仅显示已完成身份绑定的人员。</p><div class="sharing-selected"><NTag v-for="s in edit.targets" :key="key(s)" :closable="!busy&&!unknown" @close="choose(s,true,false)">{{s.ref.label}}{{s.ref.kind==='person'?' · 私聊':''}}</NTag></div>
       <div class="sharing-options" role="group" aria-label="共享目标"><NCheckbox v-for="s in [...visibleGroups,...visiblePeople]" :key="key(s)" :checked="selectedTargets.has(key(s))" :disabled="busy||unknown||otherApp(s)" @update:checked="v=>choose(s,true,v)">{{s.ref.label}}<span class="field-note"> · {{s.ref.kind==='person'?'私聊':'群'}} · {{s.ref.id.slice(-8)}}</span></NCheckbox></div><NButton v-if="nextPeople" :disabled="busy||unknown" @click="candidates(true,true)">加载更多人员</NButton><p v-else-if="peopleTruncated" class="field-note">人员列表未完全加载，请输入姓名后刷新缩小范围。</p>
      </template>
-     <p class="field-note">已加入群不等于历史可读。应用仍须具备消息读取权限；个人授权仅用于该私聊，不扩展到其参加的群。</p>
+     <p class="field-note">群列表不代表历史一定可读。读取仍受渠道的实际访问权限约束；个人授权仅用于该私聊，不扩展到其参加的群。</p>
      <ActionBar><NButton :disabled="busy||unknown" @click="close">取消</NButton><NButton attr-type="submit" type="primary" :loading="saving" :disabled="busy||unknown||!valid">保存共享规则</NButton></ActionBar>
     </form>
    </template>

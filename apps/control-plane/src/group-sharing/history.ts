@@ -7,8 +7,8 @@ import type{GroupSharingConfiguration}from'./configuration.js';
 const hash=(v:string)=>createHash('sha256').update(v).digest('hex');
 // Provenance belongs to the actual destination, survives app rebindings, and is
 // shared only as restriction metadata across employees that can reach that destination.
-const key=(s:GroupSharingSnapshot,r:SharingDestination)=>JSON.stringify([s.workspaceId,r.provider,r.tenantId,r.kind,r.kind==='person'?r.appId:'',r.id]);
-type QueryState={runId:string;group:SharingGroup;query:{startAt:number;endAt:number;order:'asc'|'desc';limit:number;threadId?:string};providerCursor?:string;seen:string[];pages:number;count:number;bytes:number;expiresAt:number};
+const key=(s:GroupSharingSnapshot,r:SharingDestination)=>JSON.stringify([s.workspaceId,r.provider,r.provider==='wecom'&&r.kind==='group'?'':r.tenantId,r.kind,r.kind==='person'?r.appId:'',r.id]);
+type QueryState={runId:string;group:SharingGroup;query:{startAt:number;endAt:number;order:'asc'|'desc';limit:number;threadId?:string};providerCursor?:string;pendingPage?:ChannelPage<ChannelMessage>;seen:string[];pages:number;count:number;bytes:number;expiresAt:number};
 /** Runtime-owned business data service. It never resolves execution configuration. */
 export class GroupHistoryService{
  private readonly reading=new Set<string>();
@@ -54,7 +54,7 @@ export class GroupHistoryService{
  }
  private groups(snapshot:GroupSharingSnapshot){const groups=snapshot.sources.map(s=>s.group);if(snapshot.destination.kind==='group'&&sharingAllows(snapshot,snapshot.destination))groups.unshift(snapshot.destination);return groups;}
  private contexts(snapshot:GroupSharingSnapshot){const groups=this.groups(snapshot).map(group=>({group,groupRef:hash(sharingTargetKey(group)),type:'group' as 'group'|'thread',name:group.label,threadId:undefined as string|undefined}));if(snapshot.destination.kind==='group'&&snapshot.topicRead&&sharingAllows(snapshot,snapshot.destination))groups.unshift({group:snapshot.destination,groupRef:hash(JSON.stringify([sharingTargetKey(snapshot.destination),'thread',snapshot.topicRead.threadId])),type:'thread',name:'当前话题',threadId:snapshot.topicRead.threadId});return groups;}
- list(auth:ReturnType<GroupHistoryService['authorize']>){return{items:this.contexts(auth.snapshot).flatMap(context=>{try{this.allowed(auth.snapshot,context.group);return[{groupRef:context.groupRef,contextRef:context.groupRef,type:context.type,name:context.name,...(context.threadId?{threadId:context.threadId}:{})}];}catch{return[];}}),provider:'feishu',coverage:'explicit_authorized_contexts',warnings:['Only this task source and directly authorized groups are readable. Files require separate grants; group pages do not expand all threads.']};}
+ list(auth:ReturnType<GroupHistoryService['authorize']>){return{items:this.contexts(auth.snapshot).flatMap(context=>{try{this.allowed(auth.snapshot,context.group);return[{groupRef:context.groupRef,contextRef:context.groupRef,type:context.type,name:context.name,...(context.threadId?{threadId:context.threadId}:{})}];}catch{return[];}}),provider:auth.snapshot.destination.provider,...(auth.snapshot.destination.provider==='wecom'?{queryHints:{maxLookbackDays:7,orders:['desc'],timeZone:'Asia/Shanghai',recordIds:'query_local'}}:{}),coverage:'explicit_authorized_contexts',warnings:['Only this task source and directly authorized groups are readable. Files require separate grants; group pages do not expand all threads.']};}
  private async binding(group:SharingGroup){
   const row=this.configuration.channels.repository.byId(group.connectionId)!,revision=JSON.stringify([row.revision,row.authRevision,row.stateVersion]);let cached=this.bindings.get(group.connectionId);
   if(cached?.revision!==revision){const binding=await this.configuration.channels.resolveHistoryBinding(group.connectionId);if(!binding)throw new TaskError(409,'history_channel_unavailable');cached={revision,binding};this.bindings.set(group.connectionId,cached);}
@@ -70,14 +70,15 @@ export class GroupHistoryService{
   let state:QueryState;if(q.cursor){if(!saved)throw new TaskError(400,'history_cursor_invalid');state=JSON.parse(saved.state_json)as QueryState;
    if(state.runId!==auth.runId||state.query.threadId!==context?.threadId||sharingTargetKey(state.group)!==sharingTargetKey(source)||state.expiresAt<=this.now()||(['startAt','endAt','order','limit']as const).some(k=>q[k]!==undefined&&q[k]!==state.query[k]))throw new TaskError(400,'history_cursor_invalid');
    if(saved.result_json){this.inherit(auth.snapshot,source);return this.journal.read(this.journalScope(auth),JSON.parse(saved.result_json)as JournalRef);}
-  }else{const endAt=q.endAt??Math.floor(this.now()/1000)*1000,startAt=q.startAt??endAt-86400000,limit=q.limit??50,order=q.order??'asc';
+  }else{const endAt=q.endAt??Math.floor(this.now()/1000)*1000,startAt=q.startAt??endAt-86400000,limit=q.limit??50,order=q.order??(source.provider==='wecom'?'desc':'asc');
    if(!Number.isSafeInteger(startAt)||startAt<0||startAt%1000||!Number.isSafeInteger(endAt)||endAt<=startAt||endAt%1000||!Number.isInteger(limit)||limit<1||limit>50||!['asc','desc'].includes(order))throw new TaskError(400,'invalid_history_query');
    state={runId:auth.runId,group:source,query:{startAt,endAt,limit,order,...(context?.threadId?{threadId:context.threadId}:{})},seen:[],pages:0,count:0,bytes:0,expiresAt:this.now()+900000};this.store.run('INSERT INTO group_history_queries(id,run_id,state_json) VALUES(?,?,?)',id,auth.runId,JSON.stringify(state));
   }
   const budget=this.store.one<{pages:number;bytes:number}>('SELECT pages,bytes FROM group_history_run_budget WHERE run_id=?',auth.runId)??{pages:0,bytes:0};if(budget.pages>=20||budget.bytes>=128000)throw new TaskError(429,'history_run_budget_exhausted');
   const binding=await this.binding(source);let page:ChannelPage<ChannelMessage>;
-  try{page=await binding.conversation.listMessages({provider:'feishu',connectionId:source.connectionId,tenantId:source.tenantId,kind:'conversation',externalId:source.id,conversationKind:'group'},{...state.query,...(state.providerCursor?{cursor:state.providerCursor}:{})});}
+  try{page=state.pendingPage??await binding.conversation.listMessages({provider:source.provider,connectionId:source.connectionId,tenantId:source.tenantId,kind:'conversation',externalId:source.id,conversationKind:'group'},{...state.query,...(state.providerCursor?{cursor:state.providerCursor}:{})});}
   catch(error){if(error instanceof ChannelError)throw new TaskError(error.code==='forbidden'?403:error.code==='unsupported'?422:error.code==='invalid_request'?400:error.code==='rate_limited'?429:503,error.code==='invalid_request'&&q.cursor?'history_cursor_expired':error.code);throw error;}
+  const remainder=page.items.slice(state.query.limit),providerPage=page;page={...page,items:page.items.slice(0,state.query.limit),exhausted:page.exhausted&&remainder.length===0};
   this.assertActive(auth);this.allowed(auth.snapshot,source);const messages:{id:string;sourceRef:string;author:ChannelMessage['author'];occurredAt:number;text:string;threadId?:string;rootMessageId?:string}[]=[];let bytes=0,truncated=false;
   for(const m of page.items){if(m.occurredAt<state.query.startAt||m.occurredAt>=state.query.endAt||state.seen.includes(m.id))continue;
    const projected={id:m.id,sourceRef:q.groupRef,author:m.author,occurredAt:m.occurredAt,text:m.text,...(m.threadId?{threadId:m.threadId}:{}),...(m.rootMessageId?{rootMessageId:m.rootMessageId}:{})},size=Buffer.byteLength(JSON.stringify(projected));
@@ -93,7 +94,7 @@ export class GroupHistoryService{
    const resultRef=this.journal.put(this.journalScope(auth),'group_history_page',result);
    this.store.run('UPDATE group_history_queries SET result_json=?,next_cursor=? WHERE id=?',JSON.stringify(resultRef),next??null,id);
    this.store.run('INSERT INTO group_history_run_budget VALUES(?,?,?) ON CONFLICT(run_id) DO UPDATE SET pages=pages+excluded.pages,bytes=bytes+excluded.bytes',auth.runId,1,bytes);
-   if(next)this.store.run('INSERT INTO group_history_queries(id,run_id,state_json) VALUES(?,?,?)',next,auth.runId,JSON.stringify({...state,pages,count,bytes:state.bytes+bytes,seen:[...state.seen,...page.items.map(m=>m.id)],providerCursor:page.nextCursor}));
+   if(next)this.store.run('INSERT INTO group_history_queries(id,run_id,state_json) VALUES(?,?,?)',next,auth.runId,JSON.stringify({...state,pages,count,bytes:state.bytes+bytes,seen:[...state.seen,...page.items.map(m=>m.id)],providerCursor:providerPage.nextCursor,...(remainder.length?{pendingPage:{...providerPage,items:remainder}}:{pendingPage:undefined})}));
   });return result;
  }
 }

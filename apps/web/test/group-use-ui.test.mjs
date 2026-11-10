@@ -248,3 +248,16 @@ test('ChannelConnections merges verified evidence without resetting credentials 
  await providerTab('企业微信');await until(()=>document.querySelector('input[value="denylist"]')?.checked);input('渠道应用 ID','unsaved-bot-id');input('拒绝成员成员关键词','测试');await click('搜索企微成员');await click('选择人员');await until(()=>document.querySelector('.member-verification input[readonly]'));
  verified=true;await click('查询验证状态');await until(()=>!text().includes('名单中仍有人员身份待核验'));assert.equal(document.querySelector('input[aria-label="渠道应用 ID"]').value,'unsaved-bot-id');assert.equal(document.querySelectorAll('.directory-option').length,1);assert.match(document.querySelector('.directory-option').textContent,/身份已核验/);assert.equal(button('保存渠道使用策略').disabled,false);assert.equal(env.requests.filter(r=>r.url.endsWith('/channels')).length,1);assert.equal(env.requests.filter(r=>r.url.endsWith('/directory-access')).length,1);assert.equal(env.requests.some(r=>r.method==='PATCH'),false);
 });
+for(const provider of ['feishu','wecom','dingtalk'])test(provider+' exposes only supported group sharing entry without enabling listening',async t=>{
+ const current=connection({provider,status:'verified',...(provider==='wecom'?{directoryMode:'member_search',directoryStatus:'unavailable'}:{})});
+ const env=await mount(t,'settings',{base,canManage:true},async r=>{
+  if(r.url.endsWith('/channels'))return[current];
+  if(r.url.endsWith('/runtime-status'))return{observedAt:null,employee:null};
+  if(r.url.endsWith('/directory-access'))return{allow:[],deny:[],revision:1,channelPolicies:[]};
+  return{};
+ });
+ await providerTab(provider==='feishu'?'飞书':provider==='wecom'?'企业微信':'钉钉');await until(()=>!!document.querySelector('input[aria-label="渠道应用 ID"]'));
+ if(provider==='dingtalk'){assert.equal(document.querySelector('[aria-label="群消息共享"]'),null);}
+ else{await until(()=>!!document.querySelector('[aria-label="群消息共享"]'));assert.ok(env.requests.some(r=>r.url.endsWith('/group-sharing')));}
+ if(provider!=='feishu'){assert.equal(document.querySelector('[aria-label="群聊触发关键词"]'),null);assert.equal(document.querySelector('[aria-label="保留近期群消息作为上下文"]'),null);}
+});
