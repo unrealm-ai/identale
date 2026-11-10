@@ -4,7 +4,7 @@ import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import { NButton } from 'naive-ui';
 import { api, errorMessage } from '../../shared/api';
 import type { DirectorySyncStatus as SyncStatus } from './types';
-const props = defineProps<{ endpoint: string; initial?: SyncStatus | undefined; connectionId?: string; disabled?: boolean; autoLoad?: boolean }>();
+const props = defineProps<{ endpoint: string; initial?: SyncStatus | undefined; connectionId?: string; disabled?: boolean; autoLoad?: boolean; syncLabel?: string }>();
 const emit = defineEmits<{ updated: [value: SyncStatus]; completed: [] }>();
 class DirectorySourceError extends Error {}
 const message = (cause: unknown) => cause instanceof DirectorySourceError ? cause.message : errorMessage(cause);
@@ -47,7 +47,7 @@ onBeforeUnmount(() => { disposed = true; clearTimer(); controller.abort(); docum
       <template v-else><span>上次同步：{{ lastUpdated }}</span><span v-if="task?.lastResult==='success' && task.progress">{{task.progress.userCount}} 人、{{task.progress.departmentCount}} 个部门</span><span v-if="task?.lastResult==='failure'">同步未完成，{{task.hasSnapshot?'当前显示上次成功结果。':'请重试。'}}</span><span v-else-if="task?.stale && task.hasSnapshot">通讯录可能不是最新，可点击同步。</span></template>
       <span v-if="error" class="sync-error" role="alert">{{ error }}</span>
     </div>
-    <div class="directory-sync-actions"><NButton v-if="error" size="small" :disabled="busy" @click="read">刷新状态</NButton><NButton size="small" :loading="busy" :disabled="disabled || busy || task?.running===true" @click="sync">{{task?.running?'同步中':'同步通讯录'}}</NButton></div>
+    <div class="directory-sync-actions"><NButton v-if="error" size="small" :disabled="busy" @click="read">刷新状态</NButton><NButton size="small" :loading="busy" :disabled="disabled || busy || task?.running===true" @click="sync">{{task?.running?'同步中':(syncLabel || '同步通讯录')}}</NButton></div>
   </div>
 </template>
 <style scoped>

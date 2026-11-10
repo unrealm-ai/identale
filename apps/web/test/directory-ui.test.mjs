@@ -14,7 +14,7 @@ const window = new Window({ url: 'http://127.0.0.1:5173/' });
 for (const name of ['window', 'document', 'navigator', 'location', 'history', 'localStorage', 'Node', 'ShadowRoot', 'Document', 'Element', 'HTMLElement', 'SVGElement', 'HTMLDialogElement', 'Event', 'MouseEvent', 'KeyboardEvent', 'PointerEvent', 'FocusEvent', 'InputEvent', 'Image', 'HTMLInputElement', 'HTMLTextAreaElement', 'getComputedStyle', 'MutationObserver', 'ResizeObserver', 'requestAnimationFrame', 'cancelAnimationFrame']) Object.defineProperty(globalThis, name, { value: name === 'window' ? window : window[name], configurable: true });
 const { createApp, h, reactive, nextTick } = await import('vue');
 const bundle = await mkdtemp(resolve('apps/web/.directory-ui-test-'));
-const paths = { sync:'apps/web/src/features/directory/DirectorySyncStatus.vue', materials:'apps/web/src/features/business-resources/TaskMaterialAuthorization.vue', business: 'apps/web/src/features/business-resources/BusinessResourceConfiguration.vue', requirements: 'apps/web/src/features/employees/ChannelSetupRequirements.vue', draft: 'apps/web/src/features/employees/WizardChannelDraft.vue', wizard: 'apps/web/src/features/employees/EntityWizard.vue', guide: 'apps/web/src/features/directory/DirectorySetupGuide.vue', settings: 'apps/web/src/features/employees/ChannelConnections.vue', picker: 'apps/web/src/features/directory/DirectoryRulePicker.vue', access: 'apps/web/src/features/employees/AccessSettings.vue' };
+const paths = { dingtalkSetup:'apps/web/src/features/directory/DingtalkDirectorySetup.vue', sync:'apps/web/src/features/directory/DirectorySyncStatus.vue', materials:'apps/web/src/features/business-resources/TaskMaterialAuthorization.vue', business: 'apps/web/src/features/business-resources/BusinessResourceConfiguration.vue', requirements: 'apps/web/src/features/employees/ChannelSetupRequirements.vue', draft: 'apps/web/src/features/employees/WizardChannelDraft.vue', wizard: 'apps/web/src/features/employees/EntityWizard.vue', guide: 'apps/web/src/features/directory/DirectorySetupGuide.vue', settings: 'apps/web/src/features/employees/ChannelConnections.vue', picker: 'apps/web/src/features/directory/DirectoryRulePicker.vue', access: 'apps/web/src/features/employees/AccessSettings.vue' };
 const components = {};
 for (const [name, path] of Object.entries(paths)) {
   const outfile = join(bundle, `${name}.mjs`);
@@ -170,7 +170,7 @@ test('provider switch clears unsubmitted credentials even when neither provider 
   await mount(t, 'settings', { base, canManage: true }, async () => []);
   await until(() => !!document.querySelector('.channel-connection-form'));
   input('渠道应用 ID', 'unsaved-app'); input('渠道应用密钥', 'unsaved-fixture-secret');
-  await providerTab('钉钉');await click('放弃策略修改并切换');
+  await providerTab('钉钉');await click('放弃策略修改并切换');await click('绑定已有应用');
   await until(() => !!document.querySelector('.setup-requirements')&&text().includes('Client ID（AppKey）'));
   assert.equal(document.querySelector('input[aria-label="渠道应用密钥"]').value, '');
   assert.equal(document.querySelector('input[aria-label="回调校验 Token"]'), null);
@@ -197,7 +197,7 @@ test('single-page channel form keeps official requirements and clears unsubmitte
  const tabs=[...document.querySelectorAll('[role=tablist][aria-label="员工渠道"] [role=tab]')];assert.deepEqual(tabs.map(t=>t.textContent.trim()),['飞书','钉钉','企业微信']);
  for(const tab of tabs){const image=tab.querySelector('img');assert.ok(image);assert.ok((await readFile('apps/web/public'+image.getAttribute('src'))).length>100);}
  assert.equal(document.querySelector('.wizard-channel-guide'),null);assert.ok(document.querySelector('.channel-setup a[href="https://open.feishu.cn/app"]'));assert.match(document.querySelector('.setup-requirements').textContent,/im:message:send_as_bot/);input('渠道应用 ID','synthetic-app');input('渠道应用密钥','synthetic-secret');
- const feishu=document.querySelector('[role=tab][data-name="feishu"]');feishu.focus();feishu.dispatchEvent(new KeyboardEvent('keydown',{key:'ArrowRight',bubbles:true}));await flush();await click('放弃策略修改并切换');await until(()=>document.querySelector('[role=tab][data-name="dingtalk"]').getAttribute('aria-selected')==='true');
+ const feishu=document.querySelector('[role=tab][data-name="feishu"]');feishu.focus();feishu.dispatchEvent(new KeyboardEvent('keydown',{key:'ArrowRight',bubbles:true}));await flush();await click('放弃策略修改并切换');await until(()=>document.querySelector('[role=tab][data-name="dingtalk"]').getAttribute('aria-selected')==='true');await click('绑定已有应用');
  assert.equal(document.querySelector('input[aria-label="渠道应用 ID"]').value,'');assert.equal(document.querySelector('input[aria-label="渠道应用密钥"]').value,'');assert.match(document.querySelector('.setup-requirements').textContent,/Stream/);
  assert.equal(env.requests.some(r=>r.method!=='GET'),false,'browsing and editing credentials must not save or create employees');assert.equal(JSON.stringify({...localStorage,...window.sessionStorage}).includes('synthetic-secret'),false);
 });
@@ -319,7 +319,7 @@ test('Feishu needs only app ID and secret; save failure clears write-only secret
 test('DingTalk submits only supported credentials and switching back clears secrets', async t => {
   const env = await mount(t, 'settings', { base, canManage: true }, async request => request.method === 'GET' ? [] : {});
   input('渠道应用密钥', 'unsent-fixture-secret');
-  await providerTab('钉钉');await click('放弃策略修改并切换');
+  await providerTab('钉钉');await click('放弃策略修改并切换');await click('绑定已有应用');
   assert.equal(document.querySelector('input[aria-label="渠道应用密钥"]').value, '');
   input('渠道应用 ID', 'ding-fixture'); input('渠道应用密钥', 'ding-fixture-secret'); await click('验证并保存渠道连接');
   const saved = env.requests.find(item => item.method === 'PUT'); assert.ok(saved.url.endsWith('/dingtalk')); assert.deepEqual(saved.body, { appId: 'ding-fixture', appSecret: 'ding-fixture-secret', expectedRevision: 0, replaceSource: false });
@@ -679,3 +679,14 @@ test('directory newer query status cannot be overwritten by an older status requ
  await until(()=>text().includes('候选成员'));await click('选择人员');await until(()=>text().includes('成员选择已过期或来源已变化'));
  assert.equal(env.props.rules.length,0);
  });
+
+test('DingTalk saved connection guides separate directory permissions and range with safe diagnostics',async t=>{
+ let status={connectionId:'connection-1',running:false,hasSnapshot:false,snapshotVersion:0,stale:true,lastSuccessAt:null,lastResult:'failure',lastError:{code:'remote_permission',category:'permission',providerCode:88,missingScopes:['qyapi_get_department_list','https://evil.example']}};
+ const env=await mount(t,'dingtalkSetup',{base:'/api/employees/fixture',connectionId:'connection-1'},async r=>r.method==='POST'?{accepted:true,task:{...status,running:true,progress:{userCount:2,departmentCount:1}}}:status);
+ await until(()=>text().includes('缺少权限'));
+ assert.ok(text().includes('API 不等于全企业可读'));
+ assert.ok(text().includes('qyapi_get_department_list'));assert.ok(!text().includes('evil.example'));
+ assert.equal(document.querySelector('a').getAttribute('href'),'https://open-dev.dingtalk.com/');
+ await click('检查并同步通讯录');await until(()=>text().includes('已发现 2 人、1 个部门'));
+ assert.equal(env.requests.filter(r=>r.method==='POST').length,1);
+});

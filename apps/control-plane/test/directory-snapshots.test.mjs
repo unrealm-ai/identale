@@ -37,3 +37,35 @@ test('remembered individual is not advertised as a complete directory',async t=>
 test('list pages with omitted optional status do not erase known direct-person facts',async t=>{const f=await fixture(t),original=f.port.listDepartmentMembers;f.port.listDepartmentMembers=async(...args)=>{const p=await original(...args);return{...p,items:p.items.map(x=>({...x,status:'unknown',directManager:{status:'unknown'}}))};};await f.sync();assert.equal(f.task().lastResult,'success');assert.equal(f.service.peekUser('c',person().id).status,'active');});
 test('authorization version changes on publication, revocation and source replacement without remote reads',async t=>{const f=await fixture(t),initial=f.service.authorizationVersion('c');await f.sync();const published=f.service.authorizationVersion('c');assert.notEqual(initial,published);const calls=f.calls.length;assert.equal(f.service.authorizationVersion('c'),published);assert.equal(f.calls.length,calls);f.setFailure(new DirectoryError('authorization_denied'));await f.sync();assert.notEqual(f.service.authorizationVersion('c'),published);const revoked=f.service.authorizationVersion('c');f.setVersion('replacement');f.service.reconcile();assert.notEqual(f.service.authorizationVersion('c'),revoked);});
 test('same-app credential replacement fences a late success and denial without discarding published directory',async t=>{const f=await fixture(t);f.source.credentialRevision='1';await f.sync();const old=f.task().snapshotVersion;for(const denied of [false,true]){let entered,release;const started=new Promise(r=>entered=r),gate=new Promise(r=>release=r);f.port.getAuthorizedScope=async()=>{entered();await gate;if(denied)throw new DirectoryError('authorization_denied');return{departmentIds:['d'],userIds:[],entireOrganization:false};};f.service.refresh('c');await started;f.source.credentialRevision=String(Number(f.source.credentialRevision)+1);release();await f.service.waitForIdle();assert.equal(f.task().snapshotVersion,old);assert.equal(f.task().hasSnapshot,true);assert.equal(f.service.peekUser('c',person().id).status,'active');}});
+
+test('authorization snapshot requires complete publication, survives temporary failure and retires on revocation or replacement',async t=>{
+ const f=await fixture(t);assert.equal(f.service.hasAuthorizationSnapshot('c'),false);
+ f.service.rememberUsers('c',[person()]);assert.equal(f.service.hasAuthorizationSnapshot('c'),false,'individual cached facts are not a complete authorization snapshot');
+ await f.sync();assert.equal(f.service.hasAuthorizationSnapshot('c'),true);
+ f.setFailure(new DirectoryError('unavailable'));await f.sync();assert.equal(f.service.hasAuthorizationSnapshot('c'),true);
+ f.setFailure(new DirectoryError('authorization_denied'));await f.sync();assert.equal(f.service.hasAuthorizationSnapshot('c'),false);
+ f.setFailure(undefined);await f.sync();assert.equal(f.service.hasAuthorizationSnapshot('c'),true);
+ f.setVersion('replacement');assert.equal(f.service.hasAuthorizationSnapshot('c'),false);
+});
+
+test('sync status and history retain safe missing permission scopes without provider text',async t=>{
+ const f=await fixture(t);
+ f.setFailure(new DirectoryRequestError('authorization_denied',{httpStatus:200,providerCode:88,missingScopes:['qyapi_get_department_list','https://evil.example']}));
+ await f.sync();
+ assert.equal(f.task().lastError.code,'remote_permission');
+ assert.deepEqual(f.task().lastError.missingScopes,['qyapi_get_department_list']);
+ assert.deepEqual(f.service.history('w',f.task().id).items[0].error.missingScopes,['qyapi_get_department_list']);
+ assert.ok(!JSON.stringify(f.task()).includes('evil.example'));
+});
+
+test('missing user evidence requires a full current snapshot and never treats ambiguous aliases as absence',async t=>{
+ const f=await fixture(t),missing={id:'missing',namespace:'open_id',applicationId:'app'};
+ assert.equal(f.service.isUserAbsent('c',missing),false);
+ f.setPeople([person(),person('one',{aliases:[{id:'collision',namespace:'union_id'}]}),person('two',{aliases:[{id:'collision',namespace:'union_id'}]})]);
+ await f.sync();assert.equal(f.service.isUserAbsent('c',missing),true);assert.equal(f.service.isUserAbsent('c',person().id),false);
+ assert.equal(f.service.peekUser('c',{id:'collision',namespace:'union_id'}),undefined);assert.equal(f.service.isUserAbsent('c',{id:'collision',namespace:'union_id'}),false);
+ assert.equal(f.service.isUserAbsent('c',{...missing,applicationId:'foreign'}),false);
+ f.setFailure(new DirectoryError('unavailable'));await f.sync();assert.equal(f.service.isUserAbsent('c',missing),true);
+ f.setFailure(new DirectoryError('authorization_denied'));await f.sync();assert.equal(f.service.isUserAbsent('c',missing),false);
+ f.setFailure(undefined);await f.sync();f.setVersion('rebound');assert.equal(f.service.isUserAbsent('c',missing),false);
+});

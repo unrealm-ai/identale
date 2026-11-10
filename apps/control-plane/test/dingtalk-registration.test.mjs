@@ -37,6 +37,7 @@ async function setup(t,config={}){
   const action=new URL(url).pathname.split('/').at(-1);assert.equal(new URL(url).pathname,'/app/registration/'+action);
   state.calls.push({action,body:JSON.parse(init.body)});
   if(state.hold?.action===action)await state.hold.promise;
+  if(action==='poll'&&state.pollFault){if(state.pollFault instanceof Error)throw state.pollFault;return state.pollFault;}
   return json(action==='init'?{errcode:0,nonce}:action==='begin'?{errcode:0,device_code:device,verification_uri_complete:'https://open.dingtalk.com/verify?ticket=synthetic',expires_in:60,interval:1}:state.poll);
  };
  const registration=new DingTalkRegistrations(channels,{source:'IDENTALE_TEST',masterKey:Buffer.alloc(32,7),fetch:transport,now:()=>now,...config});
@@ -67,8 +68,15 @@ test('official protocol, polling interval, encrypted session, one-time bind and 
  noSecrets(f.store.all('SELECT * FROM employee_channel_connections'));noSecrets(f.state.logs);
 });
 
-test('unconfigured source, reserved source and missing key make no requests',async t=>{
- for(const [config,reason] of [[{source:undefined},'source_unconfigured'],[{source:'DING_DWS_CLAW'},'source_invalid'],[{source:'ding_dws_claw'},'source_invalid'],[{source:'not valid'},'source_invalid'],[{masterKey:undefined},'secret_key_unconfigured']])await t.test(reason,async t=>{
+test('missing or empty source uses Identale own source and reaches provider',async t=>{
+ for(const source of [undefined,'','  '])await t.test(String(source),async t=>{
+  const f=await setup(t,{source});assert.equal(f.registration.availability().available,true);
+  const s=await f.start();assert.equal(s.status,'waiting');assert.deepEqual(f.state.calls[0],{action:'init',body:{source:'identale'}});
+ });
+});
+
+test('invalid source, reserved source and missing key make no requests',async t=>{
+ for(const [config,reason] of [[{source:'DING_DWS_CLAW'},'source_invalid'],[{source:'ding_dws_claw'},'source_invalid'],[{source:'not valid'},'source_invalid'],[{masterKey:undefined},'secret_key_unconfigured']])await t.test(reason,async t=>{
   const f=await setup(t,config);assert.deepEqual(f.registration.availability(),{available:false,reason});await assert.rejects(f.start(),new RegExp(reason));assert.equal(f.state.calls.length,0);
  });
 });
@@ -97,7 +105,7 @@ test('adapter rejects malformed, oversized, HTTP errors, redirection and aborted
  for(const value of ['{',JSON.stringify([]),JSON.stringify({}),JSON.stringify({errcode:0,status:'SUCCESS',client_id:'app',client_secret:'x'.repeat(33000)})]){
   const a=new DingTalkRegistrationAdapter(async()=>new Response(value));await assert.rejects(a.poll(device,new AbortController().signal),error=>!error.message.includes(secret));
  }
- for(const status of [302,500]){const a=new DingTalkRegistrationAdapter(async()=>new Response(null,{status,headers:{location:'https://evil.invalid/'+secret}}));await assert.rejects(a.poll(device,new AbortController().signal),/unavailable/);}
+ for(const status of [302,500]){const a=new DingTalkRegistrationAdapter(async()=>new Response(null,{status,headers:{location:'https://evil.invalid/'+secret}}));await assert.rejects(a.poll(device,new AbortController().signal),status===500?/unavailable/:/rejected/);}
  const a=new DingTalkRegistrationAdapter(async(_url,init)=>{assert.equal(init.redirect,'error');throw new DOMException(secret,'TimeoutError');});await assert.rejects(a.poll(device,new AbortController().signal),/unavailable/);
  const controller=new AbortController();controller.abort();const b=new DingTalkRegistrationAdapter(async(_url,init)=>{init.signal.throwIfAborted();return json({});});await assert.rejects(b.begin('IDENTALE_TEST',controller.signal),/unavailable/);
  for(const url of ['http://dingtalk.com/x','https://dingtalk.com.evil.invalid/x','https://user:pass@dingtalk.com/x','https://dingtalk.com:8443/x','https://dingtalk.com/x#fragment'])assert.throws(()=>registrationVerificationUrl(url),/invalid_response/);
@@ -216,4 +224,44 @@ test('verification links reject nonce and device secrets in raw and encoded form
   const adapter=new DingTalkRegistrationAdapter(async url=>json(url.endsWith('/init')?{errcode:0,nonce}:{errcode:0,device_code:device,verification_uri_complete:'https://open.dingtalk.com/verify?ticket='+fragment}));
   await assert.rejects(adapter.begin('IDENTALE_TEST',new AbortController().signal),/invalid_response/);
  }
+});
+
+
+test('save failure preserves encrypted ready credentials for explicit retry without provider recreation',async t=>{
+ const f=await setup(t);const ready=await f.ready();const save=f.channels.save.bind(f.channels);let attempts=0;
+ f.channels.save=async(...args)=>{if(++attempts===1)throw new EmployeeChannelError(502,'channel_validation_failed');return save(...args);};
+ await assert.rejects(f.registration.bind(scope,ready.sessionId,false,()=>{}),/channel_validation_failed/);
+ assert.equal((await f.registration.poll(scope,ready.sessionId)).status,'ready');
+ assert.ok(f.registration.sessions.get(ready.sessionId).secret.ciphertext);
+ noSecrets(f.registration.availability(scope));noSecrets([...f.registration.sessions.values()]);
+ await f.registration.bind(scope,ready.sessionId,false,()=>{});
+ assert.equal(f.state.calls.filter(x=>x.action==='init').length,1);
+ assert.equal(f.state.verifications,1);assert.equal(attempts,2);
+ assert.equal((await f.registration.poll(scope,ready.sessionId)).status,'consumed');
+});
+
+
+for(const fault of ['network','timeout','5xx','429'])test(`transient provider poll ${fault} preserves original encrypted session for explicit recovery`,async t=>{
+ const f=await setup(t),s=await f.start();f.advance(1001);
+ f.state.pollFault=fault==='network'?new TypeError('network'):fault==='timeout'?new DOMException('timeout','TimeoutError'):new Response('',{status:fault==='429'?429:503});
+ await assert.rejects(f.registration.poll(scope,s.sessionId),/dingtalk_registration_unavailable/);
+ const retained=f.registration.availability(scope).session;
+ assert.equal(retained.status,'waiting');assert.equal(retained.expiresAt,s.expiresAt);
+ assert.ok(f.registration.sessions.get(s.sessionId).secret.ciphertext);noSecrets(retained);noSecrets([...f.registration.sessions.values()]);
+ f.state.pollFault=undefined;f.advance(1001);
+ assert.equal((await f.registration.poll(scope,s.sessionId)).status,'ready');
+ assert.equal(f.state.calls.filter(x=>x.action==='init').length,1);assert.equal(f.state.calls.filter(x=>x.action==='begin').length,1);
+});
+for(const fault of ['401','invalid-json'])test(`nonretryable poll ${fault} terminates and clears secrets`,async t=>{
+ const f=await setup(t),s=await f.start();f.advance(1001);
+ f.state.pollFault=new Response(fault==='401'?'':'invalid-json',{status:fault==='401'?401:200});
+ assert.equal((await f.registration.poll(scope,s.sessionId)).status,'failed');
+ assert.equal(f.registration.sessions.get(s.sessionId).secret,undefined);
+ const calls=f.state.calls.length;await f.registration.poll(scope,s.sessionId);assert.equal(f.state.calls.length,calls);
+});
+test('transient poll failure after TTL cannot preserve or revive the session',async t=>{
+ const f=await setup(t),s=await f.start();f.advance(1001);
+ const hold=deferred();f.state.hold={action:'poll',...hold};f.state.pollFault=new Error('network');
+ const job=f.registration.poll(scope,s.sessionId);f.advance(60000);hold.resolve();
+ assert.equal((await job).status,'expired');assert.equal(f.registration.sessions.get(s.sessionId).secret,undefined);
 });

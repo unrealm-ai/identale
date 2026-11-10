@@ -58,30 +58,29 @@ async function setup(t, handler, extra={}) {
   });
   await choose('钉钉'); return env;
 }
-async function openStart(){await click('扫码创建新机器人');await click('开始扫码创建');}
+async function openStart(){if([...document.querySelectorAll('button')].some(b=>visible(b)&&b.textContent.trim()==='扫码创建新机器人'))await click('扫码创建新机器人');await click('开始扫码创建');}
 
-test('scan is opt-in, unavailable source explains fallback and all manual channel inputs remain',async t=>{
- const env=await setup(t,async request=>{assert.equal(request.method,'GET');return {available:false,reason:'source_unconfigured'};});
- assert.equal(env.requests.some(r=>r.url.includes('/dingtalk/registration')),false);
- await click('扫码创建新机器人');assert.ok(text().includes('尚未配置已登记'));assert.equal(document.querySelectorAll('.dingtalk-registration .n-qr-code svg').length,0);
- for(const label of ['飞书','钉钉','企业微信']) {await choose(label);if(label!=='钉钉'){await until(()=>!button('绑定已有应用').disabled);await click('绑定已有应用');}assert.ok(document.querySelector('input[aria-label="渠道应用 ID"]'));assert.ok(document.querySelector('input[aria-label="渠道应用密钥"]'));}
+test('unbound defaults to automatic creation and manual input is an explicit alternative',async t=>{
+ const env=await setup(t,async request=>({available:false,reason:'source_invalid'}));
+ assert.ok(text().includes('来源标识不可用'));
+ assert.equal(document.querySelector('input[aria-label="渠道应用 ID"]'),null);
+ await click('绑定已有应用');assert.ok(document.querySelector('input[aria-label="渠道应用 ID"]'));
+ await click('返回自动创建');assert.equal(document.querySelector('input[aria-label="渠道应用 ID"]'),null);
  assert.equal(env.requests.filter(r=>r.method==='POST').length,0);
 });
 
-test('waiting locally renders QR; ready does not bind until explicit confirmation, no browser secret',async t=>{
+test('waiting renders QR and ready automatically saves exactly once without browser secret',async t=>{
  let id;const changes=[];
  const env=await setup(t,async request=>{
   if(request.method==='GET')return {available:true};
-  if(request.url.endsWith('/start')){id=request.body.sessionId;assert.equal(request.body.expectedRevision,0);return session(id);}
+  if(request.url.endsWith('/start')){id=request.body.sessionId;return session(id);}
   if(request.url.endsWith('/poll'))return session(id,'ready');
   if(request.url.endsWith('/bind')){assert.deepEqual(request.body,{replaceSource:false});return connection(1,'synthetic-new-app');}
   if(request.method==='DELETE')return {status:'cancelled'};
-  throw Error(request.url);
  },{onChanged:()=>changes.push(true)});
- await openStart(); assert.ok(document.querySelector('.dingtalk-registration .n-qr-code svg'));assert.equal(document.querySelector('.dingtalk-registration a').rel,'noopener noreferrer');
- await until(()=>text().includes('尚未绑定'),'poll ready');assert.equal(env.requests.filter(r=>r.url.endsWith('/bind')).length,0);
- assert.equal(document.querySelector('input[aria-label="渠道应用密钥"]').value,'');
- await click('确认绑定到当前员工');await until(()=>changes.length===1);
+ await openStart();assert.ok(document.querySelector('.dingtalk-registration .n-qr-code svg'));
+ assert.equal(button('绑定已有应用').disabled,true);
+ await until(()=>changes.length===1);
  assert.equal(env.requests.filter(r=>r.url.endsWith('/bind')).length,1);
  assert.ok(!JSON.stringify(env.requests).includes('appSecret'));assert.ok(!text().includes('device_code'));
 });
@@ -92,7 +91,7 @@ test('double start click is single flight and close fences a pending start; late
   if(request.url.endsWith('/start')){signal=options.signal;return pending.promise;}
   if(request.method==='DELETE')return {status:'cancelled'};
  });
- await click('扫码创建新机器人');button('开始扫码创建').click();button('开始扫码创建').click();await flush();
+ button('开始扫码创建').click();button('开始扫码创建').click();await flush();
  assert.equal(env.requests.filter(r=>r.url.endsWith('/start')).length,1);
  const id=env.requests.find(r=>r.url.endsWith('/start')).body.sessionId;
  await click('关闭扫码');assert.equal(signal.aborted,true);assert.ok(env.requests.some(r=>r.method==='DELETE'&&r.url.endsWith(id)));
@@ -136,7 +135,7 @@ test('a refreshed binding revision invalidates a ready registration without over
   if(request.url.includes('/feishu/registration') && request.method==='GET')return {registration:null,preset:{name:'Fixture',description:'Fixture'},permissions:{version:'v1',scopes:[],events:[]}};
     if(request.url.endsWith('/runtime-status'))return {employee:null};
   if(request.url.endsWith('/registration'))return {available:true};
-  if(request.url.endsWith('/start')){id=request.body.sessionId;return session(id,'ready');}
+  if(request.url.endsWith('/start')){id=request.body.sessionId;return session(id);}
   if(request.method==='DELETE')return {status:'cancelled'};
  });
  await choose('钉钉');await openStart();channels=[connection(2)];await click('刷新渠道状态');
@@ -173,7 +172,7 @@ test('hidden document pauses polling and visible document resumes it',async t=>{
  t.after(()=>{delete document.visibilityState;});
  await openStart();await new Promise(r=>setTimeout(r,1100));assert.equal(env.requests.filter(r=>r.url.endsWith('/poll')).length,0);
  Object.defineProperty(document,'visibilityState',{configurable:true,value:'visible'});document.dispatchEvent(new Event('visibilitychange'));
- await until(()=>text().includes('尚未绑定'));assert.equal(env.requests.filter(r=>r.url.endsWith('/poll')).length,1);
+ await until(()=>env.requests.some(r=>r.url.endsWith('/bind')));assert.equal(env.requests.filter(r=>r.url.endsWith('/poll')).length,1);
 });
 
 test('late bind after employee switch cannot emit changed or clear the new manual secret',async t=>{
@@ -184,26 +183,22 @@ test('late bind after employee switch cannot emit changed or clear the new manua
   if(request.url.endsWith('/bind')){bindSignal=options.signal;return pending.promise;}
   if(request.method==='DELETE')return {status:'cancelled'};
  },{onChanged:()=>changes.push(true)});
- await openStart();await click('确认绑定到当前员工');
+ await openStart();await until(()=>bindSignal);
  env.props.base='/workspaces/synthetic-workspace/employees/next';await flush();
- input('渠道应用 ID','synthetic-next-app');input('渠道应用密钥','synthetic-next-secret');await flush();
+ await click('绑定已有应用');input('渠道应用 ID','synthetic-next-app');input('渠道应用密钥','synthetic-next-secret');await flush();
  pending.resolve(connection());await flush();assert.equal(bindSignal.aborted,true);assert.equal(changes.length,0);
  assert.equal(document.querySelector('input[aria-label="渠道应用密钥"]').value,'synthetic-next-secret');
 });
 
-test('manual credential draft remains editable and intact while a scan waits and closes',async t=>{
- let id;const env=await setup(t,async request=>{
-  if(request.method==='GET')return {available:true};
-  if(request.url.endsWith('/start')){id=request.body.sessionId;return session(id);}
-  if(request.method==='DELETE')return {status:'cancelled'};
- });
- await openStart();input('渠道应用 ID','synthetic-manual-app');input('渠道应用密钥','synthetic-manual-secret');await flush();
- assert.equal(button('验证并保存渠道连接').disabled,false);
- await click('关闭扫码');assert.equal(document.querySelector('input[aria-label="渠道应用密钥"]').value,'synthetic-manual-secret');
- assert.equal(env.requests.filter(r=>r.url.endsWith('/bind')).length,0);
+test('manual draft is preserved and prevents starting automatic creation',async t=>{
+ const env=await setup(t,async request=>({available:true}));
+ await click('绑定已有应用');input('渠道应用 ID','synthetic-manual-app');input('渠道应用密钥','synthetic-manual-secret');await flush();
+ await click('返回自动创建');assert.equal(button('扫码创建新机器人').disabled,true);
+ await click('绑定已有应用');assert.equal(document.querySelector('input[aria-label="渠道应用密钥"]').value,'synthetic-manual-secret');
+ assert.equal(env.requests.filter(r=>r.url.endsWith('/start')).length,0);
 });
 
-test('poll HTTP failure removes the QR, hides raw errors and requires an explicit restart',async t=>{
+test('poll HTTP failure retains the same session, hides raw errors and requires an explicit recovery',async t=>{
  let id;const env=await setup(t,async request=>{
   if(request.method==='GET')return {available:true};
   if(request.url.endsWith('/start')){id=request.body.sessionId;return session(id);}
@@ -211,12 +206,12 @@ test('poll HTTP failure removes the QR, hides raw errors and requires an explici
   if(request.method==='DELETE')return {status:'cancelled'};
  });
  await openStart();await until(()=>text().includes('扫码注册未完成'));
- assert.equal(document.querySelector('.dingtalk-registration .n-qr-code svg'),null);
+ assert.ok(button('重新检查并保存连接'));
  assert.ok(!text().includes('synthetic-private-provider-response'));
  await new Promise(r=>setTimeout(r,1100));assert.equal(env.requests.filter(r=>r.url.endsWith('/poll')).length,1);
 });
 
-for (const restoredStatus of ['waiting','ready']) test(`capability restores same-scope ${restoredStatus} without a new start and requires explicit bind`,async t=>{
+for (const restoredStatus of ['waiting','ready']) test(`capability restores same-scope ${restoredStatus} without a new start and automatically saves a new connection`,async t=>{
  const id=crypto.randomUUID();
  const env=await setup(t,async request=>{
   if(request.method==='GET')return {available:true,session:session(id,restoredStatus)};
@@ -225,12 +220,9 @@ for (const restoredStatus of ['waiting','ready']) test(`capability restores same
   if(request.method==='DELETE')return {status:'cancelled'};
   throw Error(`Unexpected request ${request.url}`);
  });
- await click('扫码创建新机器人');
  if(restoredStatus==='waiting') assert.ok(document.querySelector('.dingtalk-registration .n-qr-code svg'));
- await until(()=>text().includes('尚未绑定'));
+ await until(()=>env.requests.some(r=>r.url.endsWith('/bind')));
  assert.equal(env.requests.filter(r=>r.url.endsWith('/start')).length,0);
- assert.equal(env.requests.filter(r=>r.url.endsWith('/bind')).length,0);
- await click('确认绑定到当前员工');
  assert.equal(env.requests.filter(r=>r.url.endsWith('/bind')).length,1);
 });
 
@@ -253,8 +245,53 @@ for (const phase of ['start','poll']) test(`pagehide sends same-origin keepalive
 
 for (const verificationUrl of ['https://dingtalk.com.attacker.example/verify','http://open-dev.dingtalk.com/verify','https://user:pass@open-dev.dingtalk.com/verify']) test(`unsafe restored verification link is rejected: ${verificationUrl}`,async t=>{
  const env=await setup(t,async request=>request.method==='GET'?{available:true,session:session(crypto.randomUUID(),'waiting',{verificationUrl})}:{status:'cancelled'});
- await click('扫码创建新机器人');assert.ok(text().includes('扫码注册未完成'));
+ assert.ok(text().includes('扫码注册未完成'));
  assert.equal(document.querySelector('.dingtalk-registration a'),null);
  assert.equal(document.querySelector('.dingtalk-registration .n-qr-code svg'),null);
  assert.equal(env.requests.filter(r=>r.method==='POST').length,0);
+});
+
+test('failed autosave retains session, explicit retry checks same session and never creates again',async t=>{
+ let id;let saves=0;const changes=[];
+ const env=await setup(t,async request=>{
+  if(request.method==='GET')return {available:true};
+  if(request.url.endsWith('/start')){id=request.body.sessionId;return session(id,'ready');}
+  if(request.url.endsWith('/poll'))return session(id,'ready');
+  if(request.url.endsWith('/bind'))return ++saves===1?{status:502,data:{error:'private-sentinel'}}:connection(1,'synthetic-new-app');
+  if(request.method==='DELETE')return {status:'cancelled'};
+ },{onChanged:()=>changes.push(true)});
+ await openStart();await until(()=>text().includes('重新检查并保存连接'));
+ assert.equal(saves,1);assert.equal(button('绑定已有应用').disabled,true);
+ await click('重新检查并保存连接');await until(()=>changes.length===1);
+ assert.equal(saves,2);assert.equal(env.requests.filter(r=>r.url.endsWith('/start')).length,1);
+ assert.equal(env.requests.filter(r=>r.url.endsWith('/poll')).length,1);
+});
+
+test('lost start response recovers original server session without another create',async t=>{
+ let id;const changes=[];
+ const env=await setup(t,async request=>{
+  if(request.method==='GET')return {available:true};
+  if(request.url.endsWith('/start')){id=request.body.sessionId;return {status:502,data:{error:'transport'}};}
+  if(request.url.endsWith('/poll')){assert.equal(request.url,`${registrationPath}/${id}/poll`);return session(id,'ready');}
+  if(request.url.endsWith('/bind'))return connection(1,'synthetic-new-app');
+  if(request.method==='DELETE')return {status:'cancelled'};
+ },{onChanged:()=>changes.push(true)});
+ await openStart();await until(()=>text().includes('重新检查并保存连接'));
+ await click('重新检查并保存连接');await until(()=>changes.length===1);
+ assert.equal(env.requests.filter(r=>r.url.endsWith('/start')).length,1);
+ assert.equal(env.requests.filter(r=>r.url.endsWith('/bind')).length,1);
+});
+
+test('lost successful save response checks consumed state without sending duplicate bind',async t=>{
+ let id;const env=await setup(t,async request=>{
+  if(request.method==='GET')return {available:true};
+  if(request.url.endsWith('/start')){id=request.body.sessionId;return session(id,'ready');}
+  if(request.url.endsWith('/bind'))return {status:502,data:{error:'lost_response'}};
+  if(request.url.endsWith('/poll'))return session(id,'consumed');
+  if(request.method==='DELETE')return {status:'cancelled'};
+ });
+ await openStart();await until(()=>text().includes('重新检查并保存连接'));
+ await click('重新检查并保存连接');assert.ok(text().includes('请刷新渠道状态核对绑定'));
+ assert.equal(env.requests.filter(r=>r.url.endsWith('/bind')).length,1);
+ assert.equal(env.requests.filter(r=>r.url.endsWith('/start')).length,1);
 });

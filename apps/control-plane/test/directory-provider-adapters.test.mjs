@@ -218,3 +218,23 @@ for(const [label,data]of [['continued page without items',{has_more:true,page_to
 test('Feishu children empty intermediate page still follows an authenticated non-repeating cursor',async t=>{
  let loop=false;const f=await feishuFixture((call,res)=>fsOk(res,!call.url.searchParams.has('page_token')||loop?{items:[],has_more:true,page_token:'synthetic-next'}:{has_more:false}));t.after(f.close);const adapter=new FeishuDirectoryAdapter({...options,fetch:f.fetch}),first=await adapter.listChildDepartments('od_a');assert.equal(first.exhausted,false);assert.ok(first.nextCursor);assert.deepEqual(await adapter.listChildDepartments('od_a',first.nextCursor),{items:[],exhausted:true});loop=true;await assert.rejects(adapter.listChildDepartments('od_a',first.nextCursor),{code:'invalid_response'});
 });
+
+test('DingTalk nested permission errors retain only safe required scopes; unrelated 88 stays unavailable',async()=>{
+ const {dingTalkEnvelope}=await import('../dist/adapters/directory/http.js');
+ for(const sub_code of [60011,'60011']){
+  assert.throws(()=>dingTalkEnvelope({errcode:88,sub_code,sub_msg:JSON.stringify({requiredScopes:['qyapi_get_department_list','https://evil.example','<script>','qyapi_get_department_list'],url:'https://evil.example'})}),error=>{
+   assert.equal(error.code,'authorization_denied');assert.equal(error.details.providerCode,88);
+   assert.deepEqual(error.details.missingScopes,['qyapi_get_department_list']);assert.ok(!JSON.stringify(error.details).includes('evil'));return true;
+  });
+ }
+ assert.throws(()=>dingTalkEnvelope({errcode:88,sub_code:60012,sub_msg:'service timeout'}),error=>error.code==='unavailable'&&error.details.providerCode===88);
+ assert.throws(()=>dingTalkEnvelope({errcode:88,sub_code:60011,sub_msg:'requiredScopes: ["qyapi_get_department_member"]'}),error=>error.details.missingScopes[0]==='qyapi_get_department_member');
+ assert.throws(()=>dingTalkEnvelope({errcode:88,sub_code:60011,sub_msg:'requiredScopes: ["https://evil.example"]'}),error=>error.details.missingScopes===undefined);
+});
+
+test('DingTalk actual sub_msg requiredScopes equals unquoted list is safely extracted',async()=>{
+ const {dingTalkEnvelope}=await import('../dist/adapters/directory/http.js');
+ assert.throws(()=>dingTalkEnvelope({errcode:88,sub_code:'60011',sub_msg:'应用尚未开通所需的权限：[qyapi_get_department_list]，https://open-dev.dingtalk.com/appscope/apply?content=PRIVATE_APP%23qyapi_get_department_list, {requiredScopes=[qyapi_get_department_list]}' }),error=>{
+ assert.deepEqual(error.details.missingScopes,['qyapi_get_department_list']);assert.ok(!JSON.stringify(error.details).includes('PRIVATE_APP'));return true;
+ });
+});

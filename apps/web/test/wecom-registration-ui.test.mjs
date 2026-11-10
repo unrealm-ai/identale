@@ -103,7 +103,7 @@ test('all providers retain manual inputs; unsaved manual credentials prevent pop
   const popup = popupFixture(t), env = await mount(t, 'settings', { base, canManage: true, active: true }, async () => []);
   for (const provider of ['飞书', '钉钉', '企业微信']) {
     await choose(provider);
-    if (provider !== '钉钉') { assert.equal(field('渠道应用 ID'), null); await until(() => !button('绑定已有应用').disabled, 'Feishu setup loaded before manual switch'); await click('绑定已有应用'); }
+    { assert.equal(field('渠道应用 ID'), null); await until(() => !button('绑定已有应用').disabled, 'Feishu setup loaded before manual switch'); await click('绑定已有应用'); }
     assert.ok(field('渠道应用 ID')); assert.ok(field('渠道应用密钥'));
     assert.equal(!!document.querySelector('.wecom-registration'), false);
   }

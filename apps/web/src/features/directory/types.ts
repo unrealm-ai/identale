@@ -42,6 +42,7 @@ export interface PackageDirectoryAccess { allow: DirectoryAccessRule[]; deny: Di
 export interface DirectoryIdentityEvidence { sourceId: string; authRevision: number; userId: string }
 
 export interface DirectorySyncStatus {
+ lastError?:{code:string;category:string;providerCode?:number;missingScopes?:string[]}|null;
  connectionId:string; snapshotVersion:number; running:boolean; hasSnapshot:boolean; stale:boolean;
  lastSuccessAt:number|null; lastResult:'never'|'success'|'failure'|'invalidated';
  progress?:{userCount:number;departmentCount:number}; partSummary?:{total:number;succeeded:number;failed:number;blocked:number;running:number};

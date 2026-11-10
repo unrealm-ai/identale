@@ -39,6 +39,18 @@ export function providerFailure(row: Record<string, unknown>, code: ConstructorP
     });
     if (scopes.length) details.missingScopes = [...new Set(scopes)].slice(0, 30);
   }
+  if (code === 'authorization_denied') {
+    // DingTalk's nested permission envelope is not a generic errcode=88 failure.
+    // Accept only scope identifiers, never provider text or application URLs.
+    const candidates: unknown[] = [row.requiredScopes];
+    if (typeof row.sub_msg === 'string' && row.sub_msg.length <= 16384) {
+      try { const nested = JSON.parse(row.sub_msg); candidates.push(nested?.requiredScopes); } catch { /* Non-JSON explanations are not diagnostics. */ }
+      const match = row.sub_msg.match(/requiredScopes["']?\s*[:=]\s*(\[[^\]]{0,5000}\])/);
+      if (match) { try { candidates.push(JSON.parse(match[1]!)); } catch { candidates.push(match[1]!.slice(1,-1).split(',').map(scope=>scope.trim()).filter(isScopeName)); } }
+    }
+    const scopes = candidates.flatMap(value => Array.isArray(value) ? value.filter(isScopeName) : []);
+    if (scopes.length) details.missingScopes = [...new Set([...(details.missingScopes ?? []), ...scopes])].slice(0, 30);
+  }
   return new DirectoryRequestError(code, details);
 }
 
@@ -118,7 +130,7 @@ export function feishuEnvelope(row:Record<string,unknown>):Record<string,unknown
 export function dingTalkEnvelope(row:Record<string,unknown>):Record<string,unknown>{
   if(row.errcode!==0){
     if([40001,40014,42001,40082,40083,40084].includes(Number(row.errcode)))throw providerFailure(row,'authentication_failed');
-    if([50001,50002,60011,60020,60021].includes(Number(row.errcode)))throw providerFailure(row,'authorization_denied');
+    if([50001,50002,60011,60020,60021].includes(Number(row.errcode)) || row.errcode === 88 && (row.sub_code === 60011 || row.sub_code === '60011'))throw providerFailure(row,'authorization_denied');
     if(typeof row.errcode!=='number')throw new DirectoryError('invalid_response');
     throw providerFailure(row,'unavailable');
   }

@@ -15,12 +15,13 @@ export class DingTalkRegistrationAdapter {
  private async post(action: 'init'|'begin'|'poll', body: Record<string,string>, signal: AbortSignal): Promise<Record<string,unknown>> {
   try {
    const response = await this.transport(`https://oapi.dingtalk.com/app/registration/${action}`, {method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(body),redirect:'error',signal:AbortSignal.any([signal,AbortSignal.timeout(10000)])});
-   if (!response.ok) return fail('dingtalk_registration_unavailable');
+   if (!response.ok) return fail(response.status === 408 || response.status === 429 || response.status >= 500 ? 'dingtalk_registration_unavailable' : 'dingtalk_registration_rejected');
    const reader = response.body?.getReader(); if (!reader) return fail();
    let size = 0; const parts: Uint8Array[] = [];
    try { while (true) { const {done,value} = await reader.read(); if (done) break; size += value.byteLength; if (size > 32768) return fail(); parts.push(value); } }
    finally { await reader.cancel().catch(()=>{}); }
-   const data: unknown = JSON.parse(Buffer.concat(parts).toString('utf8'));
+   let data: unknown;
+   try { data = JSON.parse(Buffer.concat(parts).toString('utf8')); } catch { return fail(); }
    if (!data || typeof data !== 'object' || Array.isArray(data)) return fail();
    const result = data as Record<string,unknown>;
    if (result['errcode'] !== 0) return fail('dingtalk_registration_rejected');

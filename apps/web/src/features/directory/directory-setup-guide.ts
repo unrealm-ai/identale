@@ -28,8 +28,8 @@ const dingtalkSources = {
 };
 
 const selectionStep: DirectoryGuideStep = {
-  id: 'selection', title: '动态选择使用者和部门', location: '员工设置 → 使用授权与能力包',
-  paragraphs: ['在本员工的已验证渠道中，按部门分页查询当前应用获准的人员和部门。仅保存选中的身份引用，不导入全量组织、不维护组织快照，也不运行周期同步。', '部门默认仅包含直接成员；可显式勾选包含子部门。实际使用时重新查询当前成员与部门关系，查询失败、未知关系和撤权均拒绝放行。', '平台成员的 Web 使用权独立配置；飞书身份不授予钉钉权限，同名人员不合并。'],
+  id: 'selection', title: '从通讯录快照选择人员和部门', location: '员工设置 → 使用授权与能力包',
+  paragraphs: ['飞书和钉钉从当前应用获准的通讯录同步部门与人员，页面从最近成功快照搜索、分页选择。找不到新人员时，可点击同步并查看进度；同步失败不覆盖最近成功的有效快照。', '部门默认仅包含直接成员；可显式勾选包含子部门。消息进入后按已保存的人员配置与本地部门快照判断，不实时请求厂商通讯录；无法确定部门关系或授权已撤销时不据此放行。', '平台成员的 Web 使用权独立配置；飞书身份不授予钉钉权限，同名人员不合并。'],
 };
 const rotateStep: DirectoryGuideStep = {
   id: 'rotate', title: '轮换、重新验证与停用', location: '员工设置 → 渠道连接',
@@ -76,7 +76,7 @@ export const directorySetupGuides: Record<DirectoryProvider, DirectorySetupGuide
     ],
   },
   dingtalk: {
-    title: '钉钉', consoleUrl: 'https://open.dingtalk.com',
+    title: '钉钉', consoleUrl: 'https://open-dev.dingtalk.com/',
     identityNote: '钉钉每个员工使用独立企业内部应用与机器人，同一应用共用通讯录凭据。app_scoped 仅证明应用身份，不代表已验证企业 corpId。只有应用 token 时真实机器人身份可能仍待验证，不能伪称绑定成功。senderStaffId 使用 user_id 命名空间。',
     steps: [
       {

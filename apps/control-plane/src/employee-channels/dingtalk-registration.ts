@@ -26,8 +26,7 @@ export class DingTalkRegistrations {
  }
  close(){this.closed=true;clearInterval(this.timer);for(const s of this.sessions.values())this.finish(s,'cancelled');this.sessions.clear();}
  availability(scope?:Scope){
-  const source=this.options.source?.trim();
-  if(!source)return{available:false,reason:'source_unconfigured' as const};
+  const source=this.source();
   if(!/^[a-zA-Z][a-zA-Z0-9_-]{1,63}$/.test(source)||source.toUpperCase()==='DING_DWS_CLAW')return{available:false,reason:'source_invalid' as const};
   if(!this.vault.available)return{available:false,reason:'secret_key_unconfigured' as const};
   this.prune();
@@ -35,6 +34,7 @@ export class DingTalkRegistrations {
   if(session){try{this.current(session);return{available:true,session:this.dto(session)};}catch{/* Changed bindings cannot be recovered. */}}
   return{available:true};
  }
+ private source(){return this.options.source?.trim()||'identale';}
  private aad(s:Session){return ['dingtalk-registration-v1',s.workspaceId,s.entityId,s.actorId,s.id,s.bindingId??'',s.expectedRevision];}
  private finish(s:Session,status:Status,error?:string){s.status=status;s.controller.abort();delete s.secret;delete s.verificationUrl;delete s.clientId;if(error)s.error=error;}
  private prune(){for(const [id,s]of this.sessions){if(active(s)&&s.expiresAt<=this.now())this.finish(s,'expired');if(s.retainUntil<=this.now())this.sessions.delete(id);}}
@@ -53,7 +53,7 @@ export class DingTalkRegistrations {
   const s:Session={...scope,id,expectedRevision:input.expectedRevision as number,bindingId:binding?.id??null,status:'starting',startedAt:this.now(),expiresAt:this.now()+ttl,retainUntil:this.now()+ttl*2,nextPollAt:this.now()+3000,intervalMs:3000,controller:new AbortController(),busy:true};
   this.sessions.set(id,s);
   try{
-   const result=await this.adapter.begin(this.options.source!.trim(),s.controller.signal);
+   const result=await this.adapter.begin(this.source(),s.controller.signal);
    this.prune();if(!active(s)||this.closed)return this.dto(s);this.current(s);
    s.secret=this.vault.seal(JSON.stringify({deviceCode:result.deviceCode}),this.aad(s));s.verificationUrl=result.verificationUrl;
    s.expiresAt=Math.min(s.expiresAt,this.now()+result.expiresMs);s.intervalMs=result.intervalMs;s.nextPollAt=this.now()+s.intervalMs;s.status='waiting';
@@ -72,7 +72,18 @@ export class DingTalkRegistrations {
    if(result.status==='SUCCESS'&&result.clientId&&result.clientSecret){s.secret=this.vault.seal(JSON.stringify({appId:result.clientId,appSecret:result.clientSecret}),this.aad(s));s.clientId=result.clientId;delete s.verificationUrl;s.status='ready';}
    else if(result.status==='EXPIRED')this.finish(s,'expired');
    else if(result.status!=='WAITING')this.finish(s,'failed','dingtalk_registration_rejected');
-  }catch(error){if(active(s))this.finish(s,'failed',error instanceof EmployeeChannelError?error.code:'dingtalk_registration_unavailable');}
+  }catch(error){
+   this.prune();
+   if(active(s)&&!this.closed){
+    this.current(s);
+    if(error instanceof EmployeeChannelError&&error.code==='dingtalk_registration_unavailable'){
+     // Preserve the device code and original deadline. The client pauses and
+     // explicitly retries this same poll, never init/begin or another robot.
+     throw error;
+    }
+    this.finish(s,'failed',error instanceof EmployeeChannelError?error.code:'dingtalk_registration_invalid_response');
+   }
+  }
   finally{s.busy=false;}
   return this.dto(s);
  }
@@ -95,7 +106,12 @@ export class DingTalkRegistrations {
     this.prune();assertAuthorized();if(this.closed||s.status!=='ready')fail(409,'dingtalk_registration_not_ready');this.current(s);
    });
    this.finish(s,'consumed');return result;
-  }catch(error){if(active(s))this.finish(s,'failed',error instanceof EmployeeChannelError?error.code:'dingtalk_registration_unavailable');throw error;}
+  }catch(error){
+   // A failed save must not force another provider-side creation. Keep encrypted
+   // credentials only while the original scope/revision and TTL still match.
+   this.prune();if(active(s)){try{this.current(s);}catch{/* current() fences changed bindings. */}}
+   throw error;
+  }
   finally{s.busy=false;}
  }
 }

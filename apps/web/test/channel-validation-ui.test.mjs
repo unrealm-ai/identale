@@ -259,7 +259,7 @@ test('create and edit use one robot credentials heading with each provider offic
     for (const [provider, labels] of [['飞书', ['App ID', 'App Secret']], ['钉钉', ['Client ID（AppKey）', 'Client Secret（AppSecret）']], ['企业微信', ['BotID', 'Secret']]]) {
       await choose(provider);
       if (component === 'draft') await channelCard('credentials');
-      else if (provider !== '钉钉') await click('绑定已有应用');
+      else await click('绑定已有应用');
       const section = component === 'draft' ? document.querySelector('.slide.is-current') : document.querySelector('.channel-setup');
       assert.match(section.textContent, /机器人连接凭据/);
       assert.deepEqual([...section.querySelectorAll('.n-form-item-label')].map(label => label.textContent.trim()), labels);
@@ -276,7 +276,7 @@ test('unbound Feishu defaults to automatic onboarding and manual credentials req
   assert.ok(button('绑定已有应用').closest('.registration-heading'));
   for (const provider of ['飞书', '钉钉', '企业微信']) {
     await choose(provider);
-    if (provider !== '钉钉') { await click('绑定已有应用'); if(provider==='飞书') assert.equal(visible(document.querySelector('.feishu-registration')), false); }
+    { await click('绑定已有应用'); if(provider==='飞书') assert.equal(visible(document.querySelector('.feishu-registration')), false); }
     const manual = document.querySelector('.channel-setup'); assert.ok(manual);
     assert.ok(manual.querySelector('input[aria-label="渠道应用 ID"]'));
     assert.ok(manual.querySelector('input[aria-label="渠道应用密钥"]'));

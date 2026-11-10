@@ -13,10 +13,9 @@ interface RegistrationSession {
   error?: string;
 }
 const messages: Record<string, string> = {
-  source_unconfigured: '部署方尚未配置已登记的钉钉来源标识，请联系管理员配置，或手动关联已有应用。',
-  source_invalid: '钉钉来源标识不可用，请联系管理员核对登记，或手动关联已有应用。',
+  source_invalid: '钉钉来源标识不可用，请联系管理员核对配置，或手动关联已有应用。',
   secret_key_unconfigured: '服务器尚未配置密钥加密存储，请联系管理员配置，或使用手动入口。',
-  expired: '扫码会话已过期，请重新开始，或手动关联已有应用。',
+  expired: '扫码会话已过期。如已完成创建，请绑定已有应用，避免重复创建。',
   cancelled: '扫码会话已取消，可重新开始或手动关联已有应用。',
   consumed: '扫码会话已使用，请刷新渠道状态核对绑定。',
   channel_unbind_required: '当前员工已有不同机器人，请核对换绑重置提示并明确确认替换。',
@@ -24,7 +23,7 @@ const messages: Record<string, string> = {
   channel_validation_failed: '机器人凭据验证未通过，请核对应用配置，或手动关联已有应用。',
   role_forbidden: '当前没有管理员权限，请联系工作区管理员。',
   busy: '扫码注册正在处理中，请稍后重新检查配置。',
-  rejected: '钉钉未批准本次注册，请核对来源登记，或手动关联已有应用。',
+  rejected: '钉钉未批准本次注册，请稍后重试，或关联已有应用。',
   channel_configuration_changed: '当前绑定已变化，请刷新渠道状态后重新开始。',
 };
 const safeMessage = (code?: string) => messages[(code ?? '').replace(/^dingtalk_registration_/, '')] ?? '扫码注册未完成，请核对渠道状态后重试，或手动关联已有应用。';
@@ -36,6 +35,8 @@ export function useDingtalkRegistration(options: {
   onSessionExpired: () => void;
 }) {
   const open = ref(false), available = ref(false), checking = ref(false), requesting = ref(false), binding = ref(false);
+  const uncertain = ref(false);
+  let autoAttempted = '';
   const session: Ref<RegistrationSession | null> = ref(null), message = ref(''), replaceSource = ref(false);
   const replacing = computed(() => !!options.appId() && !!session.value?.clientId && options.appId() !== session.value.clientId);
   let generation = 0, controller: AbortController | undefined, timer: ReturnType<typeof setTimeout> | undefined;
@@ -46,7 +47,7 @@ export function useDingtalkRegistration(options: {
     generation++; clearTimer(); controller?.abort(); controller = undefined;
     const previous = owner; owner = undefined;
     open.value = false; available.value = false; checking.value = false; requesting.value = false; binding.value = false;
-    session.value = null; message.value = ''; replaceSource.value = false;
+    session.value = null; message.value = ''; replaceSource.value = false; uncertain.value = false; autoAttempted = '';
     // The client-generated ID also fences a start that has not returned yet.
     if (previous) {
       const endpoint = `${previous.path}/${encodeURIComponent(previous.id)}`;
@@ -77,10 +78,11 @@ export function useDingtalkRegistration(options: {
         accept(capability.session);
       }
     } catch (cause) { if (token === generation && !signal.aborted) fail(cause); }
-    finally { if (token === generation) checking.value = false; }
+    finally { if (token === generation) { checking.value = false; autoBind(); } }
   }
   function schedule() {
     clearTimer();
+    if (uncertain.value) return;
     const current = session.value;
     if (!current || !['starting', 'waiting', 'ready'].includes(current.status)) return;
     const remaining = current.expiresAt - Date.now();
@@ -107,6 +109,17 @@ export function useDingtalkRegistration(options: {
     if (['failed', 'expired', 'cancelled', 'consumed'].includes(result.status)) message.value = safeMessage(result.error ?? result.status);
     schedule();
   }
+  function autoBind() {
+    if (uncertain.value || !open.value || options.appId() || session.value?.status !== 'ready' || autoAttempted === session.value.sessionId) return;
+    autoAttempted = session.value.sessionId; void bind();
+  }
+  async function recover() {
+    if (requesting.value || binding.value) return;
+    const token = generation;
+    uncertain.value = false; message.value = '';
+    await poll();
+    if (token === generation && !uncertain.value && session.value?.status === 'ready') await bind();
+  }
   async function start() {
     if (!open.value || !available.value || checking.value || requesting.value || session.value || !options.active() || options.locked()) return;
     const token = generation, signal = controller!.signal;
@@ -115,18 +128,22 @@ export function useDingtalkRegistration(options: {
     try {
       const result = await api<RegistrationSession>(`${owner.path}/start`, signal, { sessionId: id, expectedRevision: options.revision() });
       if (token === generation && !signal.aborted) accept(result);
-    } catch (cause) { if (token === generation && !signal.aborted) fail(cause); }
-    finally { if (token === generation) requesting.value = false; }
+    } catch (cause) { if (token === generation && !signal.aborted) {
+      // The start may have reached the server even if its response was lost.
+      session.value = { sessionId: id, status: 'starting', expiresAt: Date.now() + 600000, pollAfterMs: 1000 };
+      uncertain.value = true; fail(cause);
+    } }
+    finally { if (token === generation) { requesting.value = false; autoBind(); } }
   }
   async function poll() {
-    if (!owner || !session.value || requesting.value || binding.value || document.visibilityState === 'hidden') return;
+    if (!owner || !session.value || !options.active() || requesting.value || binding.value || document.visibilityState === 'hidden') return;
     const token = generation, signal = controller!.signal, current = owner;
     requesting.value = true;
     try {
       const result = await api<RegistrationSession>(`${current.path}/${current.id}/poll`, signal, {});
       if (token === generation && !signal.aborted) accept(result);
-    } catch (cause) { if (token === generation && !signal.aborted) { clearTimer(); session.value = null; fail(cause); } }
-    finally { if (token === generation) requesting.value = false; }
+    } catch (cause) { if (token === generation && !signal.aborted) { clearTimer(); uncertain.value = true; fail(cause); } }
+    finally { if (token === generation) { requesting.value = false; autoBind(); } }
   }
   async function bind() {
     if (!owner || session.value?.status !== 'ready' || binding.value || requesting.value || options.locked() || !options.active() || replacing.value && !replaceSource.value) return;
@@ -139,8 +156,8 @@ export function useDingtalkRegistration(options: {
       owner = undefined; cancel(); options.onBound(result, replaced);
     } catch (cause) {
       if (token === generation && !signal.aborted) {
-        // Do not silently retry an uncertain save or let the same button repeat it.
-        session.value = null; fail(cause);
+        // Retain the session for an explicit state check, never create a second robot.
+        uncertain.value = true; fail(cause);
       }
     } finally { if (token === generation) binding.value = false; }
   }
@@ -149,5 +166,5 @@ export function useDingtalkRegistration(options: {
   window.addEventListener('pagehide', pageHidden);
   watch(() => [options.base(), options.revision(), options.appId(), options.active()], cancel, { flush: 'sync' });
   onUnmounted(() => { cancel(); document.removeEventListener('visibilitychange', visibilityChanged); window.removeEventListener('pagehide', pageHidden); });
-  return { open, available, checking, requesting, binding, session, message, replaceSource, replacing, show, cancel, start, bind };
+  return { uncertain, recover, open, available, checking, requesting, binding, session, message, replaceSource, replacing, show, cancel, start, bind };
 }

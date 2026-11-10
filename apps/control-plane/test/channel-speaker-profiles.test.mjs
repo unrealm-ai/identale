@@ -51,7 +51,7 @@ test('speaker metadata reuses the authorized directory user without caching auth
  const f=await fixture(t);await f.service.authorizeInvocation(f.binding,actor(),'private');const reads=f.state.users;
  const profile=await f.service.describeActor(f.binding,actor());
  assert.deepEqual(profile,{displayName:'张三',jobTitle:'后端工程师',departmentNames:['研发部']});assert.equal(f.state.users,reads);
- f.cap.saveDirectoryAccess('w','e',{allow:[],deny:[]});
+ f.cap.patchDirectoryAccess('w','e',{sourceId:f.saved.sourceId,mode:'allowlist',allow:[],deny:[],allowGroupMembers:false,expectedRevision:f.cap.getDirectoryAccess('w','e').revision});
  await assert.rejects(f.service.authorizeInvocation(f.binding,actor(),'private'),{code:'channel_use_forbidden'});
 });
 

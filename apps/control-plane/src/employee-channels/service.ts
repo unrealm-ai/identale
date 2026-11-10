@@ -311,8 +311,17 @@ export class EmployeeChannelService {
     if(!retained&&!this.botContacts.selectable(source!,parts[3]))fail(400,'invalid_member_search_candidate');
    }
    return{sourceId:r.sourceId,kind:r.kind,subjectId:r.subjectId,...(r.kind==='department'?{includeDescendants:r.includeDescendants===true}:{}),conversationKinds:[...new Set(r.conversationKinds)] as ('private'|'group'|'meeting')[]};});}
- /** Instant local binding guard runs even on a permission-cache hit; no directory/policy read. */
- admissionGuard(scope:ChannelAccessScope,connection:ChannelConnection):string|undefined{const r=this.repository.byId(connection.connectionId);if(scope.groupContext&&(scope.conversationKind!=='group'||!r||!scope.groupContext.conversationId||scope.groupContext.bindingVersion!==this.currentBindingVersion(connection.connectionId)))return;if(!r||r.workspaceId!==scope.workspaceId||r.entityId!==scope.entityId||connection.workspaceId!==r.workspaceId||connection.provider!==r.provider||connection.tenantId!==r.eventTenantId||connection.identity.externalId!==r.botId||scope.requesterKind!=='channel_user'||scope.requesterIdentity?.applicationId!==r.appId||!scope.requesterIdentity?.idNamespace||scope.requesterIdentity.idNamespace==='unknown'||!r.enabled||r.status!=='verified'||r.provider==='wecom'&&!usesWeComBotSearch(r)||(usesWeComBotSearch(r)?scope.requesterIdentity.idNamespace!=='user_id':r.directoryStatus!=='available'))return;return JSON.stringify([r.sourceId,r.appId,r.eventTenantId,r.revision,r.authRevision,r.stateVersion,r.provider==='wecom'?undefined:this.snapshots?.authorizationVersion?.(r.id)]);}
+ /** Instant local binding guard runs even on a permission-cache hit; never calls a provider. */
+ admissionGuard(scope:ChannelAccessScope,connection:ChannelConnection):string|undefined{
+  const r=this.repository.byId(connection.connectionId);
+  if(scope.groupContext&&(scope.conversationKind!=='group'||!r||!scope.groupContext.conversationId||scope.groupContext.bindingVersion!==this.currentBindingVersion(connection.connectionId)))return;
+  if(!r||r.workspaceId!==scope.workspaceId||r.entityId!==scope.entityId||connection.workspaceId!==r.workspaceId||connection.provider!==r.provider||connection.tenantId!==r.eventTenantId||connection.identity.externalId!==r.botId||scope.requesterKind!=='channel_user'||scope.requesterIdentity?.applicationId!==r.appId||!scope.requesterIdentity?.idNamespace||scope.requesterIdentity.idNamespace==='unknown'||!r.enabled||r.status!=='verified'||r.provider==='wecom'&&!usesWeComBotSearch(r)||(r.provider!=='feishu'&&scope.requesterIdentity.idNamespace!=='user_id'))return;
+  // Absence of a directory is not absence of a valid channel identity. Only
+  // authoritative, current local Feishu inactive facts revoke the actor here.
+  // DingTalk activation state is not an employment/offboarding fact.
+  if(r.provider==='feishu'&&this.snapshots?.hasAuthorizationSnapshot?.(r.id)&&this.snapshots.peekUser(r.id,{id:scope.requesterId,namespace:scope.requesterIdentity.idNamespace,applicationId:r.appId})?.status==='inactive')return;
+  return JSON.stringify([r.sourceId,r.appId,r.eventTenantId,r.revision,r.authRevision,r.stateVersion,r.provider==='wecom'?undefined:this.snapshots?.authorizationVersion?.(r.id)]);
+ }
  async validateCachedAdmission(scope:ChannelAccessScope,connection:ChannelConnection):Promise<boolean>{return !!this.admissionGuard(scope,connection);}
  beginEvaluation():DirectoryEvaluation{return{deadline:this.now()+15000,remaining:64,users:new Map(),departments:new Map()};}
  private queried<T>(evaluation:DirectoryEvaluation,map:Map<string,Promise<T>>,key:string,query:()=>Promise<T>):Promise<T>{if(this.now()>evaluation.deadline)throw new DirectoryError('limit_exceeded');const previous=map.get(key);if(previous)return previous;if(evaluation.remaining--<=0)throw new DirectoryError('limit_exceeded');const result=query();map.set(key,result);return result;}
@@ -327,12 +336,32 @@ export class EmployeeChannelService {
    if(!weComSearchIdentityVerified(r,target[3]))return 'unknown';
    return weComCallbackUserId(r,target[3])===scope.requesterId;
   }
-  if(!r.enabled||r.status!=='verified'||r.directoryStatus!=='available'||scope.requesterKind!=='channel_user'||scope.requesterIdentity?.applicationId!==r.appId||connection.tenantId!==r.eventTenantId)return'unknown';
+  if(!this.admissionGuard(scope,connection))return'unknown';
   const ns=scope.requesterIdentity?.idNamespace;if(!ns||ns==='unknown'||r.provider!=='feishu'&&ns!=='user_id')return'unknown';
-  try{const parts=JSON.parse(rule.subjectId) as string[];if(parts[2]!==r.appId||rule.kind==='department'&&parts[1]!== (r.provider==='feishu'?'open_department_id':'department_id'))return false;if(!this.snapshots)return'unknown';const port=this.snapshots.directory(r.id);const user=await this.queried(evaluation,evaluation.users,JSON.stringify([r.id,r.revision,ns,scope.requesterId]),()=>port.getUser({id:scope.requesterId,namespace:ns,...(r.provider==='feishu'&&ns!=='user_id'?{applicationId:r.appId}:{})}));if(this.now()>evaluation.deadline)return'unknown';this.current(r);if(user.status!=='active')return user.status==='inactive'?false:'unknown';
+  try{const parts=JSON.parse(rule.subjectId) as string[];
+   if(!Array.isArray(parts)||parts.length!==4||parts[0]!==rule.kind||typeof parts[3]!=='string'||!parts[3])return'unknown';
+   if(parts[2]!==r.appId)return false;
+   if(rule.kind==='channel_user'){
+    if(!(r.provider==='feishu'?['open_id','user_id','union_id']:['user_id']).includes(parts[1]!))return'unknown';
+    // Authenticated same-source IDs need no directory lookup. Different namespaces
+    // require published local alias evidence, never string equality or remote reads.
+    if(parts[1]===ns)return parts[3]===scope.requesterId;
+   }else if(parts[1]!== (r.provider==='feishu'?'open_department_id':'department_id'))return'unknown';
+   if(!this.snapshots?.hasAuthorizationSnapshot?.(r.id))return'unknown';
+   // The configured department list does not match a person absent from the
+   // last complete snapshot. Stale snapshots may therefore temporarily allow
+   // new members under department blacklists until the next successful sync.
+   if(rule.kind==='department'&&this.snapshots.isUserAbsent?.(r.id,{id:scope.requesterId,namespace:ns,applicationId:r.appId}))return false;
+   const port=this.snapshots.directory(r.id);const user=await this.queried(evaluation,evaluation.users,JSON.stringify([r.id,r.revision,ns,scope.requesterId]),()=>port.getUser({id:scope.requesterId,namespace:ns,...(r.provider==='feishu'&&ns!=='user_id'?{applicationId:r.appId}:{})}));if(this.now()>evaluation.deadline)return'unknown';this.current(r);if(r.provider==='feishu'&&user.status==='inactive')return'unknown';
    const aliases=[user.id,...user.aliases];if(!aliases.some(id=>id.id===scope.requesterId&&id.namespace===ns&&(id.applicationId===undefined||id.applicationId===r.appId)))return'unknown';
    this.rememberSpeaker(r,ns,scope.requesterId,user);
-   if(rule.kind==='channel_user')return aliases.some(id=>id.id===parts[3]&&id.namespace===parts[1]&&(id.applicationId===undefined||id.applicationId===r.appId));
+   if(rule.kind==='channel_user'){
+    if(!aliases.some(id=>id.id===parts[3]&&id.namespace===parts[1]&&(id.applicationId===undefined||id.applicationId===r.appId)))return false;
+    // A target alias must resolve uniquely too; an alias collision is not proof.
+    const target=this.snapshots.peekUser(r.id,{id:parts[3]!,namespace:parts[1] as 'open_id'|'user_id'|'union_id',applicationId:r.appId});
+    if(!target)return'unknown';
+    return target.id.id===user.id.id&&target.id.namespace===user.id.namespace;
+   }
    if(!user.departmentMembershipsKnown)return'unknown';if(user.departmentIds.includes(parts[3]!))return true;if(!rule.includeDescendants)return false;
    for(const id of user.departmentIds){let next:string|null=id;const seen=new Set<string>();for(let depth=0;next!==null;depth++){if(depth>=100||seen.has(next))return'unknown';seen.add(next);if(next===parts[3])return true;const departmentId:string=next;const dept=await this.queried(evaluation,evaluation.departments,JSON.stringify([r.id,r.revision,departmentId]),()=>port.getDepartment(departmentId));if(this.now()>evaluation.deadline)return'unknown';this.current(r);if(dept.parentId.status==='unknown')return'unknown';next=dept.parentId.value;}}
    return false;

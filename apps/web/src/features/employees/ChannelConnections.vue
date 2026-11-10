@@ -4,6 +4,7 @@ import { computed, onUnmounted, ref, watch } from 'vue';
 import { NAlert, NButton, NCard, NCheckbox, NForm, NFormItem, NInput, NSpace, NTag, NPopconfirm, NQrCode } from 'naive-ui';
 import { api, ApiError, errorMessage } from '../../shared/api';
 import { useDingtalkRegistration } from './dingtalk-registration';
+import DingtalkDirectorySetup from '../directory/DingtalkDirectorySetup.vue';
 import ChannelBrand from './ChannelBrand.vue';
 import WeComRegistration from './WeComRegistration.vue';
 import type { WeComRegistrationCredentials } from './wecom-registration';
@@ -20,7 +21,7 @@ import { directoryStatusLabel } from '../directory/types';
 import type { DirectoryConnection, DirectoryProvider, DirectoryIdentityEvidence } from '../directory/types';
 const props = withDefaults(defineProps<{ base: string; canManage: boolean; disabled?: boolean; active?: boolean; employeeName?: string }>(), { active: true, employeeName: '' });
 const emit = defineEmits<{ busyChanged: [value: boolean]; sessionExpired: []; changed: [];rebound:[];dirtyChanged:[boolean] }>();
-const feishuManual = ref(false), wecomManual = ref(false);
+const feishuManual = ref(false), wecomManual = ref(false), dingtalkManual = ref(false);
 const pendingWecomCredentials = ref<WeComRegistrationCredentials | null>(null);
 const sharingBusy=ref(false),sharingDirty=ref(false),registrationBusy=ref(false);
 const sharingEditor=ref<InstanceType<typeof GroupSharingSettings>|null>(null);
@@ -57,7 +58,7 @@ const displayConnections = computed(() => connections.value.map(item => {
 }));
 const evidenceLabel = (value: DirectoryConnection['identityEvidence']) => ({ provider_api: '厂商 API 身份证据', authenticated_event_confirmed: '管理员确认的已认证事件', authenticated_first_message: '首条真实消息自动确认', app_credentials_only: '仅应用凭据', admin_asserted: '管理员同企业声明（非厂商证明）' })[value] ?? '尚无身份验证证据';
 const connection = computed(() => connections.value.find(item => item.provider === provider.value));
-const showManualSetup = computed(() => !!connection.value || (provider.value === 'feishu' ? feishuManual.value : provider.value === 'wecom' ? wecomManual.value : true));
+const showManualSetup = computed(() => !!connection.value || (provider.value === 'feishu' ? feishuManual.value : provider.value === 'wecom' ? wecomManual.value : dingtalkManual.value));
 const showAutomaticSetup = computed(() => !!connection.value || !feishuManual.value);
 const historyEnabled = ref(false),keywordText=ref('');
 const contextDirty=computed(()=>historyEnabled.value!==(connection.value?.context?.groupListenEnabled??false)||keywordText.value!==(connection.value?.context?.groupTriggerKeywords??[]).join('\n'));
@@ -76,7 +77,7 @@ const registration = useDingtalkRegistration({
   revision: () => connections.value.find(item => item.provider === 'dingtalk')?.revision ?? 0,
   appId: () => connections.value.find(item => item.provider === 'dingtalk')?.appId,
   active: () => props.active !== false && selectedConnection.value && provider.value === 'dingtalk' && props.canManage,
-  locked: () => channelLocked.value || policyDirty.value || sharingDirty.value || contextDirty.value || !loaded.value,
+  locked: () => channelLocked.value || unsaved.value || !loaded.value,
   onSessionExpired: () => emit('sessionExpired'),
   onBound: (result, replaced) => {
     connections.value = [...connections.value.filter(item => item.provider !== 'dingtalk'), result];
@@ -86,14 +87,18 @@ const registration = useDingtalkRegistration({
     emit('changed');
   },
 });
-const { open: registrationOpen, available: registrationAvailable, checking: registrationChecking,
+const { uncertain: registrationUncertain, open: registrationOpen, available: registrationAvailable, checking: registrationChecking,
   requesting: registrationRequesting, binding: registrationBinding, session: registrationSession,
   message: registrationMessage, replacing: registrationReplacing, replaceSource: registrationReplaceSource } = registration;
 
+watch(() => [props.active, selectedConnection.value, provider.value, loaded.value, dingtalkManual.value, props.base], () => {
+  if (props.active !== false && selectedConnection.value && provider.value === 'dingtalk' && loaded.value && !dingtalkManual.value && !connection.value) void registration.show();
+});
+async function copyDingtalkName() { try { await navigator.clipboard.writeText(props.employeeName); } catch { notice.value = '复制失败，请手动复制员工名称。'; } }
 watch(() => busy.value || directoryBusy.value || policyBusy.value || sharingBusy.value || registrationBusy.value || registrationBinding.value, value => emit('busyChanged', value), { flush: 'sync' });
 watch(unsaved,v=>emit('dirtyChanged',v),{flush:'sync'});
 function clearSecrets() { appSecret.value = ''; }
-watch(provider, () => { pendingWecomCredentials.value = null; wecomManual.value = false; feishuManual.value = false; clearSecrets(); appId.value = connection.value?.appId ?? ''; replaceSource.value = false; notice.value = ''; error.value = ''; report.value = null; });
+watch(provider, () => { pendingWecomCredentials.value = null; wecomManual.value = false; feishuManual.value = false; dingtalkManual.value = false; clearSecrets(); appId.value = connection.value?.appId ?? ''; replaceSource.value = false; notice.value = ''; error.value = ''; report.value = null; });
 watch(connection, value => { if (value) pendingWecomCredentials.value = null; if (!value) feishuManual.value = false; historyEnabled.value = value?.context?.groupListenEnabled ?? false;keywordText.value=(value?.context?.groupTriggerKeywords??[]).join('\n'); appId.value = value?.appId ?? ''; clearSecrets(); replaceSource.value = false; });
 async function run(action: (signal: AbortSignal) => Promise<void>) {
   if (channelLocked.value) return; const signal = controller.signal; busy.value = true; error.value = ''; notice.value = '';
@@ -153,7 +158,7 @@ async function saveContext() {
     if (!signal.aborted) { await read(signal);notice.value = '已保存。';emit('changed'); }
   });
 }
-watch(() => props.base, () => { controller.abort(); controller = new AbortController(); busy.value = false; loaded.value = false; pendingWecomCredentials.value = null; wecomManual.value = false; feishuManual.value = false; report.value = null; notice.value = ''; error.value = ''; connections.value = []; runtimeSnapshot.value = null;policyDirty.value=false;policyBusy.value=false;sharingBusy.value=false;sharingDirty.value=false;confirmPolicySwitch.value=false;pendingPolicySwitch=undefined; clearSecrets(); void load(); }, { immediate: true });
+watch(() => props.base, () => { controller.abort(); controller = new AbortController(); busy.value = false; loaded.value = false; pendingWecomCredentials.value = null; wecomManual.value = false; feishuManual.value = false; dingtalkManual.value = false; report.value = null; notice.value = ''; error.value = ''; connections.value = []; runtimeSnapshot.value = null;policyDirty.value=false;policyBusy.value=false;sharingBusy.value=false;sharingDirty.value=false;confirmPolicySwitch.value=false;pendingPolicySwitch=undefined; clearSecrets(); void load(); }, { immediate: true });
 onUnmounted(() => { controller.abort(); pendingWecomCredentials.value = null; clearSecrets();emit('dirtyChanged',false); emit('busyChanged', false); });
 </script>
 <template>
@@ -179,6 +184,7 @@ onUnmounted(() => { controller.abort(); pendingWecomCredentials.value = null; cl
             <p>{{item.provider==='wecom'?'BotID':item.provider==='feishu'?'应用 App ID':'应用'}} {{item.appId}} · 版本 {{item.revision}}</p><p>身份证据：{{evidenceLabel(item.identityEvidence)}}</p><p>{{item.provider==='feishu'?'入站确认记录':'首条消息'}}：{{item.inboundVerified?'已确认':item.provider==='feishu'?'尚无确认记录':'尚未确认'}}</p><p v-if="item.botId">{{item.provider==='feishu'?'机器人 open_id':item.provider==='dingtalk'?'机器人 robotCode':item.status==='verified'?'已验证机器人':'配置机器人（待验证）'}} {{item.botId}}</p><p>身份依据：{{item.tenantIdNamespace}} · {{item.tenantId}}</p><p v-if="item.tenantIdNamespace==='app_scoped'||item.tenantIdNamespace==='app_id'">{{item.provider==='feishu'?'租户 tenant_key 尚未确认，应用 App ID 不能代替租户身份。':'仅证明应用身份，不代表企业 corpId 已验证。'}}</p>
           </details>
         </section>
+        <DingtalkDirectorySetup v-if="canManage && active !== false && selectedConnection && provider==='dingtalk' && connection" :key="connection.id+':'+connection.authRevision" :base="base" :connection-id="connection.id" :disabled="channelLocked || policyDirty || sharingDirty || contextDirty"/>
         <ChannelCapabilities v-if="connection" :capabilities="connection.capabilities" :provider="provider" @session-expired="emit('sessionExpired')"/>
         <template v-if="canManage">
           <FeishuRegistration v-if="provider==='feishu'" v-show="showAutomaticSetup" :show-manual-switch="!connection" :manual-switch-disabled="channelLocked" @manual-requested="feishuManual=true" :base="base" :active="active !== false && selectedConnection && loaded && showAutomaticSetup" :disabled="disabled || busy || directoryBusy || policyBusy || sharingBusy || unsaved" :bound-app-id="connection?.appId" @busy-changed="registrationBusy=$event" @session-expired="emit('sessionExpired')" @changed="registrationChanged"/>
@@ -192,17 +198,14 @@ onUnmounted(() => { controller.abort(); pendingWecomCredentials.value = null; cl
             <ChannelValidationReport v-if="report && !report.canContinue" :report="report"/>
             <NButton v-if="pendingWecomCredentials && !busy" :disabled="channelLocked" @click="retryWecomSave">重试保存机器人配置</NButton>
           </section>
-          <NAlert v-if="notice && !showManualSetup" type="info" role="status">{{notice}}</NAlert>
-          <section v-if="showManualSetup" class="form-section channel-setup" aria-label="渠道接入配置">
-            <header class="form-section-heading manual-setup-heading"><h3>机器人连接凭据</h3><NButton v-if="(provider==='feishu'||provider==='wecom') && !connection" size="small" quaternary :disabled="channelLocked" @click="feishuManual=false;wecomManual=false">返回自动创建</NButton><a v-else :href="provider==='feishu'?'https://open.feishu.cn/app':provider==='dingtalk'?'https://open-dev.dingtalk.com/':'https://work.weixin.qq.com/wework_admin/frame'" target="_blank" rel="noopener noreferrer">打开官方后台 ↗</a></header>
-            <p v-if="provider==='feishu' && !connection" class="field-note">已有飞书应用？填写凭据即可关联。<a href="https://open.feishu.cn/app" target="_blank" rel="noopener noreferrer">打开官方后台 ↗</a></p>
-            <WeComRegistration v-if="selectedConnection && provider==='wecom' && connection" :employee-name="employeeName" :existing-binding="true" :key="base" :context="base" :disabled="registrationBlocked" @busy-changed="v=>registrationBusy=v" @credentials="receiveRegistration"/>
-            <p v-if="provider==='wecom' && unsaved" class="field-note">当前有未保存修改。请先保存，或清空手填凭据并取消其他修改，再开始扫码。</p>
-            <section v-if="provider==='dingtalk'" class="dingtalk-registration" aria-label="钉钉扫码创建">
-              <NButton v-if="!registrationOpen" :disabled="channelLocked||!loaded" @click="registration.show">扫码创建新机器人</NButton>
+            <section v-if="provider==='dingtalk' && (!dingtalkManual || registrationOpen)" class="dingtalk-registration" aria-label="钉钉扫码创建">
+              <header class="form-section-heading manual-setup-heading"><h3>自动创建钉钉机器人</h3><NButton v-if="!connection" size="small" quaternary :disabled="channelLocked || registrationRequesting || !!registrationSession || registrationUncertain" @click="registration.cancel();dingtalkManual=true">绑定已有应用</NButton></header>
+              <p v-if="employeeName" class="field-note">数字员工名称：{{employeeName}} <NButton size="tiny" text @click="copyDingtalkName">复制名称</NButton></p>
+              <p v-if="unsaved" class="field-note">已有未保存修改，请切到“绑定已有应用”保存或清空后再创建。</p>
+              <NButton v-if="!registrationOpen" :disabled="channelLocked||!loaded||unsaved" @click="registration.show">扫码创建新机器人</NButton>
               <template v-else>
                 <div class="form-section-heading"><h3>扫码创建新机器人</h3><NButton :disabled="registrationBinding" @click="registration.cancel">关闭扫码</NButton></div>
-                <p class="field-note">使用部署方已向钉钉登记的来源创建。取消仅停止本地流程，不会撤销已在钉钉创建的机器人；已有应用仍可在下方手动关联。</p>
+                <p class="field-note">用钉钉扫码创建，完成后自动保存连接。名称请在钉钉中填写；取消不会删除已创建的机器人。</p>
                 <p v-if="registrationChecking" role="status">正在检查扫码注册配置…</p>
                 <NAlert v-if="registrationMessage" type="warning" role="status">{{registrationMessage}}</NAlert>
                 <NButton v-if="registrationAvailable&&!registrationSession&&!registrationMessage" :disabled="registrationRequesting||channelLocked" :loading="registrationRequesting" @click="registration.start">开始扫码创建</NButton>
@@ -215,14 +218,20 @@ onUnmounted(() => { controller.abort(); pendingWecomCredentials.value = null; cl
                   <p class="field-note">本次扫码有效至 {{formatTime(registrationSession.expiresAt)}}。二维码仅在本地生成。</p>
                 </template>
                 <template v-if="registrationSession?.status==='ready'">
-                  <p role="status">机器人已创建，尚未绑定。Client ID：{{registrationSession.clientId}}</p>
+                  <p role="status">机器人已创建，{{registrationBinding ? '正在保存连接…' : '等待保存连接'}} Client ID：{{registrationSession.clientId}}</p>
                   <NAlert v-if="registrationReplacing" type="warning" aria-label="扫码换绑授权重置提醒">保存换绑后，启用新连接，仅当前渠道恢复新建默认值：空白名单、群内可用、能力包继承员工使用范围。当前渠道的人员名单、能力包渠道限制、群共享规则与缓存会重置，旧名单不迁移。群内可用和能力包继承可能扩大授权。其他渠道、网页权限和资源绑定不变。未保存前原绑定继续有效。<NCheckbox v-model:checked="registrationReplaceSource" :disabled="registrationBinding" aria-label="确认扫码换绑并重置当前渠道配置">我确认换绑并重置当前渠道配置</NCheckbox></NAlert>
-                  <NButton type="primary" :loading="registrationBinding" :disabled="channelLocked||policyDirty||sharingDirty||contextDirty||(registrationReplacing&&!registrationReplaceSource)" @click="registration.bind">确认绑定到当前员工</NButton>
+                  <NButton v-if="registrationReplacing && !registrationUncertain" type="primary" :loading="registrationBinding" :disabled="channelLocked||policyDirty||sharingDirty||contextDirty||(registrationReplacing&&!registrationReplaceSource)" @click="registration.bind">确认绑定到当前员工</NButton>
                 </template>
-                <NButton v-if="registrationMessage" :disabled="channelLocked" @click="registration.cancel();registration.show()">重新检查扫码配置</NButton>
+                <NButton v-if="registrationUncertain" :disabled="channelLocked || registrationRequesting" @click="registration.recover">重新检查并保存连接</NButton>
+                <NButton v-if="registrationMessage && !registrationUncertain && !registrationSession" :disabled="channelLocked" @click="registration.cancel();registration.show()">重新检查扫码配置</NButton>
               </template>
-              <h3>手动关联已有应用</h3>
             </section>
+          <NAlert v-if="notice && !showManualSetup" type="info" role="status">{{notice}}</NAlert>
+          <section v-if="showManualSetup && !(provider==='dingtalk' && registrationOpen)" class="form-section channel-setup" aria-label="渠道接入配置">
+            <header class="form-section-heading manual-setup-heading"><h3>机器人连接凭据</h3><NButton v-if="!connection" size="small" quaternary :disabled="channelLocked" @click="feishuManual=false;wecomManual=false;dingtalkManual=false">返回自动创建</NButton><a v-else :href="provider==='feishu'?'https://open.feishu.cn/app':provider==='dingtalk'?'https://open-dev.dingtalk.com/':'https://work.weixin.qq.com/wework_admin/frame'" target="_blank" rel="noopener noreferrer">打开官方后台 ↗</a></header>
+            <p v-if="provider==='feishu' && !connection" class="field-note">已有飞书应用？填写凭据即可关联。<a href="https://open.feishu.cn/app" target="_blank" rel="noopener noreferrer">打开官方后台 ↗</a></p>
+            <WeComRegistration v-if="selectedConnection && provider==='wecom' && connection" :employee-name="employeeName" :existing-binding="true" :key="base" :context="base" :disabled="registrationBlocked" @busy-changed="v=>registrationBusy=v" @credentials="receiveRegistration"/>
+            <p v-if="provider==='wecom' && unsaved" class="field-note">当前有未保存修改。请先保存，或清空手填凭据并取消其他修改，再开始扫码。</p>
             <NForm class="channel-connection-form settings-form" @submit.prevent>
               <NFormItem :label="provider==='wecom'?'BotID':provider==='dingtalk'?'Client ID（AppKey）':'App ID'"><NInput v-model:value="appId" :disabled="channelLocked||!loaded" :input-props="{'aria-label':'渠道应用 ID',autocomplete:'off'}"/></NFormItem>
               <NFormItem :label="provider==='wecom'?'Secret':provider==='dingtalk'?'Client Secret（AppSecret）':'App Secret'"><NInput v-model:value="appSecret" type="password" :disabled="channelLocked||!loaded" :input-props="{'aria-label':'渠道应用密钥',autocomplete:'new-password'}"/></NFormItem>
