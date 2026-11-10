@@ -66,17 +66,27 @@ const writes = env => env.requests.filter(r => r.method !== 'GET');
 const field = label => document.querySelector(`input[aria-label="${label}"]`);
 const existing = { id: 'synthetic-connection', provider: 'wecom', appId: 'synthetic-old-bot', tenantId: 'synthetic-tenant', tenantIdNamespace: 'app_scoped', enabled: true, status: 'pending_verification', revision: 3, directoryStatus: 'unavailable', context: {}, transport: { state: 'stopped', changedAt: 1 } };
 
-test('scan autofills only; normal explicit save is the sole credential persistence request', async t => {
-  const popup = popupFixture(t), env = await mount(t, 'settings', { base, canManage: true, active: true }, async () => []);
-  await choose('企业微信'); assert.match(text(), /已有机器人请手动填写/);
-  assert.equal(button('扫码创建机器人').disabled, false, text()); await click('扫码创建机器人'); assert.equal(popup.urls.length, 1, text()); assert.equal(new URL(popup.urls[0]).searchParams.get('source'), 'identale');
-  assert.equal(field('渠道应用 ID').disabled, true); assert.equal(button('扫码创建机器人').disabled, true);
-  popup.receive(); await flush();
-  assert.equal(field('渠道应用 ID').value, 'synthetic-new-bot'); assert.equal(field('渠道应用密钥').value, 'synthetic-new-secret');
-  assert.match(text(), /尚未保存或启动连接/); assert.equal(text().includes('synthetic-new-secret'), false); assert.equal(writes(env).length, 0);
-  popup.receive(); await flush(); assert.equal(writes(env).length, 0);
-  await click('保存机器人配置'); await until(() => writes(env).length === 1);
-  assert.deepEqual(writes(env)[0], { url: `/api${base}/channels/wecom`, method: 'PUT', body: { appId: 'synthetic-new-bot', appSecret: 'synthetic-new-secret', expectedRevision: 0, replaceSource: false } });
+test('unbound scan saves once automatically and never reports transport connected from callback', async t => {
+  const popup = popupFixture(t); let saved = false;
+  const env = await mount(t, 'settings', { base, employeeName: '合成员工', canManage: true, active: true }, async r => {
+    if(r.method === 'PUT') { saved = true; return {...existing, appId:'synthetic-new-bot'}; }
+    return r.url.endsWith('/channels') ? (saved ? [{...existing, appId:'synthetic-new-bot'}] : []) : {};
+  });
+  await choose('企业微信'); assert.equal(field('渠道应用 ID'),null); assert.match(text(), /合成员工/);
+  await click('扫码创建机器人'); assert.equal(button('绑定已有应用').disabled,true);
+  popup.receive(); await until(()=>writes(env).length === 1); popup.receive(); await flush();
+  assert.equal(writes(env).length,1); assert.equal(text().includes('synthetic-new-secret'),false);
+  assert.deepEqual(writes(env)[0].body,{appId:'synthetic-new-bot', appSecret:'synthetic-new-secret', expectedRevision:0, replaceSource:false});
+  assert.match(text(), /长连接：状态未知/);
+});
+
+test('failed automatic save retries retained credentials without creating another robot', async t => {
+  const popup=popupFixture(t); let count=0;
+  const env=await mount(t,'settings',{base,canManage:true},async r=>r.method==='PUT' ? (++count===1 ? {status:503,data:{error:'synthetic_failure'}} : {}) : []);
+  await choose('企业微信'); await click('扫码创建机器人'); popup.receive();
+  await until(()=>count===1 && !![...document.querySelectorAll('button')].find(b=>b.textContent.trim()==='重试保存机器人配置'));
+  await click('重试保存机器人配置'); await until(()=>count===2);
+  assert.equal(popup.urls.length,1); assert.deepEqual(writes(env)[0].body,writes(env)[1].body);
 });
 
 test('existing connection requires replacement acknowledgment before explicit save', async t => {
@@ -93,12 +103,12 @@ test('all providers retain manual inputs; unsaved manual credentials prevent pop
   const popup = popupFixture(t), env = await mount(t, 'settings', { base, canManage: true, active: true }, async () => []);
   for (const provider of ['飞书', '钉钉', '企业微信']) {
     await choose(provider);
-    if (provider === '飞书') { assert.equal(field('渠道应用 ID'), null); await until(() => !button('手动接入').disabled, 'Feishu setup loaded before manual switch'); await click('手动接入'); }
+    if (provider !== '钉钉') { assert.equal(field('渠道应用 ID'), null); await until(() => !button('绑定已有应用').disabled, 'Feishu setup loaded before manual switch'); await click('绑定已有应用'); }
     assert.ok(field('渠道应用 ID')); assert.ok(field('渠道应用密钥'));
-    assert.equal(!!document.querySelector('.wecom-registration'), provider === '企业微信');
+    assert.equal(!!document.querySelector('.wecom-registration'), false);
   }
   input('渠道应用 ID', 'synthetic-manual-bot'); input('渠道应用密钥', 'synthetic-manual-secret'); await flush();
-  assert.equal(button('扫码创建机器人').disabled, true); button('扫码创建机器人').click(); assert.equal(popup.urls.length, 0);
+  assert.equal(popup.urls.length, 0);
   popup.receive({}); await flush(); assert.equal(field('渠道应用 ID').value, 'synthetic-manual-bot'); assert.equal(field('渠道应用密钥').value, 'synthetic-manual-secret'); assert.equal(writes(env).length, 0);
 });
 
@@ -126,18 +136,18 @@ test('cancel, blocked and thrown popup errors retain manual fallback without sec
   for (const mode of ['cancel', 'blocked', 'throw']) await t.test(mode, async t => {
     const popup = popupFixture(t, mode), env = await mount(t, 'settings', { base, canManage: true, active: true }, async () => []);
     await choose('企业微信'); await click('扫码创建机器人');
-    if (mode === 'cancel') { await click('取消扫码，手动填写'); popup.receive(); await flush(); }
-    assert.equal(field('渠道应用 ID').disabled, false); assert.equal(field('渠道应用 ID').value, ''); assert.equal(writes(env).length, 0);
-    assert.equal(text().includes('synthetic-hidden-secret'), false); assert.match(text(), /手动填写/);
+    if (mode === 'cancel') { await click('取消扫码'); popup.receive(); await flush(); }
+    await click('绑定已有应用'); assert.equal(field('渠道应用 ID').disabled, false); assert.equal(field('渠道应用 ID').value, ''); assert.equal(writes(env).length, 0);
+    assert.equal(text().includes('synthetic-hidden-secret'), false); assert.ok(field('渠道应用密钥'));
   });
 });
 
 
 test('omitted active defaults to enabled and EmployeeSettings binds actual channels tab activity', async t => {
   const source = await readFile('apps/web/src/features/employees/EmployeeSettings.vue', 'utf8');
-  assert.match(source, /<ChannelConnections\s+:active="tab==='channels'"/);
+  assert.match(source, /<ChannelConnections[^>]*:active="tab==='channels'"/);
   const popup = popupFixture(t), env = await mount(t, 'settings', { base, canManage: true }, async () => []);
   await choose('企业微信'); assert.equal(button('扫码创建机器人').disabled, false);
   await click('扫码创建机器人'); assert.equal(popup.popups.length, 1);
-  await click('取消扫码，手动填写'); assert.equal(popup.popups[0].closed, true); assert.equal(writes(env).length, 0);
+  await click('取消扫码'); assert.equal(popup.popups[0].closed, true); assert.equal(writes(env).length, 0);
 });

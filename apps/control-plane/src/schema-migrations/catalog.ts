@@ -33,7 +33,9 @@ function parts(sql:string):string[]{
  throw Error('schema_migration_invalid_table_sql');
 }
 function definition(sql:string,column:string):string{const p=parts(sql).find(x=>x.trim().match(/^(?:"([^"]+)"|`([^`]+)`|\[([^\]]+)\]|(\w+))/)?.slice(1).includes(column));if(!p)throw Error('schema_migration_column_definition_missing');return p.trim();}
-export function schemaForRole(role:MigrationRole):SchemaObject[]{return BASELINE_V1.filter(o=>role==='combined'||tableOwner(o.tbl_name)===role).map(o=>({...o,sql:o.type==='table'&&role!=='combined'?stripCrossDomainReferences(o.sql,role):o.sql}));}
+function baselineSchemaForRole(role:MigrationRole):SchemaObject[]{return BASELINE_V1.filter(o=>role==='combined'||tableOwner(o.tbl_name)===role).map(o=>({...o,sql:o.type==='table'&&role!=='combined'?stripCrossDomainReferences(o.sql,role):o.sql}));}
+/** Current schema is also used for read-only cross-role TEMP projections. */
+export function schemaForRole(role:MigrationRole):SchemaObject[]{return baselineSchemaForRole(role).map(o=>o.name==='entities'?{...o,sql:o.sql.replace(/\)$/,", channel_binding_history_json TEXT NOT NULL DEFAULT '{}')")}:o);}
 function normalized(value:unknown):string{return String(value).split(/('(?:''|[^'])*')/g).map((part,i)=>i%2?part:part.replace(/\s+/g,' ').toLowerCase()).join('').trim();}
 function foreignKeys(db:DatabaseSync,table:string,present:Set<string>):string[]{return db.prepare(`PRAGMA main.foreign_key_list(${quote(table)})`).all().filter(r=>present.has(String(r['from']))).map(r=>JSON.stringify([r['table'],r['from'],r['to'],r['on_update'],r['on_delete'],r['match']])).sort();}
 function uniqueKeys(db:DatabaseSync,table:string):string[]{return db.prepare(`PRAGMA main.index_list(${quote(table)})`).all().filter(r=>Number(r['unique'])===1&&r['origin']!=='c').map(r=>JSON.stringify(db.prepare(`PRAGMA main.index_info(${quote(String(r['name']))})`).all().map(c=>c['name']))).sort();}
@@ -50,6 +52,10 @@ function compatible(db:DatabaseSync,reference:DatabaseSync,schema:SchemaObject[]
    if(/\bWITHOUT\s+ROWID\b/i.test(String(row['sql']))!==/\bWITHOUT\s+ROWID\b/i.test(tables.get(name)!.sql)||/\bSTRICT\s*$/i.test(String(row['sql']))!==/\bSTRICT\s*$/i.test(tables.get(name)!.sql))throw Error(`schema_migration_unrecognized_table_options:${name}`);
    const expected=new Map(columns(reference,name).map(c=>[c.name,c]));
    const actualColumns=columns(db,name);
+   // Offline split copies a validated current schema without the source role's
+   // history table. Recognize only the exact additive V3 column while adopting
+   // that copy; V1/V2 apply functions and their published checksums stay frozen.
+   if(name==='entities'&&!expected.has('channel_binding_history_json')&&actualColumns.some(c=>c.name==='channel_binding_history_json'))expected.set('channel_binding_history_json',{name:'channel_binding_history_json',type:'TEXT',notnull:1,dflt_value:"'{}'",pk:0,hidden:0});
    const retainedColumn=allowRetired&&name==='employee_channel_connections'&&actualColumns.some(c=>c.name==='directory_credential_id');
    if(retainedColumn){
     const c=actualColumns.find(c=>c.name==='directory_credential_id')!;
@@ -68,9 +74,14 @@ function compatible(db:DatabaseSync,reference:DatabaseSync,schema:SchemaObject[]
 }
 /** Durable schemas are migrated before any repository, worker or TEMP projection. */
 export function migrateDatabase(db:DatabaseSync,path:string,role:MigrationRole,verifyOnly=false):void{
- const schema=schemaForRole(role),reference=new DatabaseSync(':memory:');
+ const schema=baselineSchemaForRole(role),reference=new DatabaseSync(':memory:'),targetReference=new DatabaseSync(':memory:');
  try{
-  for(const object of schema)reference.exec(object.sql);
+  for(const object of schema){reference.exec(object.sql);targetReference.exec(object.sql);}
+  const bindingHistorySQL=role==='runtime'?'-- runtime has no employee binding history':"ALTER TABLE entities ADD COLUMN channel_binding_history_json TEXT NOT NULL DEFAULT '{}'";
+  if(role!=='runtime')targetReference.exec(bindingHistorySQL);
+  const targetSchema=targetReference.prepare("SELECT type,name,tbl_name,sql FROM sqlite_master WHERE name NOT LIKE 'sqlite_%'").all() as unknown as SchemaObject[];
+  const hasBindingHistory=(database:DatabaseSync)=>role!=='runtime'&&columns(database,'entities').some(c=>c.name==='channel_binding_history_json');
+  const validatePreV3=(database:DatabaseSync,legacy=false,allowRetired=legacy)=>hasBindingHistory(database)?compatible(database,targetReference,targetSchema,legacy,allowRetired):compatible(database,reference,schema,legacy,allowRetired);
   const manifest=JSON.stringify({schema,additive:ADDITIVE_V1});
   const options:MigrationOptions={role,databasePath:path,migrations:[{version:1,name:'versioned_storage_baseline',sql:"-- frozen-v1-manifest " + Buffer.from(manifest).toString("base64"),apply(database){
    let upgradeTriggerReceipts=false;
@@ -111,14 +122,19 @@ export function migrateDatabase(db:DatabaseSync,path:string,role:MigrationRole,v
     database.exec('DROP TABLE IF EXISTS employee_channel_directory_credentials');
    }
    if(role!=='platform')database.exec('DROP TABLE IF EXISTS wecom_member_verification_attempts; DROP TABLE IF EXISTS wecom_member_verification_notices');
-  }}],validateBaseline:database=>compatible(database,reference,schema,true),validateTarget:(database,migrated)=>{compatible(database,reference,schema,false);if(migrated&&database.prepare('PRAGMA foreign_key_check').get())throw Error('schema_migration_foreign_key_failure');}};
+  }},{version:3,name:'employee_channel_binding_history',sql:bindingHistorySQL,apply(database){
+   // Validate the released V2 shape before adding lifecycle state; no existing
+   // authorization policy or historical binding is inferred or rewritten.
+   validatePreV3(database);
+   if(role!=='runtime'&&!hasBindingHistory(database))database.exec(bindingHistorySQL);
+  }}],validateBaseline:database=>validatePreV3(database,true),validateTarget:(database,migrated)=>{compatible(database,targetReference,targetSchema,false);if(migrated&&database.prepare('PRAGMA foreign_key_check').get())throw Error('schema_migration_foreign_key_failure');}};
   if(verifyOnly){
    const rows=db.prepare(`SELECT version,name,checksum FROM ${role}_schema_migrations ORDER BY version`).all();
    if(rows.length!==options.migrations.length)throw Error('schema_migration_database_version_unsupported');
    rows.forEach((row,i)=>{const expected=options.migrations[i]!;if(row['version']!==expected.version||row['name']!==expected.name||row['checksum']!==migrationChecksum(expected))throw Error('schema_migration_checksum_or_version_mismatch');});
    options.validateTarget!(db,false);
   }else runSchemaMigrations(db,options);
- }finally{reference.close();}
+ }finally{reference.close();targetReference.close();}
 }
 
 /** Read-only guard for offline tools. Never adopts or repairs an unversioned source. */

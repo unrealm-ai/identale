@@ -20,7 +20,7 @@ test('offline split validates combined history and initializes independent desti
   const db=new DatabaseSync(file,{readOnly:true});try{
    assert.equal(validateDatabaseVersion(db,role),role);
    assert.equal(db.prepare("SELECT name FROM sqlite_master WHERE name='combined_schema_migrations'").get(),undefined);
-   assert.deepEqual(db.prepare(`SELECT version FROM ${role}_schema_migrations ORDER BY version`).all().map(row=>row.version),[1,2]);
+   assert.deepEqual(db.prepare(`SELECT version FROM ${role}_schema_migrations ORDER BY version`).all().map(row=>row.version),[1,2,3]);
   }finally{db.close();}
  }
  assert.equal((await splitLegacyStorage({sourceDatabasePath:path,destinationDirectory:dest,confirmOffline:true})).reused,true);

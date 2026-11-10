@@ -322,7 +322,7 @@ test('first view keeps permission groups collapsed and the create action before 
   assert.ok(document.querySelector('.registration-permission-groups').closest('.registration-details'));
   assert.ok(document.querySelector('.registration-actions').compareDocumentPosition(details) & Node.DOCUMENT_POSITION_FOLLOWING);
   assert.match(document.querySelector('.registration-impact').textContent, /业务资料读写和企业审批操作/);
-  assert.equal(button('手动接入').disabled, false);
+  assert.equal(button('绑定已有应用').disabled, false);
   assert.equal([...document.querySelectorAll('button')].some(b => b.textContent.trim() === '刷新创建状态'), false);
   assert.ok(env.requests.every(r => r.method === 'GET'));
 });
@@ -344,16 +344,16 @@ test('manual switch remains locked during requests, uncertain starts, cancellati
     return state;
   });
   button('创建飞书应用').click(); await flush();
-  assert.equal(button('手动接入').disabled, true); button('手动接入').click(); assert.equal(switches.length, 0);
+  assert.equal(button('绑定已有应用').disabled, true); button('绑定已有应用').click(); assert.equal(switches.length, 0);
   release(); await until(() => text().includes('等待在飞书确认创建'));
-  assert.equal(button('手动接入').disabled, true);
-  await click('取消等待'); assert.equal(button('手动接入').disabled, true); assert.match(text(), /无法连接服务或响应格式异常/);
-  failCancel = false; await click('取消等待'); assert.equal(button('手动接入').disabled, false);
+  assert.equal(button('绑定已有应用').disabled, true);
+  await click('取消等待'); assert.equal(button('绑定已有应用').disabled, true); assert.match(text(), /无法连接服务或响应格式异常/);
+  failCancel = false; await click('取消等待'); assert.equal(button('绑定已有应用').disabled, false);
   assert.match(text(), /停止等待不代表撤销飞书侧操作/);
-  failStart = true; await click('创建飞书应用'); assert.equal(button('手动接入').disabled, true);
-  await click('刷新创建状态'); assert.equal(button('手动接入').disabled, true, 'an unresolved operation must not unlock the manual path');
+  failStart = true; await click('创建飞书应用'); assert.equal(button('绑定已有应用').disabled, true);
+  await click('刷新创建状态'); assert.equal(button('绑定已有应用').disabled, true, 'an unresolved operation must not unlock the manual path');
   state = envelope('needs_attention', { credentialSaved: true, appId: 'cli_synthetic' });
-  await click('刷新创建状态'); assert.equal(button('手动接入').disabled, true);
+  await click('刷新创建状态'); assert.equal(button('绑定已有应用').disabled, true);
   assert.equal([...document.querySelectorAll('button')].some(b => b.textContent.trim() === '取消等待'), false);
   assert.equal(switches.length, 0);
 });
@@ -361,5 +361,5 @@ test('manual switch remains locked during requests, uncertain starts, cancellati
 test('a cancellation racing with saved credentials does not enable manual entry', async t => {
   let state = envelope('awaiting_confirmation', { verificationUrl: 'https://accounts.feishu.cn/confirm' });
   await mount(t, 'registration', { base, active: true, showManualSwitch: true }, async req => req.url.endsWith('/cancel') ? state = envelope('checking', { credentialSaved: true, appId: 'cli_synthetic' }) : state);
-  await click('取消等待'); assert.equal(button('手动接入').disabled, true); assert.match(text(), /应用已创建，请继续完成当前连接检查/);
+  await click('取消等待'); assert.equal(button('绑定已有应用').disabled, true); assert.match(text(), /应用已创建，请继续完成当前连接检查/);
 });

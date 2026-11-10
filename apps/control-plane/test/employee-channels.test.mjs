@@ -31,6 +31,8 @@ function setup(t){
  store.run("INSERT INTO workspaces(id,name,created_by) VALUES('w','Workspace','u'),('other','Other','u')");
  store.run("INSERT INTO members(id,workspace_id,user_id,role) VALUES('m','w','u','owner'),('g','w','guest','member')");
  store.run("INSERT INTO entities(id,workspace_id,name,owner_member_id,created_by_member_id,own_web_use,web_use_user_id,interaction_runtime) VALUES('e','w','Entity','m','m',1,'u','builtin'),('e2','w','Second','m','m',0,'u','builtin')");
+ // Most tests below exercise explicitly restricted, previously bound employees.
+ store.run("UPDATE entities SET channel_binding_history_json=?",JSON.stringify({feishu:true,dingtalk:true,wecom:true}));
  const state={clock:1800000000000,dept:'child',active:true,unknown:false,fail:null,calls:0,bot:true,tenant:true};
  const options={now:()=>state.clock,masterKey:new Uint8Array(32).fill(7),verifyApplication:async(provider,appId,secret)=>{if(secret.appSecret==='bad')throw new DirectoryError('authentication_failed');return{identity:{appId,tenantId:state.tenant?'tenant':appId,tenantIdNamespace:state.tenant?'tenant_key':'app_id'},...(state.bot?{botId:'bot-'+appId}:{}),...(state.tenant?{eventTenantId:'tenant'}:{}),directoryStatus:'available'};},adapterFactory:(provider,{appId})=>({provider,capabilities:{},verify:async()=>({appId,tenantId:'tenant',tenantIdNamespace:'tenant_key'}),getAuthorizedScope:async()=>({departmentIds:['root'],userIds:[{id:'person',namespace:provider==='feishu'?'open_id':'user_id',applicationId:appId}],entireOrganization:false,revision:'1'}),getDepartment:async id=>({id,namespace:'open_department_id',displayName:id,parentId:state.unknown?unknown:known(id==='child'?'root':null),leaders:unknown}),listChildDepartments:async(id,cursor)=>({items:id==='root'?[{id:'child',namespace:'open_department_id',displayName:'Child',parentId:known(id),leaders:unknown}]:[],exhausted:true}),listDepartmentMembers:async()=>({items:[],exhausted:true}),getUser:async id=>{state.calls++;if(state.fail)throw new DirectoryError(state.fail);return{id,displayName:'Person',status:state.active?'active':'inactive',departmentIds:[state.dept],departmentMembershipsKnown:!state.unknown,aliases:[],primaryDepartmentId:unknown,directManager:unknown,dottedLineManagers:unknown};}})};
  const repository=new EmployeeChannelRepository(store),service=new EmployeeChannelService(repository,options),capabilities=new CapabilityConfigService(store,[],service,undefined,undefined,undefined,()=>state.clock);
@@ -161,9 +163,9 @@ test('business app identity binds source and credential revision, never token re
 
 test('three-channel new defaults and same-bot credential changes preserve disabled configuration',async t=>{
  for(const provider of ['feishu','dingtalk','wecom'])await t.test(provider,async t=>{
-  const f=setup(t),c=await ready(f,provider,'e',provider+'-app');
+  const f=setup(t);f.store.run("UPDATE entities SET channel_binding_history_json='{}' WHERE id='e'");const c=await ready(f,provider,'e',provider+'-app');
   const fresh=f.capabilities.getDirectoryAccess('w','e').channelPolicies.find(p=>p.sourceId===c.sourceId);
-  assert.equal(fresh.mode,'allowlist');assert.deepEqual(fresh.allow,[]);assert.deepEqual(fresh.deny,[]);assert.equal(fresh.allowGroupMembers,true);
+  assert.equal(fresh.mode,'denylist');assert.deepEqual(fresh.allow,[]);assert.deepEqual(fresh.deny,[]);assert.equal(fresh.allowGroupMembers,true);
   const selected=f.capabilities.patchDirectoryAccess('w','e',{sourceId:c.sourceId,mode:'denylist',allow:[],deny:[],allowGroupMembers:false,expectedRevision:fresh.revision});
   let current=f.service.settings('w','e',provider,'u',{enabled:false,expectedRevision:c.revision,...(provider==='feishu'?{groupListenEnabled:false,groupTriggerKeywords:['original'],meetingRefs:[{kind:'minutes',externalId:'original-minute'}]}:{})});
   const before=f.repository.byId(c.id),policy=JSON.stringify(selected);
@@ -253,17 +255,17 @@ test('a published snapshot or explicit directory revocation invalidates cached a
 });
 
 
-test('new employee first channel defaults are consumed per provider; legacy, rotation and rebind stay isolated',async t=>{
+test('first bindings are tracked independently per channel; rotation and rebind stay isolated',async t=>{
  const f=setup(t);
  new SqliteEntityRepository(f.store).insert({id:'new-employee',workspaceId:'w',name:'New employee',ownerMemberId:'m',createdByMemberId:'m',ownWebUse:true,webUseUserId:'u',interactionRuntime:'builtin',description:'',executionThinkingLevel:'medium'});
- assert.deepEqual(JSON.parse(f.store.one('SELECT initial_channel_defaults_json FROM entities WHERE id=?','e').initial_channel_defaults_json),{});
+ assert.deepEqual(JSON.parse(f.store.one('SELECT channel_binding_history_json FROM entities WHERE id=?','e').channel_binding_history_json),{feishu:true,dingtalk:true,wecom:true});
  for(const provider of ['feishu','dingtalk','wecom']){
   if(provider!=='wecom')await assert.rejects(f.service.save('w','new-employee',provider,'u',{appId:provider+'-fresh',appSecret:'bad',expectedRevision:0}),code('authentication_failed'));
-  assert.equal(JSON.parse(f.store.one('SELECT initial_channel_defaults_json FROM entities WHERE id=?','new-employee').initial_channel_defaults_json)[provider],'denylist');
+  assert.equal(JSON.parse(f.store.one('SELECT channel_binding_history_json FROM entities WHERE id=?','new-employee').channel_binding_history_json)[provider],undefined);
   const c=await ready(f,provider,'new-employee',provider+'-fresh');
   const policy=f.capabilities.getDirectoryAccess('w','new-employee').channelPolicies.find(p=>p.sourceId===c.sourceId);
   assert.equal(policy.mode,'denylist');assert.deepEqual(policy.allow,[]);assert.deepEqual(policy.deny,[]);assert.equal(policy.allowGroupMembers,true);
-  assert.equal(JSON.parse(f.store.one('SELECT initial_channel_defaults_json FROM entities WHERE id=?','new-employee').initial_channel_defaults_json)[provider],undefined);
+  assert.equal(JSON.parse(f.store.one('SELECT channel_binding_history_json FROM entities WHERE id=?','new-employee').channel_binding_history_json)[provider],true);
   const rotated=await f.service.save('w','new-employee',provider,'u',{appId:c.appId,appSecret:'new-secret',expectedRevision:c.revision});
   assert.deepEqual(f.capabilities.getDirectoryAccess('w','new-employee').channelPolicies.find(p=>p.sourceId===c.sourceId),policy);
   const rebound=await f.service.save('w','new-employee',provider,'u',{appId:c.appId+'-replacement',appSecret:'new-secret',expectedRevision:rotated.revision,replaceSource:true});
@@ -272,17 +274,42 @@ test('new employee first channel defaults are consumed per provider; legacy, rot
   const reconnected=await ready(f,provider,'new-employee',provider+'-after-unbind');
   assert.equal(f.capabilities.getDirectoryAccess('w','new-employee').channelPolicies.find(p=>p.sourceId===reconnected.sourceId).mode,'allowlist');
  }
- assert.deepEqual(JSON.parse(f.store.one('SELECT initial_channel_defaults_json FROM entities WHERE id=?','new-employee').initial_channel_defaults_json),{});
+ assert.deepEqual(JSON.parse(f.store.one('SELECT channel_binding_history_json FROM entities WHERE id=?','new-employee').channel_binding_history_json),{feishu:true,dingtalk:true,wecom:true});
 });
 
-test('first channel default marker rolls back with policy transaction failure',async t=>{
+test('first channel binding history rolls back with policy transaction failure',async t=>{
  const f=setup(t);
  new SqliteEntityRepository(f.store).insert({id:'new-employee',workspaceId:'w',name:'New employee',ownerMemberId:'m',createdByMemberId:'m',ownWebUse:true,webUseUserId:'u',interactionRuntime:'builtin',description:'',executionThinkingLevel:'medium'});
  f.store.db.exec("CREATE TRIGGER reject_new_policy BEFORE INSERT ON entity_directory_policies BEGIN SELECT RAISE(ABORT,'fixture policy failure'); END");
  await assert.rejects(ready(f,'feishu','new-employee','rollback-app'),code('channel_connection_conflict'));
  assert.equal(f.repository.byProvider('w','new-employee','feishu'),undefined);
- assert.equal(JSON.parse(f.store.one('SELECT initial_channel_defaults_json FROM entities WHERE id=?','new-employee').initial_channel_defaults_json).feishu,'denylist');
+ assert.equal(JSON.parse(f.store.one('SELECT channel_binding_history_json FROM entities WHERE id=?','new-employee').channel_binding_history_json).feishu,undefined);
  f.store.db.exec('DROP TRIGGER reject_new_policy');
  const c=await ready(f,'feishu','new-employee','rollback-app');
  assert.equal(f.capabilities.getDirectoryAccess('w','new-employee').channelPolicies.find(p=>p.sourceId===c.sourceId).mode,'denylist');
 });
+
+ test('older employee gets first-channel defaults and history survives policy-preserving revalidation and unbind',async t=>{
+ const f=setup(t);f.store.run("UPDATE entities SET channel_binding_history_json='{}' WHERE id='e'");
+ const wecom=await ready(f,'wecom','e','older-wecom');
+ assert.deepEqual(JSON.parse(f.store.one("SELECT channel_binding_history_json FROM entities WHERE id='e'").channel_binding_history_json),{wecom:true});
+ const feishu=await ready(f,'feishu','e','older-feishu');
+ assert.equal(f.capabilities.getDirectoryAccess('w','e').channelPolicies.find(p=>p.sourceId===feishu.sourceId).mode,'denylist');
+ // A pre-versioning existing connection has no history. Unbinding must still remember it.
+ f.store.run("UPDATE entities SET channel_binding_history_json='{}' WHERE id='e'");
+ f.service.unbind('w','e','wecom','u',{expectedRevision:wecom.revision});
+ const rebound=await ready(f,'wecom','e','older-wecom');
+ assert.equal(f.capabilities.getDirectoryAccess('w','e').channelPolicies.find(p=>p.sourceId===rebound.sourceId).mode,'allowlist');
+ });
+
+ test('existing bindings without history retain explicit allowlists when revalidated',async t=>{
+ for(const provider of ['feishu','dingtalk','wecom']){
+ const f=setup(t),c=await ready(f,provider,'e',provider+'-existing');
+ const policy=f.capabilities.getDirectoryAccess('w','e');
+ assert.equal(policy.channelPolicies.find(p=>p.sourceId===c.sourceId).mode,'allowlist');
+ f.store.run("UPDATE entities SET channel_binding_history_json='{}' WHERE id='e'");
+ await f.service.revalidate('w','e',provider,'u',c.revision);
+ assert.deepEqual(f.capabilities.getDirectoryAccess('w','e'),policy);
+ assert.equal(JSON.parse(f.store.one("SELECT channel_binding_history_json FROM entities WHERE id='e'").channel_binding_history_json)[provider],true);
+ }
+ });

@@ -13,7 +13,7 @@ const origin='http://127.0.0.1:15173';
 function fixture(t){const root=mkdtempSync(join(tmpdir(),'identale-platform-defaults-upgrade-'));t.after(()=>rmSync(root,{recursive:true,force:true}));return join(root,'platform.sqlite');}
 function server(databasePath){return createPlatformServer({databasePath,origin,configurationToken:'synthetic-configuration-token-'.repeat(3),runtimeService:{url:'http://127.0.0.1:29999',token:'synthetic-runtime-token-'.repeat(3)},directorySync:{automatic:false}});}
 function call(app,method,url,payload,cookie){return app.inject({method,url,headers:{origin,...(cookie?{cookie}:{})},...(payload===undefined?{}:{payload})});}
-const defaults={feishu:'denylist',dingtalk:'denylist',wecom:'denylist'};
+const defaults={};
 
 test('existing split platform upgrades missing entity defaults before real API creation without changing old permissions',async t=>{
  const root=mkdtempSync(join(tmpdir(),'identale-platform-defaults-upgrade-')),path=join(root,'platform.sqlite');let app=server(path);
@@ -26,7 +26,7 @@ test('existing split platform upgrades missing entity defaults before real API c
  let raw=new DatabaseSync(path);
  raw.prepare('INSERT OR REPLACE INTO entity_directory_policies(entity_id,workspace_id,revision,allow_json,deny_json) VALUES(?,?,?,?,?)').run(oldId,workspaceId,7,'[]','[]');
  const oldPolicy=raw.prepare('SELECT * FROM entity_directory_policies WHERE entity_id=?').get(oldId),oldEntities=raw.prepare('SELECT count(*) AS n FROM entities').get().n;
- raw.exec('DROP TABLE platform_schema_migrations; ALTER TABLE entities DROP COLUMN initial_channel_defaults_json');raw.close();
+ raw.exec('DROP TABLE platform_schema_migrations; ALTER TABLE entities DROP COLUMN channel_binding_history_json; ALTER TABLE entities DROP COLUMN initial_channel_defaults_json');raw.close();
  app=server(path);await app.ready();
  const result=await call(app,'POST',`/api/workspaces/${workspaceId}/entities`,{name:'New employee after upgrade',ownWebUse:true},cookie);assert.equal(result.statusCode,200,result.body);
  raw=new DatabaseSync(path,{readOnly:true});
@@ -62,6 +62,6 @@ test('fresh split platform and runtime projection contain the same safe entity d
  const path=fixture(t);
  for(const role of ['platform','runtime']){
   const store=new Store(path+'-'+role,{role});
-  try{const columns=store.all(`PRAGMA ${role==='platform'?'main':'temp'}.table_info(entities)`),column=columns.find(c=>c.name==='initial_channel_defaults_json');assert.equal(column?.dflt_value,"'{}'");assert.equal(column?.notnull,1);}finally{store.close();}
+  try{const columns=store.all(`PRAGMA ${role==='platform'?'main':'temp'}.table_info(entities)`),column=columns.find(c=>c.name==='channel_binding_history_json');assert.equal(column?.dflt_value,"'{}'");assert.equal(column?.notnull,1);}finally{store.close();}
  }
 });

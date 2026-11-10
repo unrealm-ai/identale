@@ -48,7 +48,7 @@ async function mount(t, name, initial, handler = async () => { throw new Error('
     return new Response(JSON.stringify(result?.data ?? result), { status: typeof result?.status === 'number' ? result.status : 200, headers: { 'content-type': 'application/json' } });
   };
   document.body.innerHTML = '<div id="app"></div>';
-  const app = createApp({ render: () => h(components[name], props) }); app.mount('#app'); await flush();if(name==='settings'&&initial.canManage){await until(()=>!!document.querySelector('.connection-list'));const b=[...document.querySelectorAll('.connection-list button')].find(b=>b.textContent.trim()==='查看此连接')??[...document.querySelectorAll('.connection-list button')].find(b=>b.textContent.trim()==='添加渠道连接');if(b){b.click();await flush();}const manual=[...document.querySelectorAll('button')].find(b=>b.textContent.trim()==='手动接入');if(manual){manual.click();await flush();}const details=document.querySelector('.channel-guide-toggle');if(details)details.open=true;}if(name==='wizard'){const b=[...document.querySelectorAll('button')].find(b=>b.textContent.trim()==='展开渠道、工作能力与自动运行配置');if(b){b.click();await flush();}} if(name==='settings'&&document.querySelector('.channel-guide-dots button[data-step=validate]'))await channelCard('validate');
+  const app = createApp({ render: () => h(components[name], props) }); app.mount('#app'); await flush();if(name==='settings'&&initial.canManage){await until(()=>!!document.querySelector('.connection-list'));const b=[...document.querySelectorAll('.connection-list button')].find(b=>b.textContent.trim()==='查看此连接')??[...document.querySelectorAll('.connection-list button')].find(b=>b.textContent.trim()==='添加渠道连接');if(b){b.click();await flush();}const manual=[...document.querySelectorAll('button')].find(b=>b.textContent.trim()==='绑定已有应用');if(manual){manual.click();await flush();}const details=document.querySelector('.channel-guide-toggle');if(details)details.open=true;}if(name==='wizard'){const b=[...document.querySelectorAll('button')].find(b=>b.textContent.trim()==='展开渠道、工作能力与自动运行配置');if(b){b.click();await flush();}} if(name==='settings'&&document.querySelector('.channel-guide-dots button[data-step=validate]'))await channelCard('validate');
   t.after(() => { app.unmount(); document.body.innerHTML = ''; });
   return { props, requests, app, events };
 }
@@ -188,7 +188,7 @@ test('explicit unbind asks confirmation and releases the current CAS binding bef
   assert.equal(env.requests.some(r => r.method === 'DELETE'), false);
   await click('解除渠道绑定'); await click('确认解除绑定'); await until(() => text().includes('渠道绑定已解除'));
   assert.deepEqual(env.requests.find(r => r.method === 'DELETE').body, { expectedRevision: 1 });
-  await click('手动接入'); input('渠道应用 ID', 'replacement-app'); input('渠道应用密钥', 'replacement-fixture-secret'); await click('验证并保存渠道连接');
+  await click('绑定已有应用'); input('渠道应用 ID', 'replacement-app'); input('渠道应用密钥', 'replacement-fixture-secret'); await click('验证并保存渠道连接');
   await until(() => env.requests.some(r => r.method === 'PUT')); assert.equal(env.requests.find(r => r.method === 'PUT').body.expectedRevision, 0);
 });
 
@@ -324,7 +324,7 @@ test('DingTalk submits only supported credentials and switching back clears secr
   input('渠道应用 ID', 'ding-fixture'); input('渠道应用密钥', 'ding-fixture-secret'); await click('验证并保存渠道连接');
   const saved = env.requests.find(item => item.method === 'PUT'); assert.ok(saved.url.endsWith('/dingtalk')); assert.deepEqual(saved.body, { appId: 'ding-fixture', appSecret: 'ding-fixture-secret', expectedRevision: 0, replaceSource: false });
   input('渠道应用密钥', 'unsent-ding-secret');
-  await providerTab('飞书');await click('放弃策略修改并切换');await click('手动接入');
+  await providerTab('飞书');await click('放弃策略修改并切换');await click('绑定已有应用');
   assert.equal(document.querySelector('input[aria-label="渠道应用密钥"]').value, '');
   assert.equal(document.querySelector('input[aria-label="回调加密密钥"]'), null); assert.equal(document.querySelector('input[aria-label="回调校验 Token"]'), null);
 });
@@ -387,7 +387,7 @@ test('WeCom member reads separate statuses without directory-management endpoint
 
 test('WeCom saves BotID and robot Secret independently of directory secrets', async t => {
   const env = await mount(t, 'settings', { base, canManage: true }, async request => request.method === 'GET' ? [] : {});
-  await providerTab('企业微信');
+  await providerTab('企业微信'); await click('绑定已有应用');
   assert.equal(document.querySelector('.wecom-directory-binding'),null);
   input('渠道应用 ID', 'fixture-independent-bot'); input('渠道应用密钥', 'synthetic-bot-secret'); await click('验证并保存渠道连接');
   const write = env.requests.find(item => item.method === 'PUT');

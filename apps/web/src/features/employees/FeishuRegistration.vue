@@ -97,7 +97,7 @@ onUnmounted(() => { document.removeEventListener('visibilitychange', visibility)
 </script>
 <template>
   <section class="feishu-registration form-section" aria-label="飞书自动创建应用">
-    <header class="form-section-heading registration-heading"><div><h3>自动创建飞书机器人</h3><p class="field-note">用飞书扫码确认，自动完成应用创建与连接检查。</p></div><NButton v-if="showManualSwitch" size="small" quaternary :disabled="manualSwitchDisabled || modeSwitchLocked" @click="requestManual">手动接入</NButton><NTag v-else size="small">自动接入</NTag></header>
+    <header class="form-section-heading registration-heading"><div><h3>自动创建飞书机器人</h3><p class="field-note">用飞书扫码确认，自动完成应用创建与连接检查。</p></div><NButton v-if="showManualSwitch" size="small" quaternary :disabled="manualSwitchDisabled || modeSwitchLocked" @click="requestManual">绑定已有应用</NButton><NTag v-else size="small">自动接入</NTag></header>
     <NAlert v-if="boundAppId && !matching" type="info">已绑定飞书应用。如需换绑，请使用下方手动配置并明确确认；此处不会创建新应用覆盖现有连接。</NAlert>
     <template v-else>
       <div v-if="data" class="registration-preview"><strong>{{ data.preset.name }}</strong><p v-if="data.preset.description" class="registration-description">{{ data.preset.description }}</p></div>

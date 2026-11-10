@@ -228,11 +228,11 @@ test('new employee Feishu draft commits listening on without claiming ordinary-m
  assert.equal(connections.length,1);assert.equal(connections[0].context.groupListenEnabled,true);assert.notEqual(connections[0].groupListeningStatus.permission,'granted');
 });
 
-test('wizard first channel is all users and consumes only its provider default',async t=>{
+test('wizard first channel is all users and records only its provider binding',async t=>{
  const f=await setup(t),draft=await f.draft(),created=expect(await f.call('POST',`${f.base}/employee-creations`,f.body({channelDraftId:draft.draftId,directoryAccess:{allow:[],deny:[],allowGroupMembers:true}}),f.owner.cookie),200).entity;
  const row=f.db.prepare('SELECT channel_policies_json FROM entity_directory_policies WHERE entity_id=?').get(created.id);
  const [policy]=JSON.parse(row.channel_policies_json);
  assert.equal(policy.mode,'denylist');assert.deepEqual(policy.deny,[]);assert.equal(policy.allowGroupMembers,true);
- const defaults=JSON.parse(f.db.prepare('SELECT initial_channel_defaults_json FROM entities WHERE id=?').get(created.id).initial_channel_defaults_json);
- assert.equal(defaults.feishu,undefined);assert.equal(defaults.dingtalk,'denylist');assert.equal(defaults.wecom,'denylist');
+ const defaults=JSON.parse(f.db.prepare('SELECT channel_binding_history_json FROM entities WHERE id=?').get(created.id).channel_binding_history_json);
+ assert.deepEqual(defaults,{feishu:true});
 });

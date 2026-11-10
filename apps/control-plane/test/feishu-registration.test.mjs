@@ -725,8 +725,9 @@ for (const change of ['disabled', 'pending-verification', 'directory-unavailable
       f.channels.settings('w', 'e', 'feishu', 'u', {enabled: false, expectedRevision: saved.revision});
       assert.equal(f.connection().enabled, false);
     } else if (change === 'directory-unavailable') {
-      f.options.adapterFactory = provider => ({provider, capabilities: {}, getAuthorizedScope: async () => { throw new DirectoryError('authorization_denied'); }});
-      await assert.rejects(f.channels.discovery('w', 'e', 'feishu', {kind: 'departments'}), code('authorization_denied'));
+      // Discovery now reads local snapshots; simulate the persisted permission-loss
+      // result rather than relying on a page search to issue a remote request.
+      assert.equal(f.repository.save({...saved,directoryStatus:'unavailable',lastError:'authorization_denied',revision:saved.revision+1},saved),true);
       assert.equal(f.connection().directoryStatus, 'unavailable');
     } else {
       f.state.verify = appId => {

@@ -20,7 +20,7 @@ function credential(value: unknown, limit: number): value is string {
   return typeof value === 'string' && value.length > 0 && value.length <= limit && value.trim() === value && !/[\u0000-\u001f\u007f]/u.test(value);
 }
 
-/** No network request or persistence: credentials go only to the current unsaved form. */
+/** No network request or persistence: credentials go only to the current onboarding consumer. */
 export function beginWeComRegistration(options: Options): { cancel: () => void } {
   const { host, onStatus, onCredentials } = options;
   const timeoutMs = options.timeoutMs ?? WECOM_REGISTRATION_TIMEOUT_MS;
