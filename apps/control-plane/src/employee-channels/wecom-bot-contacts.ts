@@ -1,3 +1,4 @@
+import {identityStore,identityLookup,identityScope,attachIdentityBindings} from './wecom-identity-bindings.js';
 import {DirectoryError} from '@dentity/application';
 import type {DirectoryAccessRule,DirectoryMemberSearch} from '@dentity/application';
 import type {Store} from '../store.js';
@@ -9,21 +10,21 @@ export function usesWeComBotSearch(r:EmployeeChannelRecord):boolean {
 }
 export function weComVerifiedUserIds(r:EmployeeChannelRecord):string[] {
   if(!usesWeComBotSearch(r)||r.wecomContactIdentityRevision!==r.authRevision)return [];
-  return [...new Set([...(r.wecomVerifiedContactIds??[]),...(r.wecomContactMappings??[]).map(m=>m.userId)])];
+  return identityStore(r)?.all<{user_id:string}>('SELECT user_id FROM wecom_identity_bindings WHERE connection_id=? AND source_id=? AND auth_revision=? ORDER BY user_id',...identityScope(r)).map(x=>x.user_id)??[];
 }
 export function weComCallbackUserId(r:EmployeeChannelRecord,userId:string):string|undefined {
   if(!usesWeComBotSearch(r)||r.wecomContactIdentityRevision!==r.authRevision)return;
-  const ids=[...new Set([...(r.wecomVerifiedContactIds?.includes(userId)?[userId]:[]),...(r.wecomContactMappings??[]).filter(m=>m.userId===userId).map(m=>m.callbackUserId)])];
-  return ids.length===1?ids[0]:undefined;
+  return identityLookup(r,'user_id',userId)?.callback_user_id;
 }
 export function weComSearchUserId(r:EmployeeChannelRecord,callbackUserId:string):string|undefined {
   if(!usesWeComBotSearch(r)||r.wecomContactIdentityRevision!==r.authRevision)return;
-  const ids=[...new Set([...(r.wecomVerifiedContactIds?.includes(callbackUserId)?[callbackUserId]:[]),...(r.wecomContactMappings??[]).filter(m=>m.callbackUserId===callbackUserId).map(m=>m.userId)])];
-  return ids.length===1?ids[0]:undefined;
+  return identityLookup(r,'callback_user_id',callbackUserId)?.user_id;
 }
 export function weComSearchIdentityVerified(r:EmployeeChannelRecord,userId?:string):boolean {
-  return userId===undefined?weComVerifiedUserIds(r).length>0:weComCallbackUserId(r,userId)!==undefined;
+  if(!usesWeComBotSearch(r)||r.wecomContactIdentityRevision!==r.authRevision)return false;
+  return userId===undefined?!!identityStore(r)?.one('SELECT 1 FROM wecom_identity_bindings WHERE connection_id=? AND source_id=? AND auth_revision=? LIMIT 1',...identityScope(r)):weComCallbackUserId(r,userId)!==undefined;
 }
+
 interface Contact {
   user_id:string;
   display_name:string;
@@ -34,6 +35,7 @@ const selectionLifetime=10*60_000;
 
 /** Current referenced member profiles plus a bounded, short-lived search cache.
  * Retaining a profile neither proves an identity nor grants channel access. */
+const boundContactSql='EXISTS (SELECT 1 FROM wecom_identity_bindings b WHERE b.connection_id=wecom_bot_contacts.connection_id AND b.source_id=wecom_bot_contacts.source_id AND b.auth_revision=wecom_bot_contacts.auth_revision AND b.user_id=wecom_bot_contacts.user_id)';
 export class WeComBotContacts {
   constructor(private readonly store:Store,private readonly now:()=>number) {
     store.db.exec(`CREATE TABLE IF NOT EXISTS wecom_bot_contacts (
@@ -47,15 +49,14 @@ export class WeComBotContacts {
     const row=this.store.one<{record_json:string}>(`SELECT record_json FROM employee_channel_connections
       WHERE id=? AND workspace_id=? AND entity_id=? AND provider=? AND app_id=?`,r.id,r.workspaceId,r.entityId,r.provider,r.appId);
     const current=row?JSON.parse(row.record_json) as EmployeeChannelRecord:undefined;
+    if(current){delete current.wecomVerifiedContactIds;delete current.wecomContactMappings;attachIdentityBindings(this.store,current);}
     return current&&usesWeComBotSearch(current)&&current.sourceId===r.sourceId&&current.authRevision===r.authRevision&&
       current.botId===r.botId&&current.identity.tenantId===r.identity.tenantId&&current.eventTenantId===r.eventTenantId?current:undefined;
   }
   /** Derive retention from current configuration, never from historical searches.
    * Removed references return to the 500-entry cache on the next search. */
   private retainedIds(r:EmployeeChannelRecord):string[] {
-    const ids=new Set(weComVerifiedUserIds(r).filter(id=>{
-      const callback=weComCallbackUserId(r,id);return callback!==undefined&&weComSearchUserId(r,callback)===id;
-    }));
+    const ids=new Set<string>();
     for(const challenge of r.wecomMemberChallenges??[])if(challenge.authRevision===r.authRevision&&challenge.status==='pending'&&challenge.expiresAt>this.now())ids.add(challenge.userId);
     const addRules=(rules:readonly DirectoryAccessRule[])=>{for(const rule of rules){
       if(rule.sourceId!==r.sourceId||rule.kind!=='channel_user')continue;
@@ -99,12 +100,13 @@ export class WeComBotContacts {
   retained(r:EmployeeChannelRecord):Contact[] {
     const current=this.current(r);if(!current)return [];
     return this.store.all<Contact>(`SELECT user_id,display_name,department_paths,found_at FROM wecom_bot_contacts
-      WHERE connection_id=? AND source_id=? AND auth_revision=? AND user_id IN (SELECT value FROM json_each(?)) ORDER BY found_at DESC,user_id`,
+      WHERE connection_id=? AND source_id=? AND auth_revision=? AND (user_id IN (SELECT value FROM json_each(?)) OR ${boundContactSql}) ORDER BY found_at DESC,user_id`,
       r.id,r.sourceId,r.authRevision,JSON.stringify(this.retainedIds(current)));
   }
   selectable(r:EmployeeChannelRecord,userId:string):boolean {
-    const contact=this.get(r,userId);
-    return !!contact&&contact.found_at>=this.now()-selectionLifetime;
+    const current=this.current(r);if(!current)return false;
+    const contact=this.get(current,userId);
+    return !!contact&&(contact.found_at>=this.now()-selectionLifetime||weComCallbackUserId(current,userId)!==undefined||this.retainedIds(current).includes(userId));
   }
   remember(r:EmployeeChannelRecord,members:Awaited<ReturnType<DirectoryMemberSearch['search']>>['members']){
     this.store.transaction(()=>{
@@ -116,16 +118,31 @@ export class WeComBotContacts {
         member.id,member.displayName,JSON.stringify(member.departmentPaths),this.now());
       this.store.run(`DELETE FROM wecom_bot_contacts WHERE connection_id=? AND source_id=? AND auth_revision=? AND user_id IN
         (SELECT user_id FROM wecom_bot_contacts WHERE connection_id=? AND source_id=? AND auth_revision=?
-         AND user_id NOT IN (SELECT value FROM json_each(?)) ORDER BY found_at DESC,user_id LIMIT -1 OFFSET 500)`,
+         AND user_id NOT IN (SELECT value FROM json_each(?)) AND NOT ${boundContactSql} ORDER BY found_at DESC,user_id LIMIT -1 OFFSET 500)`,
         r.id,r.sourceId,r.authRevision,r.id,r.sourceId,r.authRevision,JSON.stringify(this.retainedIds(current)));
     });
   }
-  async verifyRecipient(r:EmployeeChannelRecord,userId:string,adapter:DirectoryMemberSearch){
-    const current=this.current(r),searchId=current?weComSearchUserId(current,userId):undefined,candidate=searchId?this.get(r,searchId):undefined;
-    if(!searchId||!candidate||weComCallbackUserId(current!,searchId)!==userId)throw new DirectoryError('authorization_denied');
-    const result=await adapter.search([candidate.display_name]);
-    const latest=this.current(r);
-    if(!latest||weComSearchUserId(latest,userId)!==searchId||weComCallbackUserId(latest,searchId)!==userId||!result.members.some(member=>member.id===searchId))throw new DirectoryError('authorization_denied');
+  /** Local binding facts are independent of the short-lived name search cache.
+   * Delivery may still be rejected by the provider; this guard grants no use right. */
+  async verifyRecipient(r:EmployeeChannelRecord,userId:string,_adapter?:DirectoryMemberSearch){
+    const current=this.current(r),searchId=current?weComSearchUserId(current,userId):undefined;
+    if(!current?.enabled||current.status!=='verified'||!searchId||weComCallbackUserId(current,searchId)!==userId)
+      throw new DirectoryError('authorization_denied');
+  }
+  /** Page locally known candidates; never claim this is the entire organization. */
+  knownPage(r:EmployeeChannelRecord,input:{keywords?:readonly string[];after?:string;limit?:number}={}){
+    const current=this.current(r);if(!current)return {items:[] as Contact[],exhausted:true};
+    const limit=input.limit??50;
+    if(!Number.isSafeInteger(limit)||limit<1||limit>100||input.after!==undefined&&(typeof input.after!=='string'||input.after.length>256)||
+       input.keywords!==undefined&&(!Array.isArray(input.keywords)||input.keywords.length>10)||input.keywords?.some(k=>typeof k!=='string'||k.length>64))throw new DirectoryError('invalid_response');
+    const keywords=(input.keywords??[]).map(k=>k.trim().toLowerCase()).filter(Boolean);
+    const where=keywords.length?' AND ('+keywords.map(()=>'(instr(lower(display_name),?)>0 OR instr(lower(user_id),?)>0 OR instr(lower(department_paths),?)>0)').join(' OR ')+')':'';
+    const rows=this.store.all<Contact>(`SELECT user_id,display_name,department_paths,found_at FROM wecom_bot_contacts
+      WHERE connection_id=? AND source_id=? AND auth_revision=?
+      AND (found_at>=? OR user_id IN (SELECT value FROM json_each(?)) OR ${boundContactSql}) AND user_id>?${where}
+      ORDER BY user_id LIMIT ?`,r.id,r.sourceId,r.authRevision,this.now()-selectionLifetime,
+      JSON.stringify(this.retainedIds(current)),input.after??'',...keywords.flatMap(k=>[k,k,k]),limit+1);
+    const items=rows.slice(0,limit);return {items,exhausted:rows.length<=limit,...(rows.length>limit?{nextAfter:items.at(-1)!.user_id}:{})};
   }
   remove(connectionId:string){
     this.store.run('DELETE FROM wecom_bot_contacts WHERE connection_id=?',connectionId);

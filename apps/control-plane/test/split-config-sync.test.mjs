@@ -165,3 +165,14 @@ test('deployment-approved resources travel as safe metadata and participate in r
   const invalid = await f.app.inject({ url: '/internal/config/snapshot', headers: auth });
   assert.equal(invalid.statusCode, 503); assert.equal(invalid.body.includes('MUST_NOT_EXPORT'), false);
 });
+
+test('independent WeCom identity bindings project to runtime memory and refresh with channel revision',async t=>{
+ const f=await fixture(t);f.platform.run('INSERT INTO wecom_identity_bindings VALUES(?,?,?,?,?,?)','synthetic-wecom','source-A',1,'directory-user','callback-user',null);
+ const poller=new ConfigurationPoller({store:f.runtime,baseUrl:'http://127.0.0.1:9999',token,fetch:f.fetch,now:f.clock});
+ assert.equal(await poller.poll(),true,JSON.stringify(poller.status));
+ assert.equal(f.runtime.one('SELECT callback_user_id FROM wecom_identity_bindings WHERE connection_id=?','synthetic-wecom').callback_user_id,'callback-user');
+ assert.equal(f.runtime.one("SELECT name FROM main.sqlite_master WHERE name='wecom_identity_bindings'"),undefined,'bindings remain configuration projection, not runtime durable database');
+ f.platform.run('DELETE FROM wecom_identity_bindings WHERE connection_id=?','synthetic-wecom');
+ assert.equal(await poller.poll(),true);
+ assert.equal(f.runtime.one('SELECT user_id FROM wecom_identity_bindings WHERE connection_id=?','synthetic-wecom'),undefined,'withdrawn identity disappears on next coherent projection');
+});

@@ -1,5 +1,7 @@
+import {withIdentityDelta} from './wecom-identity-bindings.js';
+import {identityLookup} from './wecom-identity-bindings.js';
 import {initializeChannelSourceAccess,resetChannelSourceAccess} from '../capability-config.js';
-import type {DirectorySyncSource,DirectorySnapshotReader} from '../directory-sync/service.js';
+import {DirectorySyncApiError,type DirectorySyncSource,type DirectorySnapshotReader} from '../directory-sync/service.js';
 import {randomUUID,createHash} from 'node:crypto';
 import {diagnosticFailure} from '@dentity/application';
 import {DirectoryError,type DirectoryAccessRule,type DirectoryProvider,type DirectoryPort,type DirectoryPerson,type DirectoryDepartment,type ChannelActor,type ChannelSpeakerProfile,type ChannelAccessScope,type ChannelConnection,type ChannelIngressStatus,type SendChannelMessage,type ChannelSendReceipt,type TaskScope} from '@dentity/application';
@@ -16,7 +18,7 @@ import {resolveChannelConfigurationCapabilities} from './capabilities.js';
 import type {ChannelIngressCandidate} from '../adapters/channels/ingress/normalize.js';
 import {WeComMemberVerification,WeComMemberVerificationError} from './wecom-member-verification.js';
 import {WeComBotMemberSearch} from '../adapters/directory/wecom-bot-search.js';
-import {WeComBotContacts,usesWeComBotSearch,weComSearchIdentityVerified,weComCallbackUserId,weComSearchUserId,weComVerifiedUserIds} from './wecom-bot-contacts.js';
+import {WeComBotContacts,usesWeComBotSearch,weComSearchIdentityVerified,weComCallbackUserId,weComSearchUserId} from './wecom-bot-contacts.js';
 export class EmployeeChannelError extends Error {constructor(readonly status:number,readonly code:string,readonly validation?:ChannelValidation){super(code);}get statusCode(){return this.status;}}
 const fail=(status:number,code:string):never=>{throw new EmployeeChannelError(status,code);};
 const safe=(e:unknown)=>e instanceof DirectoryError?e.code:'channel_connection_unavailable';
@@ -42,7 +44,7 @@ export class EmployeeChannelService {
  readonly memberVerification:WeComMemberVerification;
  private memberVerificationPersistence:((r:EmployeeChannelRecord,requestId:string,callbackUserId:string)=>Promise<boolean>)|undefined;
  setMemberVerificationPersistence(check:(r:EmployeeChannelRecord,requestId:string,callbackUserId:string)=>Promise<boolean>){this.memberVerificationPersistence=check;}
- async memberVerificationPersisted(id:string,callbackUserId:string){const r=this.repository.byId(id),mapping=r?.wecomContactMappings?.find(m=>m.callbackUserId===callbackUserId);if(!r||!mapping)return false;if(!this.memberVerificationPersistence)return true;let timer:ReturnType<typeof setTimeout>|undefined;try{return await Promise.race([this.memberVerificationPersistence(r,mapping.requestId,callbackUserId),new Promise<boolean>(resolve=>{timer=setTimeout(()=>resolve(false),2000);})]);}finally{if(timer)clearTimeout(timer);}}
+ async memberVerificationPersisted(id:string,callbackUserId:string){const r=this.repository.byId(id),mapping=r?JSON.parse(identityLookup(r,'callback_user_id',callbackUserId)?.mapping_json??'null'):undefined;if(!r||!mapping)return false;if(!this.memberVerificationPersistence)return true;let timer:ReturnType<typeof setTimeout>|undefined;try{return await Promise.race([this.memberVerificationPersistence(r,mapping.requestId,callbackUserId),new Promise<boolean>(resolve=>{timer=setTimeout(()=>resolve(false),2000);})]);}finally{if(timer)clearTimeout(timer);}}
  private memberVerificationReceiver:((r:EmployeeChannelRecord,requestId:string)=>Promise<boolean>)|undefined;
  setMemberVerificationReceiver(check:(r:EmployeeChannelRecord,requestId:string)=>Promise<boolean>){this.memberVerificationReceiver=check;}
  memberVerificationReady(id:string,sourceId:string,authRevision:number,requestId:string,stateVersion:number){const r=this.repository.byId(id);return !!r&&r.sourceId===sourceId&&r.authRevision===authRevision&&r.stateVersion>=stateVersion&&this.memberVerification.ready(r,requestId)&&this.transportStatus?.(id).state==='connected';}
@@ -50,7 +52,6 @@ export class EmployeeChannelService {
  private sessionSender:((connectionId:string,request:SendChannelMessage)=>Promise<ChannelSendReceipt>)|undefined;
  setSessionSender(sender:(connectionId:string,request:SendChannelMessage)=>Promise<ChannelSendReceipt>){this.sessionSender=sender;}
  private readonly vault:DirectoryCredentialVault;
- private readonly cursors=new DirectoryCursors();
  private readonly now:()=>number;
  private readonly active=new Map<string,{version:string;directory:DirectoryPort;transport:EmployeeApplicationTransport|undefined}>();
  private readonly speakerUsers=new Map<string,{expiresAt:number;user:DirectoryPerson}>();
@@ -84,19 +85,20 @@ export class EmployeeChannelService {
  private accessCheck:((scope:ChannelAccessScope,connection:ChannelConnection,kind:'private'|'group'|'meeting')=>Promise<boolean>)|undefined;
  constructor(readonly repository:EmployeeChannelRepository,private readonly options:EmployeeChannelOptions={}){this.vault=new DirectoryCredentialVault(options.masterKey);this.now=options.now??Date.now;this.botContacts=new WeComBotContacts(repository.store,this.now);this.memberVerification=new WeComMemberVerification(repository,this.now,{secret:r=>this.secret(r).appSecret,vault:this.vault,...(options.masterKey?{collisionKey:options.masterKey}:{})});}
  setAccessCheck(fn:NonNullable<EmployeeChannelService['accessCheck']>){this.accessCheck=fn;}
+ private readonly memberCursors=new DirectoryCursors();
  private snapshots:DirectorySnapshotReader|undefined;
  setDirectorySnapshots(value:DirectorySnapshotReader){this.snapshots=value;}
- private directoryRules(r:EmployeeChannelRecord):DirectoryAccessRule[]{const policy=this.repository.store.one<{allow_json:string;deny_json:string;channel_policies_json:string}>('SELECT allow_json,deny_json,channel_policies_json FROM entity_directory_policies WHERE workspace_id=? AND entity_id=?',r.workspaceId,r.entityId),rules:DirectoryAccessRule[]=[...JSON.parse(policy?.allow_json??'[]'),...JSON.parse(policy?.deny_json??'[]'),...(JSON.parse(policy?.channel_policies_json??'[]') as {allow:DirectoryAccessRule[];deny:DirectoryAccessRule[]}[]).flatMap(p=>[...p.allow,...p.deny])];for(const row of this.repository.store.all<{config_json:string}>('SELECT config_json FROM capability_packages WHERE workspace_id=? AND entity_id=?',r.workspaceId,r.entityId)){const p=JSON.parse(row.config_json) as{enabled:boolean;directoryAccess?:{allow:DirectoryAccessRule[];deny:DirectoryAccessRule[];channelPolicies?:{allow:DirectoryAccessRule[];deny:DirectoryAccessRule[]}[]}};if(p.enabled&&p.directoryAccess)rules.push(...p.directoryAccess.allow,...p.directoryAccess.deny,...(p.directoryAccess.channelPolicies??[]).flatMap(policy=>[...policy.allow,...policy.deny]));}return rules.filter(rule=>rule.sourceId===r.sourceId);}
+ private directoryRules(r:EmployeeChannelRecord):DirectoryAccessRule[]{const policy=this.repository.store.one("SELECT name FROM sqlite_master WHERE name='entity_directory_policies'")?this.repository.store.one<{allow_json:string;deny_json:string;channel_policies_json:string}>('SELECT allow_json,deny_json,channel_policies_json FROM entity_directory_policies WHERE workspace_id=? AND entity_id=?',r.workspaceId,r.entityId):undefined,rules:DirectoryAccessRule[]=[...JSON.parse(policy?.allow_json??'[]'),...JSON.parse(policy?.deny_json??'[]'),...(JSON.parse(policy?.channel_policies_json??'[]') as {allow:DirectoryAccessRule[];deny:DirectoryAccessRule[]}[]).flatMap(p=>[...p.allow,...p.deny])];for(const row of this.repository.store.one("SELECT name FROM sqlite_master WHERE name='capability_packages'")?this.repository.store.all<{config_json:string}>('SELECT config_json FROM capability_packages WHERE workspace_id=? AND entity_id=?',r.workspaceId,r.entityId):[]){const p=JSON.parse(row.config_json) as{enabled:boolean;directoryAccess?:{allow:DirectoryAccessRule[];deny:DirectoryAccessRule[];channelPolicies?:{allow:DirectoryAccessRule[];deny:DirectoryAccessRule[]}[]}};if(p.enabled&&p.directoryAccess)rules.push(...p.directoryAccess.allow,...p.directoryAccess.deny,...(p.directoryAccess.channelPolicies??[]).flatMap(policy=>[...policy.allow,...policy.deny]));}return rules.filter(rule=>rule.sourceId===r.sourceId);}
  directorySources():DirectorySyncSource[]{return this.repository.store.all<{record_json:string;name:string}>('SELECT c.record_json,e.name FROM employee_channel_connections c JOIN entities e ON e.id=c.entity_id AND e.workspace_id=c.workspace_id').flatMap(({record_json,name})=>{const r=JSON.parse(record_json)as EmployeeChannelRecord;return r.provider==='wecom'?[]:[this.directorySourceFor(r,name)];});}
  directorySource(connectionId:string):DirectorySyncSource|undefined{const r=this.repository.byId(connectionId);if(!r||r.provider==='wecom')return;const entity=this.repository.store.one<{name:string}>('SELECT name FROM entities WHERE workspace_id=? AND id=?',r.workspaceId,r.entityId);return entity?this.directorySourceFor(r,entity.name):undefined;}
- private directorySourceFor(r:EmployeeChannelRecord,name:string):DirectorySyncSource{return{workspaceId:r.workspaceId,entityId:r.entityId,entityName:name,connectionId:r.id,provider:r.provider,appId:r.appId,sourceId:r.sourceId,sourceVersion:JSON.stringify([r.sourceId,r.appId,r.identity.tenantId,r.identity.tenantIdNamespace,r.provider==='dingtalk'?undefined:r.botId]),port:()=>this.clients(r).directory,rules:()=>this.directoryRules(r)};}
+ private directorySourceFor(r:EmployeeChannelRecord,name:string):DirectorySyncSource{return{workspaceId:r.workspaceId,entityId:r.entityId,entityName:name,connectionId:r.id,provider:r.provider,appId:r.appId,sourceId:r.sourceId,credentialRevision:String(r.authRevision),sourceVersion:JSON.stringify([r.sourceId,r.appId,r.identity.tenantId,r.identity.tenantIdNamespace,r.provider==='dingtalk'?undefined:r.botId]),port:()=>this.clients(r).directory,rules:()=>this.directoryRules(r)};}
 
  private entity(w:string,e:string){if(!this.repository.store.one('SELECT id FROM entities WHERE id=? AND workspace_id=?',e,w))fail(404,'entity_not_found');}
  private scope(r:EmployeeChannelRecord){return[r.workspaceId,r.entityId,r.id,r.appId,r.authRevision];}
  private secret(r:EmployeeChannelRecord):EmployeeChannelCredential{return JSON.parse(this.vault.open(r.credential,this.scope(r)));}
  private makeDirectory(p:DirectoryProvider,appId:string,secret:EmployeeChannelCredential){return this.options.adapterFactory?.(p,{appId,appSecret:secret.appSecret})??createDirectoryAdapter(p,{appId,appSecret:secret.appSecret,...(this.options.fetch?{fetch:this.options.fetch}:{}),...(this.options.now?{now:this.options.now}:{})});}
  private clients(r:EmployeeChannelRecord){const version=String(r.revision),old=this.active.get(r.id);if(old?.version===version)return old;if(r.provider==='wecom')throw new DirectoryError('unsupported');const secret=this.secret(r),value={version,directory:this.makeDirectory(r.provider,r.appId,secret),transport:new EmployeeApplicationTransport(r.provider,r.appId,secret,this.options)};this.active.set(r.id,value);return value;}
- dto(r:EmployeeChannelRecord,_includeManagement=false){const legacyDing=r.enabled&&legacyDingtalkIdentity(r);const identity=r.provider==='dingtalk'&&r.inboundVerified&&r.eventTenantId?{tenantId:r.eventTenantId,tenantIdNamespace:'corp_id' as const}:r.identity;return{capabilities:resolveChannelConfigurationCapabilities(legacyDing?{...r,status:'invalid'}:r),id:r.id,sourceId:r.sourceId,entityId:r.entityId,provider:r.provider,appId:r.appId,tenantId:identity.tenantId,tenantIdNamespace:identity.tenantIdNamespace,...(r.provider==='dingtalk'?(r.robotCode?{botId:r.robotCode}:{}):r.botId?{botId:r.botId}:{}),revision:r.revision,authRevision:r.authRevision,status:legacyDing?'invalid' as const:r.status,enabled:r.enabled,identityEvidence:r.identityEvidence??'app_credentials_only',inboundVerified:r.inboundVerified===true,directoryStatus:r.directoryStatus,...(usesWeComBotSearch(r)?{directoryMode:'member_search' as const,memberSearchIdentityVerified:weComSearchIdentityVerified(r),memberSearchVerifiedUserIds:weComVerifiedUserIds(r)}:{}),...(r.validation?{validation:r.validation}:{}),lastError:legacyDing?'channel_identity_revalidation_required':r.lastError,groupListeningStatus:r.provider==='feishu'?{enabled:r.context?.groupListenEnabled===true,permission:groupMessagePermission(r),cachedMessages:this.repository.store.one("SELECT name FROM sqlite_master WHERE name='group_live_messages'")?this.repository.store.one<{n:number}>('SELECT count(*) n FROM group_live_messages WHERE connection_id=?',r.id)!.n:0}:undefined,context:r.context??{historyEnabled:false,meetingRefs:[]},transport:this.transportStatus?.(r.id)??{state:'stopped' as const,changedAt:this.now()}};}
+ dto(r:EmployeeChannelRecord,_includeManagement=false){const legacyDing=r.enabled&&legacyDingtalkIdentity(r);const identity=r.provider==='dingtalk'&&r.inboundVerified&&r.eventTenantId?{tenantId:r.eventTenantId,tenantIdNamespace:'corp_id' as const}:r.identity;return{capabilities:resolveChannelConfigurationCapabilities(legacyDing?{...r,status:'invalid'}:r),id:r.id,sourceId:r.sourceId,entityId:r.entityId,provider:r.provider,appId:r.appId,tenantId:identity.tenantId,tenantIdNamespace:identity.tenantIdNamespace,...(r.provider==='dingtalk'?(r.robotCode?{botId:r.robotCode}:{}):r.botId?{botId:r.botId}:{}),revision:r.revision,authRevision:r.authRevision,status:legacyDing?'invalid' as const:r.status,enabled:r.enabled,identityEvidence:r.identityEvidence??'app_credentials_only',inboundVerified:r.inboundVerified===true,directoryStatus:r.directoryStatus,...(usesWeComBotSearch(r)?{directoryMode:'member_search' as const,memberSearchIdentityVerified:weComSearchIdentityVerified(r),memberSearchVerifiedUserIds:[...new Set(this.directoryRules(r).filter(rule=>rule.kind==='channel_user').map(rule=>rule.subjectId.split(':')[3]).filter((id):id is string=>!!id&&weComSearchIdentityVerified(r,id)))]}:{}),...(r.validation?{validation:r.validation}:{}),lastError:legacyDing?'channel_identity_revalidation_required':r.lastError,groupListeningStatus:r.provider==='feishu'?{enabled:r.context?.groupListenEnabled===true,permission:groupMessagePermission(r),cachedMessages:this.repository.store.one("SELECT name FROM sqlite_master WHERE name='group_live_messages'")?this.repository.store.one<{n:number}>('SELECT count(*) n FROM group_live_messages WHERE connection_id=?',r.id)!.n:0}:undefined,context:r.context??{historyEnabled:false,meetingRefs:[]},transport:this.transportStatus?.(r.id)??{state:'stopped' as const,changedAt:this.now()}};}
 
  list(w:string,e:string,includeCallbackPath=false){this.entity(w,e);return this.repository.list(w,e).map(r=>this.dto(r,includeCallbackPath));}
  subjects(w:string,e:string){return{sources:this.list(w,e),users:[],departments:[]};}
@@ -186,9 +188,7 @@ export class EmployeeChannelService {
   const current=this.repository.byId(id);
   if(!current||current.status!=='verified'||!usesWeComBotSearch(current)||weComSearchIdentityVerified(current,userId)||
      !this.botContacts.selectable(current,userId)||weComSearchUserId(current,userId)!==undefined)return;
-  const verified=current.wecomContactIdentityRevision===current.authRevision?current.wecomVerifiedContactIds??[]:[];
-  if(weComVerifiedUserIds(current).length>=500)return;
-  const next={...current,wecomContactIdentityRevision:current.authRevision,wecomVerifiedContactIds:[...verified,userId]};
+  const next=withIdentityDelta({...current,wecomContactIdentityRevision:current.authRevision},{exact:[userId],maps:[]});
   if(!this.repository.save(next,current))fail(409,'channel_configuration_changed');
  }
  private botSearch(r:EmployeeChannelRecord){
@@ -201,28 +201,19 @@ export class EmployeeChannelService {
   this.botSearchClients.set(r.id,{key,client});
   return client;
  }
- async searchWeComMembers(w:string,e:string,input:unknown){
-  const r=this.require(w,e,'wecom');
-  this.current(r);
+ async searchWeComMembers(w:string,e:string,input:unknown,cursor?:unknown){
+  const r=this.require(w,e,'wecom');this.current(r);
   if(!usesWeComBotSearch(r))fail(400,'channel_member_search_unsupported');
-  if(!Array.isArray(input)||input.length===0||input.length>10||
-     input.some(v=>typeof v!=='string'||!v.trim()||v.length>64||/[\x00-\x1f\x7f]/.test(v)))
-   fail(400,'invalid_member_search_keywords');
-  const keywords=[...new Set((input as string[]).map(k=>k.trim()))];
-  let result;
-  try{result=await this.botSearch(r).search(keywords);}
-  catch(error){
-   if(error instanceof DirectoryRequestError&&error.details.reason==='timeout')throw new EmployeeChannelError(504,'channel_member_search_timeout');
-   throw new EmployeeChannelError(502,safe(error));
+  if(!Array.isArray(input)||input.length>10||input.some(v=>typeof v!=='string'||!v.trim()||v.length>64||/[\x00-\x1f\x7f]/.test(v))||cursor!==undefined&&typeof cursor!=='string')fail(400,'invalid_member_search_keywords');
+  const keywords=[...new Set((input as string[]).map(k=>k.trim()))],cursorScope=JSON.stringify([r.id,r.sourceId,r.authRevision,keywords]);
+  let after:string|undefined;if(cursor){try{after=this.memberCursors.decode(cursorScope,String(cursor));}catch{fail(400,'invalid_directory_cursor');}}
+  let remote: {id:string;displayName:string;departmentPaths:readonly string[]}[]=[],limited=false;
+  if(keywords.length&&!cursor){try{const result=await this.botSearch(r).search(keywords);remote=[...result.members];limited=result.limited;}
+   catch(error){if(error instanceof DirectoryRequestError&&error.details.reason==='timeout')throw new EmployeeChannelError(504,'channel_member_search_timeout');throw new EmployeeChannelError(502,safe(error));}
+   this.repository.store.transaction(()=>{const current=this.current(r);if(current.sourceId!==r.sourceId||current.authRevision!==r.authRevision)fail(409,'channel_configuration_changed');this.botContacts.remember(current,remote);});
   }
-  this.repository.store.transaction(()=>{
-   const current=this.current(r);
-   if(current.sourceId!==r.sourceId||current.authRevision!==r.authRevision)fail(409,'channel_configuration_changed');
-   this.botContacts.remember(current,result.members);
-  });
-  return {sourceId:r.sourceId,provider:r.provider,appId:r.appId,exhausted:true,limited:result.limited,
-   items:result.members.map(member=>({kind:'channel_user' as const,subjectId:channelSubject('channel_user',member.id,'user_id',r.appId),
-    externalId:member.id,displayName:member.displayName,departmentPaths:member.departmentPaths,identityVerified:weComSearchIdentityVerified(this.current(r),member.id)}))};
+  const current=this.current(r),local=this.botContacts.knownPage(current,{keywords,...(after?{after}:{})}),members=[...new Map([...remote,...local.items.map(p=>({id:p.user_id,displayName:p.display_name,departmentPaths:JSON.parse(p.department_paths) as string[]}))].map(p=>[p.id,p])).values()];
+  return{sourceId:r.sourceId,provider:r.provider,appId:r.appId,exhausted:local.exhausted,limited,...(local.nextAfter?{nextCursor:this.memberCursors.encode(cursorScope,local.nextAfter)}:{}),items:members.map(member=>({kind:'channel_user' as const,subjectId:channelSubject('channel_user',member.id,'user_id',r.appId),externalId:member.id,displayName:member.displayName,departmentPaths:member.departmentPaths,identityVerified:weComSearchIdentityVerified(current,member.id)}))};
  }
  memberVerificationStatus(w:string,e:string,input:{userId?:unknown;sourceId?:unknown}){
   const r=this.require(w,e,'wecom');this.current(r);
@@ -240,7 +231,7 @@ export class EmployeeChannelService {
  async assertWeComPrivateRecipient(id:string,userId:string):Promise<void>{
   const r=this.repository.byId(id);
   if(!r||!usesWeComBotSearch(r))return;
-  try{await this.botContacts.verifyRecipient(r,userId,this.botSearch(r));}
+  try{await this.botContacts.verifyRecipient(r,userId);}
   catch(error){throw new EmployeeChannelError(403,safe(error));}
   this.current(r);
  }
@@ -248,20 +239,37 @@ export class EmployeeChannelService {
  private invalidate(r:EmployeeChannelRecord,error:unknown){
   if(error instanceof DirectoryError&&['authentication_failed','authorization_denied'].includes(error.code)){const current=this.repository.byId(r.id);if(current?.revision===r.revision){const next={...current,directoryStatus:'unavailable' as const,lastError:error.code,revision:current.revision+1,...(error.code==='authentication_failed'?{status:'invalid' as const}:{})};this.write(next,current,'system','authorization_invalidated');}}
  }
- async discovery(w:string,e:string,p:DirectoryProvider,input:{kind:string;parentId?:string;cursor?:string}){
-  const r=this.require(w,e,p);this.current(r);if(r.provider==='wecom')fail(400,'channel_directory_unsupported');if(r.directoryStatus!=='available')fail(403,'channel_directory_unavailable');const port=this.clients(r).directory;
+ directoryStatus(w:string,e:string,p:DirectoryProvider){
+  const r=this.require(w,e,p);this.current(r);if(p==='wecom')fail(400,'channel_directory_unsupported');
+  if(!this.snapshots?.status)fail(503,'directory_snapshot_unavailable');
+  try{return this.snapshots!.status!(r.id);}catch(error){if(error instanceof DirectorySyncApiError)throw new EmployeeChannelError(error.status,error.code);throw error;}
+ }
+ directorySync(w:string,e:string,p:DirectoryProvider){
+  const r=this.require(w,e,p);this.current(r);if(p==='wecom')fail(400,'channel_directory_unsupported');
+  if(!this.snapshots?.refresh)fail(503,'directory_snapshot_unavailable');
+  try{return this.snapshots!.refresh!(r.id);}catch(error){if(error instanceof DirectorySyncApiError)throw new EmployeeChannelError(error.status,error.code);throw error;}
+ }
+ async discovery(w:string,e:string,p:DirectoryProvider,input:{kind:string;parentId?:string;cursor?:string;q?:string;limit?:number},refresh=true){
+  const r=this.require(w,e,p);this.current(r);if(r.provider==='wecom')fail(400,'channel_directory_unsupported');if(r.directoryStatus!=='available')fail(403,'channel_directory_unavailable');
+  if(!['departments','users'].includes(input.kind)||input.parentId!==undefined&&!validId(input.parentId)||input.q!==undefined&&(typeof input.q!=='string'||input.q.length>100))fail(400,'invalid_directory_query');
+  if(!this.snapshots?.query)fail(503,'directory_snapshot_unavailable');
   try{
-   if(!['departments','users'].includes(input.kind)||input.parentId!==undefined&&!validId(input.parentId))fail(400,'invalid_directory_query');
-   if(!input.parentId){const scope=await port.getAuthorizedScope();const ids=input.kind==='departments'?scope.departmentIds:scope.userIds;const cursorScope=JSON.stringify([r.id,r.revision,input.kind,scope.revision]);const offset=input.cursor?Number(this.cursors.decode(cursorScope,input.cursor)):0;if(!Number.isSafeInteger(offset)||offset<0)fail(400,'invalid_directory_cursor');
-    if(ids.length>1000)fail(400,'directory_scope_requires_department_query');
-    // Root scope IDs are only hints; hydrate a bounded page, never all organization members.
-    const root=input.kind==='departments'?(scope.entireOrganization?[p==='feishu'?'0':'1']:scope.departmentIds):[];
-    const items=input.kind==='departments'?await Promise.all(root.slice(offset,offset+50).map(async id=>{const d=await port.getDepartment(id);return{kind:'department',subjectId:channelSubject('department',d.id,d.namespace,r.appId),displayName:d.displayName,externalId:d.id};})):await Promise.all(scope.userIds.slice(offset,offset+50).map(async id=>{const u=await port.getUser(id);this.current(r);this.snapshots?.rememberUsers?.(r.id,[u]);return{kind:'channel_user',subjectId:channelSubject('channel_user',u.id.id,u.id.namespace,r.appId),displayName:u.displayName,externalId:u.id.id};}));
-    this.current(r);return{sourceId:r.sourceId,provider:r.provider,appId:r.appId,items,exhausted:offset+50>=ids.length,...(offset+50<ids.length?{nextCursor:this.cursors.encode(cursorScope,String(offset+50))}:{})};
-   }
-   const page=input.kind==='departments'?await port.listChildDepartments(input.parentId,input.cursor):await port.listDepartmentMembers(input.parentId,input.cursor);this.current(r);
-   return{sourceId:r.sourceId,provider:r.provider,appId:r.appId,items:page.items.map(value=>{if('departmentIds'in value)return{kind:'channel_user',subjectId:channelSubject('channel_user',value.id.id,value.id.namespace,r.appId),displayName:value.displayName,externalId:value.id.id};return{kind:'department',subjectId:channelSubject('department',value.id,value.namespace,r.appId),displayName:value.displayName,externalId:value.id};}),...(page.nextCursor?{nextCursor:page.nextCursor}:{}),exhausted:page.exhausted};
-  }catch(error){this.invalidate(r,error);if(error instanceof EmployeeChannelError)throw error;throw new EmployeeChannelError(502,safe(error));}
+   if(refresh)this.snapshots!.ensureFresh?.(r.id);
+   const page=this.snapshots!.query!(r.id,{kind:input.kind as 'users'|'departments',...(input.parentId?{parentId:input.parentId}:{}),...(input.cursor?{cursor:input.cursor}:{}),...(input.q?{query:input.q}:{}),...(input.limit?{limit:input.limit}:{})});
+   this.current(r);
+   return{sourceId:r.sourceId,provider:r.provider,appId:r.appId,items:page.items.map(value=>{
+    if('departmentIds'in value){const paths=value.departmentIds.map(id=>this.snapshots?.peekDepartment(r.id,id)?.displayName).filter((name):name is string=>!!name);return{kind:'channel_user' as const,subjectId:channelSubject('channel_user',value.id.id,value.id.namespace,r.appId),displayName:value.displayName,externalId:value.id.id,departmentPaths:paths};}
+    return{kind:'department' as const,subjectId:channelSubject('department',value.id,value.namespace,r.appId),displayName:value.displayName,externalId:value.id};
+   }),...(page.nextCursor?{nextCursor:page.nextCursor}:{}),exhausted:page.exhausted,snapshotVersion:page.snapshotVersion,sync:page.task};
+  }catch(error){if(error instanceof DirectorySyncApiError)throw new EmployeeChannelError(error.status,error.code);if(error instanceof EmployeeChannelError)throw error;throw new EmployeeChannelError(503,'directory_snapshot_unavailable');}
+ }
+ /** Local-only initial candidates from the current, fully published directory. */
+ directoryPeople(connectionId:string){const r=this.repository.byId(connectionId);if(!r||!r.enabled||r.status!=='verified'||r.directoryStatus!=='available'||r.provider==='wecom')return[];try{this.current(r);return(this.snapshots?.query?.(r.id,{kind:'users',limit:50}).items??[]).filter((person):person is DirectoryPerson=>'departmentIds'in person);}catch{return[];}}
+ /** Local-only exact lookup for configured recipients. */
+ directoryPerson(connectionId:string,subjectId:string){
+  const r=this.repository.byId(connectionId);if(!r)return;let parts:unknown;try{parts=JSON.parse(subjectId);}catch{return;}
+  if(!Array.isArray(parts)||parts.length!==4||parts[0]!=='channel_user'||parts[2]!==r.appId||!['open_id','user_id','union_id'].includes(parts[1])||typeof parts[3]!=='string')return;
+  return this.snapshots?.peekUser(r.id,{id:parts[3],namespace:parts[1],applicationId:r.appId});
  }
  validateRules(w:string,e:string,value:unknown,retainedRules:readonly DirectoryAccessRule[]=[]):DirectoryAccessRule[]{if(!Array.isArray(value)||value.length>100)fail(400,'invalid_directory_access_rule');const sources=this.repository.list(w,e);return (value as any[]).map((r:any)=>{if(!r||Object.keys(r).some(k=>!['sourceId','kind','subjectId','includeDescendants','conversationKinds'].includes(k))||!['channel_user','department'].includes(r.kind)||typeof r.subjectId!=='string'||!Array.isArray(r.conversationKinds)||!r.conversationKinds.length||r.conversationKinds.some((k:string)=>!['private','group','meeting'].includes(k))||r.includeDescendants!==undefined&&typeof r.includeDescendants!=='boolean'||r.kind==='channel_user'&&r.includeDescendants)fail(400,'invalid_directory_access_rule');const source=sources.find(s=>s.sourceId===r.sourceId);if(!source)fail(400,'directory_source_not_found');let parts;try{parts=JSON.parse(r.subjectId);}catch{fail(400,'invalid_directory_subject');}if(!Array.isArray(parts)||parts.length!==4||parts[0]!==r.kind||parts[2]!==source!.appId||!validId(parts[3])||!(r.kind==='channel_user'?(source!.provider!=='feishu'?['user_id']:['open_id','user_id','union_id']):(source!.provider!=='feishu'?['department_id']:['open_department_id'])).includes(parts[1]))fail(400,'invalid_directory_subject');
    if(usesWeComBotSearch(source!)){
@@ -271,7 +279,7 @@ export class EmployeeChannelService {
    }
    return{sourceId:r.sourceId,kind:r.kind,subjectId:r.subjectId,...(r.kind==='department'?{includeDescendants:r.includeDescendants===true}:{}),conversationKinds:[...new Set(r.conversationKinds)] as ('private'|'group'|'meeting')[]};});}
  /** Instant local binding guard runs even on a permission-cache hit; no directory/policy read. */
- admissionGuard(scope:ChannelAccessScope,connection:ChannelConnection):string|undefined{const r=this.repository.byId(connection.connectionId);if(scope.groupContext&&(scope.conversationKind!=='group'||!r||!scope.groupContext.conversationId||scope.groupContext.bindingVersion!==this.currentBindingVersion(connection.connectionId)))return;if(!r||r.workspaceId!==scope.workspaceId||r.entityId!==scope.entityId||connection.workspaceId!==r.workspaceId||connection.provider!==r.provider||connection.tenantId!==r.eventTenantId||connection.identity.externalId!==r.botId||scope.requesterKind!=='channel_user'||scope.requesterIdentity?.applicationId!==r.appId||!scope.requesterIdentity?.idNamespace||scope.requesterIdentity.idNamespace==='unknown'||!r.enabled||r.status!=='verified'||r.provider==='wecom'&&!usesWeComBotSearch(r)||(usesWeComBotSearch(r)?scope.requesterIdentity.idNamespace!=='user_id':r.directoryStatus!=='available'))return;return JSON.stringify([r.sourceId,r.appId,r.eventTenantId,r.revision,r.authRevision,r.wecomContactIdentityRevision,r.wecomVerifiedContactIds,r.wecomContactMappings]);}
+ admissionGuard(scope:ChannelAccessScope,connection:ChannelConnection):string|undefined{const r=this.repository.byId(connection.connectionId);if(scope.groupContext&&(scope.conversationKind!=='group'||!r||!scope.groupContext.conversationId||scope.groupContext.bindingVersion!==this.currentBindingVersion(connection.connectionId)))return;if(!r||r.workspaceId!==scope.workspaceId||r.entityId!==scope.entityId||connection.workspaceId!==r.workspaceId||connection.provider!==r.provider||connection.tenantId!==r.eventTenantId||connection.identity.externalId!==r.botId||scope.requesterKind!=='channel_user'||scope.requesterIdentity?.applicationId!==r.appId||!scope.requesterIdentity?.idNamespace||scope.requesterIdentity.idNamespace==='unknown'||!r.enabled||r.status!=='verified'||r.provider==='wecom'&&!usesWeComBotSearch(r)||(usesWeComBotSearch(r)?scope.requesterIdentity.idNamespace!=='user_id':r.directoryStatus!=='available'))return;return JSON.stringify([r.sourceId,r.appId,r.eventTenantId,r.revision,r.authRevision,r.stateVersion,r.provider==='wecom'?undefined:this.snapshots?.authorizationVersion?.(r.id)]);}
  async validateCachedAdmission(scope:ChannelAccessScope,connection:ChannelConnection):Promise<boolean>{return !!this.admissionGuard(scope,connection);}
  beginEvaluation():DirectoryEvaluation{return{deadline:this.now()+15000,remaining:64,users:new Map(),departments:new Map()};}
  private queried<T>(evaluation:DirectoryEvaluation,map:Map<string,Promise<T>>,key:string,query:()=>Promise<T>):Promise<T>{if(this.now()>evaluation.deadline)throw new DirectoryError('limit_exceeded');const previous=map.get(key);if(previous)return previous;if(evaluation.remaining--<=0)throw new DirectoryError('limit_exceeded');const result=query();map.set(key,result);return result;}
@@ -288,7 +296,7 @@ export class EmployeeChannelService {
   }
   if(!r.enabled||r.status!=='verified'||r.directoryStatus!=='available'||scope.requesterKind!=='channel_user'||scope.requesterIdentity?.applicationId!==r.appId||connection.tenantId!==r.eventTenantId)return'unknown';
   const ns=scope.requesterIdentity?.idNamespace;if(!ns||ns==='unknown'||r.provider!=='feishu'&&ns!=='user_id')return'unknown';
-  try{const parts=JSON.parse(rule.subjectId) as string[];if(parts[2]!==r.appId||rule.kind==='department'&&parts[1]!== (r.provider==='feishu'?'open_department_id':'department_id'))return false;const port=this.snapshots?this.snapshots.directory(r.id):this.clients(r).directory;const user=await this.queried(evaluation,evaluation.users,JSON.stringify([r.id,r.revision,ns,scope.requesterId]),()=>port.getUser({id:scope.requesterId,namespace:ns,...(r.provider==='feishu'&&ns!=='user_id'?{applicationId:r.appId}:{})}));if(this.now()>evaluation.deadline)return'unknown';this.current(r);if(user.status!=='active')return user.status==='inactive'?false:'unknown';
+  try{const parts=JSON.parse(rule.subjectId) as string[];if(parts[2]!==r.appId||rule.kind==='department'&&parts[1]!== (r.provider==='feishu'?'open_department_id':'department_id'))return false;if(!this.snapshots)return'unknown';const port=this.snapshots.directory(r.id);const user=await this.queried(evaluation,evaluation.users,JSON.stringify([r.id,r.revision,ns,scope.requesterId]),()=>port.getUser({id:scope.requesterId,namespace:ns,...(r.provider==='feishu'&&ns!=='user_id'?{applicationId:r.appId}:{})}));if(this.now()>evaluation.deadline)return'unknown';this.current(r);if(user.status!=='active')return user.status==='inactive'?false:'unknown';
    const aliases=[user.id,...user.aliases];if(!aliases.some(id=>id.id===scope.requesterId&&id.namespace===ns&&(id.applicationId===undefined||id.applicationId===r.appId)))return'unknown';
    this.rememberSpeaker(r,ns,scope.requesterId,user);
    if(rule.kind==='channel_user')return aliases.some(id=>id.id===parts[3]&&id.namespace===parts[1]&&(id.applicationId===undefined||id.applicationId===r.appId));
@@ -353,27 +361,6 @@ export class EmployeeChannelService {
   next.credential=this.vault.seal(JSON.stringify({appSecret:input.appSecret}),this.scope(next));this.write(next,old,actor,changed?'source_replaced':'wecom_robot_credentials_saved');return this.dto(next,true);
  }
 
- /** Optional readable metadata; the caller must still authorize the invocation separately. */
- private async describeActorLegacy(binding:ResolvedEmployeeChannelBinding,actor:ChannelActor):Promise<ChannelSpeakerProfile>{
-  const r=this.repository.byId(binding.connectionId),ns=actor.idNamespace;
-  if(!r||r.workspaceId!==binding.workspaceId||r.entityId!==binding.entityId||r.appId!==binding.appId||r.provider!==binding.provider||binding.connection.tenantId!==r.eventTenantId||actor.applicationId!==r.appId||actor.kind!=='human'||actor.identityEvidence!=='channel_verified'||!actor.externalId||!ns||ns==='unknown'||r.provider!=='feishu'&&ns!=='user_id')return{};
-  const current=()=>this.repository.byId(r.id)?.revision===r.revision&&this.currentBindingVersion(r.id)===binding.bindingVersion;
-  if(!current()||r.directoryStatus!=='available')return{};
-  const deadline=Date.now()+3000;
-  const bounded=async<T>(work:Promise<T>):Promise<T>=>{let timer:ReturnType<typeof setTimeout>|undefined;try{return await Promise.race([work,new Promise<never>((_,reject)=>{timer=setTimeout(()=>reject(new DirectoryError('unavailable')),Math.max(0,deadline-Date.now()));})]);}finally{if(timer)clearTimeout(timer);}};
-  let profile:ChannelSpeakerProfile={};
-  try{
-   const port=this.clients(r).directory,cached=this.speakerUsers.get(this.speakerKey(r,ns,actor.externalId));
-   const user=cached&&cached.expiresAt>this.now()?cached.user:await bounded(port.getUser({id:actor.externalId,namespace:ns,...(r.provider==='feishu'&&ns!=='user_id'?{applicationId:r.appId}:{})}));
-   if(!current()||user.status!=='active'||![user.id,...user.aliases].some(id=>id.id===actor.externalId&&id.namespace===ns&&(ns==='user_id'||id.applicationId===r.appId)))return{};
-   this.rememberSpeaker(r,ns,actor.externalId,user);
-   profile={...(user.displayName.trim()?{displayName:user.displayName}:{}),...(user.jobTitle?.trim()?{jobTitle:user.jobTitle}:{})};
-   const ids=user.primaryDepartmentId.status==='known'&&user.primaryDepartmentId.value?[user.primaryDepartmentId.value]:user.departmentMembershipsKnown?[...new Set(user.departmentIds)].slice(0,4):[];
-   const departments=await bounded(Promise.all(ids.map(async id=>{try{const department=await port.getDepartment(id);return department.id===id?department.displayName:undefined;}catch{return undefined;}})));
-   const names=departments.filter((name):name is string=>typeof name==='string'&&!!name.trim());if(names.length)profile={...profile,departmentNames:names};
-  }catch{ /* Optional metadata failure must not change the separate authorization decision. */ }
-  return current()?profile:{};
- }
  async describeActor(binding:ResolvedEmployeeChannelBinding,actor:ChannelActor):Promise<ChannelSpeakerProfile>{
   const r=this.repository.byId(binding.connectionId),ns=actor.idNamespace;
   if(r&&usesWeComBotSearch(r)){
@@ -384,10 +371,10 @@ export class EmployeeChannelService {
    const member=this.botContacts.get(r,weComSearchUserId(r,actor.externalId)!);
    return member?{displayName:member.display_name}:{};
   }
-  if(!this.snapshots)return this.describeActorLegacy(binding,actor);if(!r||!ns||ns==='unknown'||!actor.externalId||actor.applicationId!==r.appId||r.workspaceId!==binding.workspaceId||r.entityId!==binding.entityId||r.provider!==binding.provider||binding.connection.tenantId!==r.eventTenantId||this.currentBindingVersion(r.id)!==binding.bindingVersion||actor.kind!=='human'||actor.identityEvidence!=='channel_verified')return{};
+  if(!this.snapshots)return {};if(!r||!ns||ns==='unknown'||!actor.externalId||actor.applicationId!==r.appId||r.workspaceId!==binding.workspaceId||r.entityId!==binding.entityId||r.provider!==binding.provider||binding.connection.tenantId!==r.eventTenantId||this.currentBindingVersion(r.id)!==binding.bindingVersion||actor.kind!=='human'||actor.identityEvidence!=='channel_verified')return{};
   const id={id:actor.externalId,namespace:ns,...(r.provider==='feishu'&&ns!=='user_id'?{applicationId:r.appId}:{})};
   const snapshots=this.snapshots;
-  const user=snapshots?.peekUser(r.id,id)??this.speakerUsers.get(this.speakerKey(r,ns,actor.externalId))?.user;
+  const user=snapshots?.peekUser(r.id,id);
   if(!user){snapshots?.requestUser(r.id,id);return{};}
   if(user.status!=='active')return{};
   const ids=user.primaryDepartmentId.status==='known'&&user.primaryDepartmentId.value?[user.primaryDepartmentId.value]:user.departmentMembershipsKnown?[...new Set(user.departmentIds)].slice(0,4):[];

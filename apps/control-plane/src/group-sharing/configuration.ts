@@ -42,15 +42,19 @@ export class GroupSharingConfiguration{
   const cfg=this.get(scope.workspaceId,scope.entityId);return{version:1,revision:cfg.revision,workspaceId:scope.workspaceId,entityId:scope.entityId,destination,...(s.threadId?{destinationThreadId:s.threadId,...(s.conversationKind==='group'&&s.replyToMessageId?{topicRead:{threadId:s.threadId,chatId:s.conversationId,messageId:s.replyToMessageId}}:{})}:{}),sources:sharingSources(cfg.rules,destination)};
  }
  async candidates(w:string,e:string,q:Record<string,unknown>){
-  if(Object.keys(q).some(k=>!['connectionId','cursor','q'].includes(k))||q.connectionId!==undefined&&typeof q.connectionId!=='string'||q.cursor!==undefined&&typeof q.cursor!=='string'||q.q!==undefined&&(typeof q.q!=='string'||q.q.length>100))throw new TaskError(400,'invalid_sharing_query');
+  if(Object.keys(q).some(k=>!['connectionId','cursor','q','peopleCursor','peopleOnly'].includes(k))||q.connectionId!==undefined&&typeof q.connectionId!=='string'||q.cursor!==undefined&&typeof q.cursor!=='string'||q.q!==undefined&&(typeof q.q!=='string'||q.q.length>100)||q.peopleCursor!==undefined&&typeof q.peopleCursor!=='string'||q.peopleOnly!==undefined&&q.peopleOnly!=='true')throw new TaskError(400,'invalid_sharing_query');
   const records=this.channels.repository.list(w,e).filter(c=>c.provider==='feishu'&&c.enabled&&c.status==='verified'&&c.eventTenantId);const connections=records.map(c=>({id:c.id,appId:c.appId,label:'飞书 · '+c.appId}));if(!q.connectionId)return{connections,groups:[],people:[],nextCursor:null};
   const record=records.find(c=>c.id===q.connectionId);if(!record)throw new TaskError(404,'sharing_connection_not_found');const binding=await this.channels.resolveBinding(record.id);if(!binding?.conversation.listJoinedGroups)throw new TaskError(409,'sharing_channel_unavailable');
   const base={provider:'feishu' as const,connectionId:record.id,appId:record.appId,tenantId:binding.connection.tenantId,bindingVersion:binding.bindingVersion};
   // Provider page tokens never establish a read grant; this endpoint is manager-only.
-  const page=await binding.conversation.listJoinedGroups(q.cursor?{cursor:String(q.cursor)}:{});this.assertCurrent(w,e,{...base,kind:'group',id:'validation',label:''});
-  const rows=this.store.all<{person_json:string}>('SELECT u.person_json FROM directory_snapshot_users u JOIN directory_sync_tasks t ON t.id=u.task_id WHERE t.workspace_id=? AND t.invalidated=0 AND t.connection_id=? AND (length(?)=0 OR instr(u.person_json,?)>0) LIMIT 1001',w,record.id,q.q??'',q.q??'');
-  const people=rows.flatMap(row=>{const p=JSON.parse(row.person_json)as{displayName:string;status?:string;id:{id:string;namespace:string;applicationId?:string};aliases:{id:string;namespace:string;applicationId?:string}[]};if(p.status==='inactive')return[];const id=[p.id,...p.aliases].find(i=>i.namespace==='open_id'&&(!i.applicationId||i.applicationId===record.appId));return id&&(!q.q||p.displayName.includes(String(q.q)))?[this.issue(w,e,{...base,kind:'person',id:id.id,namespace:'open_id',label:p.displayName})]:[];});
-  return{connections,groups:page.items.map(g=>this.issue(w,e,{...base,kind:'group',id:g.id,label:g.name??'未提供群名'})),people:people.slice(0,200),peopleTruncated:people.length>200||rows.length>1000,nextCursor:page.nextCursor??null,coverage:'joined_groups'};
+  const page=q.peopleOnly==='true'?{items:[],nextCursor:undefined}:await binding.conversation.listJoinedGroups(q.cursor?{cursor:String(q.cursor)}:{});this.assertCurrent(w,e,{...base,kind:'group',id:'validation',label:''});
+  const directory=await this.channels.discovery(w,e,'feishu',{kind:'users',...(q.q?{q:String(q.q)}:{}),...(q.peopleCursor?{cursor:String(q.peopleCursor)}:{})},false);
+  const people=directory.items.flatMap(item=>{
+   const person=this.channels.directoryPerson(record.id,item.subjectId);if(!person||person.status==='inactive')return[];
+   const id=[person.id,...person.aliases].find(i=>i.namespace==='open_id'&&(!i.applicationId||i.applicationId===record.appId));
+   return id?[this.issue(w,e,{...base,kind:'person',id:id.id,namespace:'open_id',label:person.displayName})]:[];
+  });
+  return{connections,groups:page.items.map(g=>this.issue(w,e,{...base,kind:'group',id:g.id,label:g.name??'未提供群名'})),people,nextPeopleCursor:directory.nextCursor??null,peopleTruncated:false,nextCursor:page.nextCursor??null,coverage:'joined_groups'};
  }
 }
 export function registerSharingConfiguration(app:FastifyInstance,c:GroupSharingConfiguration,o:{role?:'platform'|'runtime';manager:(r:FastifyRequest,w:string,e:string)=>string;relay?:(actor:string,path:string)=>Promise<unknown>}){

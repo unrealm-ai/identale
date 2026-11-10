@@ -16,8 +16,8 @@ export const CONFIGURATION_MODULES = {
   permissions: ['entity_web_policies', 'entity_directory_policies', 'employee_handoff_policies', 'capability_packages'],
   models: ['model_profiles', 'model_catalog', 'entity_model_bindings', 'workspace_model_defaults', 'model_selection_epochs'],
   resources: ['skill_resource_versions', 'skill_resource_state', 'workspace_mcp_versions', 'workspace_mcp_state'],
-  channels: ['employee_group_sharing_rules', 'employee_channel_connections', 'employee_channel_verification_events','wecom_bot_contacts'],
-  directory: ['directory_sync_tasks', 'directory_snapshot_users', 'directory_snapshot_aliases', 'directory_alias_projection_meta', 'directory_snapshot_departments', 'directory_sync_part_state'],
+  channels: ['employee_group_sharing_rules', 'employee_channel_connections', 'employee_channel_verification_events','wecom_bot_contacts','wecom_identity_bindings'],
+  directory: ['directory_sync_tasks', 'directory_snapshot_users', 'directory_snapshot_aliases', 'directory_alias_projection_meta', 'directory_snapshot_departments', 'directory_snapshot_search', 'directory_snapshot_memberships', 'directory_snapshot_scope', 'directory_sync_part_state'],
   triggers: ['trigger_bindings', 'trigger_credentials'],
 } as const;
 export type ConfigurationModule = keyof typeof CONFIGURATION_MODULES;

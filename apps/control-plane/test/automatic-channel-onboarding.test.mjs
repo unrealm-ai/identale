@@ -73,6 +73,11 @@ async function setup(t){
   return fetch('http://127.0.0.1:'+http.address().port+parsed.pathname+parsed.search,init);
  }};
  const repository=new EmployeeChannelRepository(store),channels=new EmployeeChannelService(repository,options);
+ // Onboarding admission consults only pre-existing local directory facts, never the channel HTTP fixture.
+ channels.setDirectorySnapshots({directory:connectionId=>({
+  getUser:async id=>{const c=repository.byId(connectionId);if(!c||c.provider==='wecom'||!['member','other'].includes(id.id))throw Error('snapshot_user_missing');return{id,displayName:'Fixture Member',status:'active',aliases:[],departmentIds:c.provider==='dingtalk'?['1']:[],departmentMembershipsKnown:true,primaryDepartmentId:{status:'unknown'},directManager:{status:'unknown'},dottedLineManagers:{status:'unknown'}};},
+  getDepartment:async id=>({id,namespace:'department_id',displayName:'Engineering',parentId:{status:'known',value:null},leaders:{status:'unknown'}})
+ })});
  const capabilities=new CapabilityConfigService(store,[],channels,undefined,undefined,undefined,()=>now);
  channels.setAccessCheck((...args)=>capabilities.authorizeChannel(...args));
  const transport=ingressFixture(),inbox=new SqliteMessageLoopRepository(store);
@@ -259,7 +264,7 @@ test('A02 candidate, approved recipient and speaker lookup require current exact
  const b=await f.channels.resolveBinding(c.id),actor={kind:'human',externalId:'member',idNamespace:'user_id',applicationId:c.appId,identityEvidence:'channel_verified'};
  assert.deepEqual(await f.channels.describeActor(b,actor),{displayName:'Fixture Member'});
  assert.deepEqual(await f.channels.describeActor(b,{...actor,externalId:'different'}),{});
- f.state.removed=true;await assert.rejects(f.channels.assertWeComPrivateRecipient(c.id,'member'),/authorization_denied/);
+ f.state.removed=true;const before=f.state.calls.length;await f.channels.assertWeComPrivateRecipient(c.id,'member');assert.equal(f.state.calls.length,before,'recipient identity checks are local; provider delivery owns account availability');
 });
 test('R01 upgrade retains existing identity, old challenge dedupe and Feishu behavior',async t=>{
  const f=await setup(t),c=await f.save('dingtalk');
@@ -452,6 +457,8 @@ test('WeCom legacy global identity flag never grants a member and package deny r
  const f=await setup(t),c=await f.save('wecom');await f.search(['member','other']);change(f,c,'all');
  assert.equal(await f.receive(c,wecom(c,'legacy')),'accepted');
  const current=f.repository.byId(c.id),{wecomVerifiedContactIds:_ids,...legacy}=current;
+ // This fixture models a legacy global flag without relational identity evidence.
+ f.store.run('DELETE FROM wecom_identity_bindings WHERE connection_id=?',c.id);
  f.repository.save({...legacy,wecomContactIdentityRevision:c.authRevision},current);
  const binding=await f.channels.resolveBinding(c.id);
  assert.equal(await f.channels.matches('w',f.rule(c),request(c),binding.connection,'private'),'unknown');

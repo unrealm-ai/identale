@@ -14,7 +14,9 @@ export async function registerEmployeeChannelRoutes(app:FastifyInstance,service:
  route('GET','/:provider/verification',[],(w,e,p)=>service.verification(w,e,p));
  route('POST','/:provider/verification/confirm',['expectedRevision','candidateId'],()=>{throw new EmployeeChannelError(409,'channel_verification_automatic');});
  route('GET','/:provider/directory',[],(w,e,p,_a,r)=>service.discovery(w,e,p,r.query as any));
+ route('GET','/:provider/directory/status',[],(w,e,p)=>service.directoryStatus(w,e,p));
+ route('POST','/:provider/directory/sync',[],(w,e,p)=>service.directorySync(w,e,p));
  route('POST','/wecom/member-verification',['userId','sourceId','requestId','replace'],(w,e,_p,a,r)=>service.startMemberVerification(w,e,a,r.body as any));
  route('GET','/wecom/member-verification',[],(w,e,_p,_a,r)=>service.memberVerificationStatus(w,e,r.query as any));
- route('POST','/wecom/member-search',['keywords'],(w,e,_p,_a,r)=>service.searchWeComMembers(w,e,(r.body as {keywords?:unknown}|undefined)?.keywords));
+ route('POST','/wecom/member-search',['keywords','cursor'],(w,e,_p,_a,r)=>service.searchWeComMembers(w,e,(r.body as {keywords?:unknown}|undefined)?.keywords,(r.body as {cursor?:unknown}|undefined)?.cursor));
 }

@@ -2,12 +2,13 @@
 import { computed, onUnmounted, ref, watch } from 'vue';
 import { NAlert, NButton, NCheckbox, NCheckboxGroup, NInput, NSelect, NSpace, NTag } from 'naive-ui';
 import { api, errorMessage } from '../../shared/api';
-import type { DirectoryAccessRule, DirectorySubjects, ConversationKind, DirectoryItem, DirectoryPage, DirectoryIdentityEvidence } from './types';
+import type { DirectoryAccessRule, DirectorySubjects, ConversationKind, DirectoryItem, DirectoryPage, DirectoryIdentityEvidence, DirectorySyncStatus as SyncStatus } from './types';
 import { providerLabel } from './types';
 import WecomMemberVerification from './WecomMemberVerification.vue';
+import DirectorySyncStatus from './DirectorySyncStatus.vue';
 const props = defineProps<{ base: string; rules: DirectoryAccessRule[]; subjects: DirectorySubjects; label: string; disabled?: boolean; readonly?: boolean; draft?: boolean; directoryBase?: string;hideUnavailableNotice?:boolean;defaultConversationKinds?:ConversationKind[];employeeScope?:boolean;fixedSource?:boolean;selectPeopleOnly?:boolean }>();
 const emit = defineEmits<{ 'update:rules': [rules: DirectoryAccessRule[]]; busyChanged: [value: boolean]; identityVerified: [evidence: DirectoryIdentityEvidence] }>();
-const sourceId = ref<string | null>(null), kind = ref<'departments' | 'users'>('departments');
+const sourceId = ref<string | null>(null), kind = ref<'departments' | 'users'>(props.selectPeopleOnly ? 'users' : 'departments');
 class PickerError extends Error {}
 const trail = ref<{ externalId: string; subjectId: string; displayName: string }[]>([]), items = ref<DirectoryItem[]>([]), cursor = ref<string | undefined>(), exhausted = ref(true), busy = ref(false), error = ref('');
 const labels = ref<Record<string, string>>({});
@@ -21,31 +22,37 @@ watch(busy, value => emit('busyChanged', value), { flush: 'sync' });
 const source = computed(() => sources.value.find(item => item.sourceId === sourceId.value));
 const memberSearch=computed(()=>source.value?.provider==='wecom');
 const searchText=ref(''),searched=ref(false),limited=ref(false);
+const sync = ref<SyncStatus>(), snapshotVersion=ref<number>();
+const snapshotMode=computed(()=>!!source.value&&!memberSearch.value&&!props.draft&&!props.directoryBase);
+const directoryEndpoint=computed(()=>`${props.base}/channels/${source.value?.provider}/directory`);
 const keywords=computed(()=>[...new Set(searchText.value.split(/[,，\n]/).map(value=>value.trim()).filter(Boolean))]);
 const kinds: { value: ConversationKind; label: string }[] = [{ value: 'private', label: '私聊' }, { value: 'group', label: '群聊' }, { value: 'meeting', label: '会议' }];
 const verifiedMembers = ref<Record<string, boolean>>({});
 function reset() { controller.abort(); controller = new AbortController(); busy.value = false; items.value = []; cursor.value = undefined; exhausted.value = true; error.value = ''; searched.value=false;limited.value=false;seenCursors.clear(); }
-watch(() => JSON.stringify([props.base, props.directoryBase, props.draft, props.subjects.sources.map(value => [value.id, value.sourceId, value.provider, value.appId, value.authRevision, value.enabled, value.directoryStatus])]), () => { reset(); labels.value = {}; verifiedMembers.value = {}; trail.value = []; if (!sources.value.some(item => item.sourceId === sourceId.value)) sourceId.value = sources.value[0]?.sourceId ?? null; }, { immediate: true });
-watch(sourceId, () => { reset(); trail.value = []; searchText.value=''; });
-watch(kind, reset);
+watch(() => JSON.stringify([props.base, props.directoryBase, props.draft, props.subjects.sources.map(value => [value.id, value.sourceId, value.provider, value.appId, value.authRevision, value.enabled, value.directoryStatus])]), () => { reset(); sync.value=undefined; snapshotVersion.value=undefined; labels.value = {}; verifiedMembers.value = {}; trail.value = []; if (!sources.value.some(item => item.sourceId === sourceId.value)) sourceId.value = sources.value[0]?.sourceId ?? null; }, { immediate: true });
+watch(sourceId, () => { reset(); trail.value = []; searchText.value=''; sync.value=undefined;snapshotVersion.value=undefined; });
+watch(kind, () => { reset(); });
 async function load(more = false) {
   if (!source.value || busy.value || props.disabled || props.readonly) return;
-  if(memberSearch.value&&(!keywords.value.length||keywords.value.length>10))return;
+  if(memberSearch.value&&keywords.value.length>10)return;
   if (!more) reset(); else if (exhausted.value || !cursor.value) return;
   const current = source.value, signal = controller.signal;
   const query = new URLSearchParams({ kind: kind.value }); const parent = trail.value.at(-1);
-  if (parent) query.set('parentId', parent.externalId); if (more && cursor.value) query.set('cursor', cursor.value);
+  if (parent && !searchText.value.trim()) query.set('parentId', parent.externalId); if (more && cursor.value) query.set('cursor', cursor.value);
+  if(snapshotMode.value && searchText.value.trim())query.set('q',searchText.value.trim());
   busy.value = true; error.value = '';
   try {
     const page = memberSearch.value
-      ? await api<DirectoryPage>(props.base+'/channels/wecom/member-search',signal,{keywords:keywords.value},'POST')
+      ? await api<DirectoryPage>(props.base+'/channels/wecom/member-search',signal,{keywords:keywords.value,...(more&&cursor.value?{cursor:cursor.value}:{})},'POST')
       : await api<DirectoryPage>(`${props.directoryBase ?? `${props.base}/channels/${current.provider}/directory`}?${query}`, signal);
     if (signal.aborted) return;
+    if(more && snapshotVersion.value!==undefined && page.snapshotVersion!==snapshotVersion.value)throw new PickerError('通讯录已更新，请重新查询后继续选择。');
     if (page.sourceId !== current.sourceId || page.appId !== current.appId || page.provider !== current.provider) throw new PickerError('连接来源已改变，请刷新员工配置后重新选择。');
     if (!page.exhausted && (!page.nextCursor || seenCursors.has(page.nextCursor))) throw new PickerError('目录分页游标无效，请重新读取。');
     if (page.nextCursor) seenCursors.add(page.nextCursor);
     const next = more ? [...items.value] : [];
     for (const item of page.items) { if (!next.some(value => value.kind === item.kind && value.subjectId === item.subjectId)) next.push(item); labels.value[key({ ...item, sourceId: current.sourceId })] = item.displayName; }
+    if(page.sync)sync.value=page.sync; snapshotVersion.value=page.snapshotVersion;
     items.value = next; cursor.value = page.nextCursor; exhausted.value = page.exhausted;searched.value=true;limited.value=page.limited===true;
   } catch (cause) { if (!signal.aborted) { error.value = cause instanceof PickerError ? cause.message : errorMessage(cause); items.value = []; cursor.value = undefined; exhausted.value = true; } }
   finally { if (!signal.aborted) busy.value = false; }
@@ -67,9 +74,10 @@ function markVerified(rule: DirectoryAccessRule, evidence: DirectoryIdentityEvid
 function itemVerified(item: DirectoryItem) { return item.identityVerified === true || !!source.value && (source.value.memberSearchVerifiedUserIds?.includes(item.externalId) === true || verifiedMembers.value[key({ ...item, sourceId: source.value.sourceId })] === true); }
 function remove(index: number) { if (!props.disabled && !props.readonly) emit('update:rules', props.rules.filter((_, current) => current !== index)); }
 function updateRule(index: number, patch: Partial<DirectoryAccessRule>) { if (!props.disabled && !props.readonly) emit('update:rules', props.rules.map((rule, current) => current === index ? { ...rule, ...patch } : rule)); }
-function enter(item: DirectoryItem) { trail.value.push(item); void load(); }
+function enter(item: DirectoryItem) { searchText.value='';trail.value.push(item); void load(); }
 function back() { trail.value.pop(); void load(); }
 function displayLabel(rule: DirectoryAccessRule) { const available = sources.value.some(item => item.sourceId === rule.sourceId); return `${available ? '' : '来源不可用 · '}${rule.kind === 'department' ? '部门' : '渠道人员'} · ${labels.value[key(rule)] ?? rule.subjectId}`; }
+watch(()=>[source.value?.id,source.value?.sourceId,source.value?.authRevision,kind.value,props.base],()=>{if((snapshotMode.value||memberSearch.value)&&!props.disabled&&!props.readonly)void load();},{immediate:true,flush:'post'});
 onUnmounted(() => { controller.abort(); emit('busyChanged', false); });
 </script>
 <template>
@@ -77,14 +85,16 @@ onUnmounted(() => { controller.abort(); emit('busyChanged', false); });
     <template v-if="!readonly">
       <NSelect v-if="!fixedSource" v-model:value="sourceId" :options="sources.map(item => ({label: `${providerLabel(item.provider)} · ${item.appId}`, value: item.sourceId}))" :disabled="disabled || busy" :aria-label="`${label}渠道来源`" placeholder="选择员工已验证渠道" />
       <template v-if="memberSearch">
-        <NSpace class="picker-note"><NInput v-model:value="searchText" :disabled="disabled || busy" :maxlength="650" :input-props="{'aria-label':label+'成员关键词'}" placeholder="输入姓名、拼音或别名" @keydown.enter.prevent="load(false)" /><NButton :disabled="disabled || busy || !keywords.length || keywords.length>10" :loading="busy" @click="load(false)">搜索企微成员</NButton></NSpace>
-        <p class="field-note">用逗号分隔关键词，一次最多 10 个。</p>
+        <NSpace class="picker-note"><NInput v-model:value="searchText" :disabled="disabled || busy" :maxlength="650" :input-props="{'aria-label':label+'成员关键词'}" placeholder="输入姓名、拼音或别名" @keydown.enter.prevent="load(false)" /><NButton :disabled="disabled || busy || keywords.length>10" :loading="busy" @click="load(false)">搜索企微成员</NButton></NSpace>
+        <p class="field-note">{{keywords.length?'用逗号分隔关键词，一次最多 10 个。':'已知人员来自本机器人连接；输入姓名可实时搜索。'}}</p>
         <p v-if="limited" class="field-note" role="status">结果可能不完整，请用更具体的关键词搜索。</p>
         <p v-if="searched && !items.length" class="field-note" role="status">未找到匹配成员。</p>
       </template>
       <template v-else>
-        <NSpace class="picker-note"><NSelect v-model:value="kind" :options="[{label: '部门', value: 'departments'}, {label: '人员', value: 'users'}]" :disabled="disabled || busy" :aria-label="`${label}查询类型`" /><NButton :disabled="disabled || busy || !source" :loading="busy" @click="load(false)">查询当前目录</NButton><NButton v-if="trail.length" :disabled="disabled || busy" @click="back">返回上级部门</NButton></NSpace>
-        <p class="field-note">按当前应用可见范围分页选择用户或部门，{{ trail.map(item => item.displayName).join(' / ') || '应用可见范围' }}</p>
+        <NSpace class="picker-note"><NSelect v-if="!selectPeopleOnly" v-model:value="kind" :options="[{label: '部门', value: 'departments'}, {label: '人员', value: 'users'}]" :disabled="disabled || busy" :aria-label="`${label}查询类型`" /><NInput v-if="snapshotMode" v-model:value="searchText" :maxlength="100" :disabled="disabled || busy" :input-props="{'aria-label':label+'目录关键词'}" :placeholder="kind==='users'?'搜索姓名':'搜索部门名称'" @keydown.enter.prevent="load(false)"/><NButton :disabled="disabled || busy || !source" :loading="busy" @click="load(false)">{{snapshotMode?'搜索':'查询当前目录'}}</NButton><NButton v-if="trail.length" :disabled="disabled || busy" @click="back">返回上级部门</NButton></NSpace>
+        <DirectorySyncStatus v-if="snapshotMode && source" :key="source.sourceId+':'+source.authRevision" :endpoint="directoryEndpoint" :connection-id="source.id" :initial="sync" :disabled="disabled" @updated="value=>sync=value" @completed="load(false)"/>
+        <p class="field-note">{{snapshotMode?'在已授权通讯录中选择':'按当前应用可见范围分页选择'}}{{ kind==='users'?'人员':'部门' }} · {{ trail.map(item => item.displayName).join(' / ') || '全部授权范围' }}</p>
+        <p v-if="searched && !items.length && !busy" class="field-note" role="status">{{sync?.running?'同步完成后将更新结果。':'未找到匹配结果，可尝试同步通讯录。'}}</p>
       </template>
       <NAlert v-if="!sources.length&&!hideUnavailableNotice" type="info">没有可用的员工渠道目录。请先在此员工的渠道连接中验证应用及通讯录权限；已有引用不会自动替换。</NAlert>
       <NAlert v-if="error" type="error" role="alert">{{ error }}</NAlert>

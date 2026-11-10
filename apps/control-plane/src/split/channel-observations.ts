@@ -1,3 +1,4 @@
+import {identityDelta,withIdentityDelta,identityLookup,identityStore,identityScope} from '../employee-channels/wecom-identity-bindings.js';
 import {createHash,randomUUID,timingSafeEqual} from 'node:crypto';
 import type {FastifyInstance} from 'fastify';
 import type {Store} from '../store.js';
@@ -7,22 +8,24 @@ import type {EmployeeChannelRecord,WeComMemberChallenge} from '../employee-chann
 
 const fields=['identity','status','inboundVerified','identityEvidence','eventTenantId','botId','robotCode','previousInstallation','verification','validation','directoryStatus','lastError','wecomContactIdentityRevision','wecomVerifiedContactIds','wecomContactMappings','wecomMemberChallenges'] as const;
 type Observation=Record<typeof fields[number],unknown>;
-interface Report {reportId:string;connectionId:string;expected:{revision:number;authRevision:number;stateVersion:number};revisionDelta:0|1;observation:Observation|null;verificationEvents:string[]}
+interface Report {wecomIdentityDelta?:true;reportId:string;connectionId:string;expected:{revision:number;authRevision:number;stateVersion:number};revisionDelta:0|1;observation:Observation|null;verificationEvents:string[]}
 const object=(v:unknown):v is Record<string,unknown>=>!!v&&typeof v==='object'&&!Array.isArray(v);
 const id=(v:unknown):v is string=>typeof v==='string'&&v.length>0&&v.length<=4096&&!/[\u0000-\u001f]/.test(v);
 const version=(v:unknown):v is number=>Number.isSafeInteger(v)&&Number(v)>=0;
 const digest=(v:unknown)=>createHash('sha256').update(JSON.stringify(v)).digest('hex');
-function observation(r:EmployeeChannelRecord):Observation{return Object.fromEntries(fields.map(k=>[k,r[k]??null])) as Observation;}
+function observation(r:EmployeeChannelRecord):Observation{return Object.fromEntries(fields.map(k=>[k,k==='wecomVerifiedContactIds'||k==='wecomContactMappings'?(Object.getOwnPropertyDescriptor(r,k)?.value??null):r[k]??null])) as Observation;}
 function matches(r:EmployeeChannelRecord,expected:Report['expected']){return r.revision===expected.revision&&r.authRevision===expected.authRevision&&r.stateVersion===expected.stateVersion;}
 function valid(value:unknown):value is Report{
- if(!object(value)||Object.keys(value).some(k=>!['reportId','connectionId','expected','revisionDelta','observation','verificationEvents'].includes(k))||!id(value['reportId'])||!id(value['connectionId'])||!object(value['expected'])||Object.keys(value['expected']).sort().join()!=='authRevision,revision,stateVersion'||!Object.values(value['expected']).every(version)||![0,1].includes(value['revisionDelta'] as number)||!Array.isArray(value['verificationEvents'])||value['verificationEvents'].length>100||value['verificationEvents'].some(v=>!id(v)||!/^event:|^message:/.test(v)))return false;
+ if(!object(value)||Object.keys(value).some(k=>!['reportId','connectionId','expected','revisionDelta','observation','verificationEvents','wecomIdentityDelta'].includes(k))||!id(value['reportId'])||!id(value['connectionId'])||!object(value['expected'])||Object.keys(value['expected']).sort().join()!=='authRevision,revision,stateVersion'||!Object.values(value['expected']).every(version)||![0,1].includes(value['revisionDelta'] as number)||!Array.isArray(value['verificationEvents'])||value['verificationEvents'].length>100||value['verificationEvents'].some(v=>!id(v)||!/^event:|^message:/.test(v)))return false;
+ if(value['wecomIdentityDelta']!==undefined&&value['wecomIdentityDelta']!==true)return false;
  const authRevision=value['expected']['authRevision'];
- const o=value['observation'];if(o===null)return value['revisionDelta']===0;
+ const o=value['observation'];if(o===null)return value['revisionDelta']===0&&value['wecomIdentityDelta']===undefined;
  if(!object(o)||fields.some(k=>!['wecomContactIdentityRevision','wecomVerifiedContactIds','wecomContactMappings','wecomMemberChallenges'].includes(k)&&!(k in o))||Object.keys(o).some(k=>!(fields as readonly string[]).includes(k)))return false;
+ if(value['wecomIdentityDelta']&&(o['wecomContactIdentityRevision']!==authRevision||!Array.isArray(o['wecomVerifiedContactIds'])||!Array.isArray(o['wecomContactMappings'])))return false;
  if(o['wecomContactIdentityRevision']!=null&&(!version(o['wecomContactIdentityRevision'])||o['wecomContactIdentityRevision']!==authRevision))return false;
- if(o['wecomVerifiedContactIds']!=null&&(!Array.isArray(o['wecomVerifiedContactIds'])||o['wecomVerifiedContactIds'].length>500||o['wecomVerifiedContactIds'].some(v=>!id(v)||v.length>256)||new Set(o['wecomVerifiedContactIds']).size!==o['wecomVerifiedContactIds'].length||o['wecomContactIdentityRevision']!==authRevision))return false;
+ if(o['wecomVerifiedContactIds']!=null&&(!Array.isArray(o['wecomVerifiedContactIds'])||o['wecomVerifiedContactIds'].some(v=>!id(v)||v.length>256)||new Set(o['wecomVerifiedContactIds']).size!==o['wecomVerifiedContactIds'].length||o['wecomContactIdentityRevision']!==authRevision))return false;
  const maps=o['wecomContactMappings'];
- if(maps!=null&&(!Array.isArray(maps)||maps.length>500||maps.some(m=>!object(m)||Object.keys(m).sort().join()!=='callbackUserId,method,requestId,userId,verifiedAt'||!id(m['userId'])||m['userId'].length>256||!id(m['callbackUserId'])||m['callbackUserId'].length>256||!id(m['requestId'])||!version(m['verifiedAt'])||m['method']!=='administrator_relay')||new Set(maps.map(m=>m['userId'])).size!==maps.length||new Set(maps.map(m=>m['callbackUserId'])).size!==maps.length||o['wecomContactIdentityRevision']!==authRevision))return false;
+ if(maps!=null&&(!Array.isArray(maps)||maps.some(m=>!object(m)||Object.keys(m).sort().join()!=='callbackUserId,method,requestId,userId,verifiedAt'||!id(m['userId'])||m['userId'].length>256||!id(m['callbackUserId'])||m['callbackUserId'].length>256||!id(m['requestId'])||!version(m['verifiedAt'])||m['method']!=='administrator_relay')||new Set(maps.map(m=>m['userId'])).size!==maps.length||new Set(maps.map(m=>m['callbackUserId'])).size!==maps.length||o['wecomContactIdentityRevision']!==authRevision))return false;
  const challenges=o['wecomMemberChallenges'];
  if(challenges!=null&&(!Array.isArray(challenges)||challenges.length>100||challenges.some(c=>!object(c)||Object.keys(c).some(k=>!['requestId','userId','authRevision','phraseHash','createdAt','expiresAt','status','issuedAt','completedAt','method','createdBy'].includes(k))||!id(c['requestId'])||!id(c['userId'])||String(c['userId']).length>256||c['authRevision']!==authRevision||typeof c['phraseHash']!=='string'||!/^[0-9a-f]{64}$/.test(c['phraseHash'])||!version(c['createdAt'])||!version(c['expiresAt'])||c['expiresAt']!==Number(c['createdAt'])+86400000||!['pending','verified','failed'].includes(String(c['status']))||!version(c['issuedAt'])||c['method']!=='administrator_relay'||!id(c['createdBy'])||c['completedAt']!==undefined&&!version(c['completedAt']))||new Set(challenges.map(c=>c['requestId'])).size!==challenges.length))return false;
  if(!object(o['identity'])||Object.keys(o['identity']).sort().join()!=='appId,tenantId,tenantIdNamespace'||!id(o['identity']['appId'])||!id(o['identity']['tenantId'])||!['tenant_key','display_id','corp_id','app_id'].includes(String(o['identity']['tenantIdNamespace']))||!['verified','pending_verification','invalid','disabled'].includes(String(o['status']))||![null,true,false].includes(o['inboundVerified'] as null|boolean)||!['available','unavailable'].includes(String(o['directoryStatus'])))return false;
@@ -36,7 +39,19 @@ function valid(value:unknown):value is Report{
 function apply(old:EmployeeChannelRecord,report:Report):EmployeeChannelRecord{
  if(!report.observation)return old;
  const next={...old,revision:old.revision+report.revisionDelta};
+ if(report.wecomIdentityDelta&&(old.provider!=='wecom'||old.authRevision!==report.expected.authRevision||old.wecomContactIdentityRevision!==undefined&&old.wecomContactIdentityRevision!==old.authRevision))throw Error('channel_observation_invalid');
  for(const field of fields){if(!(field in report.observation))continue;const value=report.observation[field];if(value===null&&field!=='lastError')delete (next as unknown as Record<string,unknown>)[field];else(next as unknown as Record<string,unknown>)[field]=structuredClone(value);}
+ if(report.wecomIdentityDelta){
+  const exact=(report.observation.wecomVerifiedContactIds??[]) as string[],maps=(report.observation.wecomContactMappings??[]) as NonNullable<EmployeeChannelRecord['wecomContactMappings']>;
+  const additions=new Map<string,string>(),reverse=new Map<string,string>();
+  for(const m of [...exact.map(userId=>({userId,callbackUserId:userId})),...maps]){
+   const byUser=identityLookup(old,'user_id',m.userId),byCallback=identityLookup(old,'callback_user_id',m.callbackUserId);
+   if(byUser&&byUser.callback_user_id!==m.callbackUserId||byCallback&&byCallback.user_id!==m.userId||additions.has(m.userId)&&additions.get(m.userId)!==m.callbackUserId||reverse.has(m.callbackUserId)&&reverse.get(m.callbackUserId)!==m.userId)throw Error('channel_observation_conflict');
+   additions.set(m.userId,m.callbackUserId);reverse.set(m.callbackUserId,m.userId);
+  }
+  delete next.wecomVerifiedContactIds;delete next.wecomContactMappings;
+  withIdentityDelta(next,{exact,maps});
+ }
  if(next.identity.appId!==old.appId)throw Error('channel_observation_invalid');
  // Only operational downgrades may update a disabled configuration.
  if(!old.enabled&&next.status!=='disabled')throw Error('channel_observation_invalid');
@@ -65,24 +80,23 @@ function mergeWeComIdentity(old:EmployeeChannelRecord,report:Report,retains:(c:W
    if(issued.status!=='verified'&&issued.status!=='failed')challenges[index]=fact;
   }
  }
- const pairs=new Map<string,string>(),reverse=new Map<string,string>();
- const add=(user:string,callback:string)=>{if(pairs.has(user)&&pairs.get(user)!==callback||reverse.has(callback)&&reverse.get(callback)!==user)return false;pairs.set(user,callback);reverse.set(callback,user);return true;};
- const exact=[...new Set([...(old.wecomVerifiedContactIds??[]),...(incoming.wecomVerifiedContactIds??[])])],maps=[...(old.wecomContactMappings??[])];
- for(const userId of exact)if(!add(userId,userId))return;
- for(const mapping of maps)if(!add(mapping.userId,mapping.callbackUserId))return;
- for(const mapping of incoming.wecomContactMappings??[]){
-  const existing=maps.find(m=>m.userId===mapping.userId);if(existing){if(JSON.stringify(existing)!==JSON.stringify(mapping))return;continue;}
-  const challenge=challenges.find(c=>c.requestId===mapping.requestId&&c.userId===mapping.userId&&c.status==='verified'&&c.completedAt===mapping.verifiedAt&&c.authRevision===old.authRevision);
-  if(!challenge||!add(mapping.userId,mapping.callbackUserId))return;
-  maps.push(mapping);
+ const delta=identityDelta(incoming);
+ if(delta){
+  for(const mapping of delta.maps){
+   const existing=identityLookup(old,'user_id',mapping.userId);
+   if(existing){if(existing.mapping_json!==JSON.stringify(mapping))return;continue;}
+   const challenge=challenges.find(c=>c.requestId===mapping.requestId&&c.userId===mapping.userId&&c.status==='verified'&&c.completedAt===mapping.verifiedAt&&c.authRevision===old.authRevision);if(!challenge)return;
+  }
+  return withIdentityDelta({...old,wecomContactIdentityRevision:old.authRevision,wecomMemberChallenges:challenges},delta);
  }
- if(pairs.size>500)return;
- return{...old,...(pairs.size?{wecomContactIdentityRevision:old.authRevision}:{}),wecomVerifiedContactIds:exact,wecomContactMappings:maps,wecomMemberChallenges:challenges};
+ // Legacy non-delta operational reports cannot modify relationship evidence.
+ if(report.observation.wecomVerifiedContactIds!=null||report.observation.wecomContactMappings!=null)return;
+ return {...old,wecomMemberChallenges:challenges};
 }
 function auth(header:string|undefined,token:string){const a=Buffer.from(header??''),b=Buffer.from('Bearer '+token);return !!token&&a.length===b.length&&timingSafeEqual(a,b);}
 export function registerChannelObservationApi(server:FastifyInstance,options:{token:string;channels:EmployeeChannelService;store:Store}):void{
  options.store.db.exec('CREATE TABLE IF NOT EXISTS channel_observation_receipts(id TEXT PRIMARY KEY,body_digest TEXT NOT NULL,response_json TEXT NOT NULL)');
- server.post('/internal/config/wecom-member-confirmed',(request,reply)=>{reply.header('cache-control','no-store');if(!auth(request.headers.authorization,options.token))return reply.code(401).send({error:'configuration_unauthorized'});const b=request.body;if(!object(b)||Object.keys(b).sort().join()!=='authRevision,callbackUserId,connectionId,requestId,sourceId'||!['callbackUserId','connectionId','requestId','sourceId'].every(k=>id(b[k]))||!version(b['authRevision']))return reply.code(400).send({error:'invalid_member_verification_request'});const r=options.channels.repository.byId(b['connectionId'] as string);return{confirmed:!!r&&r.enabled&&r.status==='verified'&&r.sourceId===b['sourceId']&&r.authRevision===b['authRevision']&&r.wecomContactIdentityRevision===r.authRevision&&!!r.wecomContactMappings?.some(m=>m.requestId===b['requestId']&&m.callbackUserId===b['callbackUserId'])};});
+ server.post('/internal/config/wecom-member-confirmed',(request,reply)=>{reply.header('cache-control','no-store');if(!auth(request.headers.authorization,options.token))return reply.code(401).send({error:'configuration_unauthorized'});const b=request.body;if(!object(b)||Object.keys(b).sort().join()!=='authRevision,callbackUserId,connectionId,requestId,sourceId'||!['callbackUserId','connectionId','requestId','sourceId'].every(k=>id(b[k]))||!version(b['authRevision']))return reply.code(400).send({error:'invalid_member_verification_request'});const r=options.channels.repository.byId(b['connectionId'] as string);return{confirmed:!!r&&r.enabled&&r.status==='verified'&&r.sourceId===b['sourceId']&&r.authRevision===b['authRevision']&&r.wecomContactIdentityRevision===r.authRevision&&JSON.parse(identityLookup(r,'callback_user_id',b['callbackUserId'] as string)?.mapping_json??'null')?.requestId===b['requestId']};});
  server.post('/internal/config/channel-observation',{bodyLimit:524288},(request,reply)=>{
   reply.header('cache-control','no-store');
   if(!auth(request.headers.authorization,options.token))return reply.code(401).send({error:'configuration_unauthorized'});
@@ -113,6 +127,23 @@ export function installChannelObservationReporter(store:Store,repository:Employe
   const delta=record.revision-previous.revision;
   if(record.sourceId!==previous.sourceId||record.authRevision!==previous.authRevision||record.enabled!==previous.enabled||record.appId!==previous.appId||record.provider!==previous.provider||record.id!==previous.id||record.workspaceId!==previous.workspaceId||record.entityId!==previous.entityId||JSON.stringify(record.credential)!==JSON.stringify(previous.credential)||JSON.stringify(record.context)!==JSON.stringify(previous.context))throw Error('runtime_channel_configuration_readonly');
   const report:Report={reportId:randomUUID(),connectionId:record.id,expected:{revision:previous.revision,authRevision:previous.authRevision,stateVersion:previous.stateVersion},revisionDelta:delta as 0|1,observation:observation(record),verificationEvents:[]};
+  // Identity facts are append-only in the runtime. Send only additions; challenge
+  // history remains bounded and is still reported for nonce/CAS verification.
+  if(record.provider==='wecom'&&record.wecomContactIdentityRevision===record.authRevision){
+   let delta=identityDelta(record);
+   if(!delta){
+    // Explicit array writes are used only by controlled imports/tests; runtime
+    // verification produces a small delta directly, without enumerating bindings.
+    const ids=Object.getOwnPropertyDescriptor(record,'wecomVerifiedContactIds'),maps=Object.getOwnPropertyDescriptor(record,'wecomContactMappings');
+    const exact=ids&&'value'in ids?record.wecomVerifiedContactIds??[]:[],addedMaps=maps&&'value'in maps?record.wecomContactMappings??[]:[];
+    if(ids&&'value'in ids&&identityStore(previous)!.one<{n:number}>('SELECT count(*) n FROM wecom_identity_bindings WHERE connection_id=? AND source_id=? AND auth_revision=? AND mapping_json IS NULL',...identityScope(previous))!.n>exact.length||maps&&'value'in maps&&identityStore(previous)!.one<{n:number}>('SELECT count(*) n FROM wecom_identity_bindings WHERE connection_id=? AND source_id=? AND auth_revision=? AND mapping_json IS NOT NULL',...identityScope(previous))!.n>addedMaps.length)throw Error('runtime_channel_identity_not_monotonic');
+    for(const mapping of addedMaps){const old=identityLookup(previous,'user_id',mapping.userId);if(old&&old.mapping_json!==JSON.stringify(mapping))throw Error('runtime_channel_identity_not_monotonic');}
+    delta={exact:exact.filter(id=>!identityLookup(previous,'user_id',id)),maps:addedMaps.filter(m=>!identityLookup(previous,'user_id',m.userId))};
+   }
+   report.wecomIdentityDelta=true;
+   report.observation!.wecomVerifiedContactIds=delta.exact;
+   report.observation!.wecomContactMappings=delta.maps;
+  }
   if(record.sourceId!==previous.sourceId||record.authRevision!==previous.authRevision||record.enabled!==previous.enabled||record.appId!==previous.appId||JSON.stringify(record.context)!==JSON.stringify(previous.context)||!valid(report))throw Error('runtime_channel_configuration_readonly');
   const saved=originalSave.call(this,record,previous);if(saved)enqueue(report);return saved;
  });};

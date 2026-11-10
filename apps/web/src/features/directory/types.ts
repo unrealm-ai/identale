@@ -22,7 +22,7 @@ export interface DirectoryConnection {
   memberSearchVerifiedUserIds?:string[];
 }
 export interface DirectoryItem { identityVerified?: boolean; externalId: string; subjectId: string; displayName: string; kind: 'channel_user' | 'department'; departmentPaths?:string[] }
-export interface DirectoryPage { sourceId: string; provider: DirectoryProvider; appId: string; items: DirectoryItem[]; nextCursor?: string; exhausted: boolean; limited?:boolean }
+export interface DirectoryPage { sourceId: string; provider: DirectoryProvider; appId: string; items: DirectoryItem[]; nextCursor?: string; exhausted: boolean; limited?:boolean; snapshotVersion?:number; sync?:DirectorySyncStatus }
 export interface DirectorySubjects { sources: DirectoryConnection[]; users: never[]; departments: never[] }
 export interface DirectoryAccessRule {
   sourceId: string; kind: 'channel_user' | 'department'; subjectId: string;
@@ -40,3 +40,9 @@ export interface PackageChannelPolicy { sourceId: string; legacyAllowCheck?: tru
 export interface PackageDirectoryAccess { allow: DirectoryAccessRule[]; deny: DirectoryAccessRule[]; channelPolicies?: PackageChannelPolicy[] }
 
 export interface DirectoryIdentityEvidence { sourceId: string; authRevision: number; userId: string }
+
+export interface DirectorySyncStatus {
+ connectionId:string; snapshotVersion:number; running:boolean; hasSnapshot:boolean; stale:boolean;
+ lastSuccessAt:number|null; lastResult:'never'|'success'|'failure'|'invalidated';
+ progress?:{userCount:number;departmentCount:number}; partSummary?:{total:number;succeeded:number;failed:number;blocked:number;running:number};
+}

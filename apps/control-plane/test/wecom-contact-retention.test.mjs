@@ -49,7 +49,7 @@ async function fixture(t){
  const policy=(c,allow=[],deny=[],mode='allowlist')=>capabilities.patchDirectoryAccess(c.workspaceId,c.entityId,{sourceId:c.sourceId,mode,allow:allow.map(id=>rule(c,id)),deny:deny.map(id=>rule(c,id)),allowGroupMembers:false,expectedRevision:capabilities.getDirectoryAccess(c.workspaceId,c.entityId).channelPolicies.find(p=>p.sourceId===c.sourceId).revision});
  const target=(c,id)=>({kind:'wecom_directory',connectionId:c.id,provider:'wecom',appId:c.appId,tenantId:c.eventTenantId,sourceId:c.sourceId,authRevision:c.authRevision,directoryUserId:id,identityNamespace:'user_id'});
  const url=c=>`/api/workspaces/${c.workspaceId}/entities/${c.entityId}/human-confirmation`;
- const candidates=async c=>(await app.inject({url:url(c)})).json().candidates.filter(x=>x.target.kind==='wecom_directory');
+ const candidates=async c=>Promise.all(channels.botContacts.knownPage(current(c)).items.map(async contact=>{const response=await app.inject({method:'POST',url:url(c)+'/resolve',payload:{sourceId:c.sourceId,subjectId:channelSubject('channel_user',contact.user_id,'user_id',c.appId)}});assert.equal(response.statusCode,200,response.body);return response.json();}));
  const saveHuman=async(c,ids,expectedVersion=0)=>{const response=await app.inject({method:'PUT',url:url(c),payload:{expectedVersion,rules:ids.map((id,i)=>({questionScope:i?'Scope '+i:'*',target:target(c,id)}))}});assert.equal(response.statusCode,200,response.body);};
  const start=(c,id)=>channels.startMemberVerification(c.workspaceId,c.entityId,'u',{sourceId:c.sourceId,userId:id,requestId:randomUUID()});
  const accept=(c,id,issued)=>assert.equal(channels.memberVerification.accept(current(c),{text:issued.phrase,callbackUserId:'callback-'+id,eventId:randomUUID(),messageId:randomUUID(),privateMessage:true}),'verified');
@@ -68,8 +68,9 @@ test('thousands of searches retain verified, exact-ID and pending members plus 5
  f.advance(600001);assert.equal(f.channels.botContacts.recent(f.current(c)).length,0);
  const choices=await f.candidates(c);assert.deepEqual(choices.map(x=>x.target.directoryUserId).sort(),['exact','mapped','pending']);
  assert.equal(choices.find(x=>x.target.directoryUserId==='pending').identityVerified,false);
+ const queries=f.state.queries.length;
  await f.channels.assertWeComPrivateRecipient(c.id,'callback-mapped');await f.channels.assertWeComPrivateRecipient(c.id,'exact');
- assert.deepEqual(f.state.queries.at(-2),['Member mapped']);
+ assert.equal(f.state.queries.length,queries,'recipient checks stay local');
  await assert.rejects(f.channels.assertWeComPrivateRecipient(c.id,'mapped'),/authorization_denied/);
  await assert.rejects(f.channels.assertWeComPrivateRecipient(c.id,'pending'),/authorization_denied/);
  f.accept(c,'pending',pending);await f.bulk(c);await f.channels.assertWeComPrivateRecipient(c.id,'callback-pending');
@@ -93,14 +94,14 @@ test('saved inactive lists, disabled packages and unverified human choices retai
  assert.equal((await f.start(c,'confirmer')).status,'pending','saved unverified selection remains bindable');
 });
 
-test('retention does not renew new-selection freshness or permanently pin deleted references and retired challenges',async t=>{
+test('retained selections can be reused but deleted references and retired challenges are not pinned forever',async t=>{
  const f=await fixture(t),c=await f.ready();await f.seed(c,['configured','package','confirmer','pending','mapped']);
  f.policy(c,['configured']);const pkg=f.savePackage(c,'package');await f.saveHuman(c,['confirmer']);const pending=await f.start(c,'pending');await f.bind(c,'mapped');
  const found=f.channels.botContacts.get(f.current(c),'configured').found_at;
  await f.bulk(c);f.advance(600001);
  assert.equal(f.channels.botContacts.get(f.current(c),'configured').found_at,found);
- assert.equal(f.channels.botContacts.selectable(f.current(c),'configured'),false);
- assert.throws(()=>f.channels.validateRules('w','e',[f.rule(c,'configured')]),/invalid_member_search_candidate/);
+ assert.equal(f.channels.botContacts.selectable(f.current(c),'configured'),true);
+ assert.deepEqual(f.channels.validateRules('w','e',[f.rule(c,'configured')]),[f.rule(c,'configured')]);
  assert.deepEqual(f.channels.validateRules('w','e',[f.rule(c,'configured')],[f.rule(c,'configured')]),[f.rule(c,'configured')]);
  f.policy(c);f.store.run('DELETE FROM capability_packages WHERE id=?',pkg.id);await f.saveHuman(c,[],1);
  const before=f.current(c);f.repository.save({...before,wecomContactMappings:[]},before);
@@ -109,19 +110,20 @@ test('retention does not renew new-selection freshness or permanently pin delete
  for(const id of ['configured','package','confirmer','pending','mapped'])assert.equal(f.channels.botContacts.get(f.current(c),id),undefined);
 });
 
-test('same-name searches never bind or rescue a missing exact provider recipient',async t=>{
+test('recipient uses the persisted identity, never a name search or same-name substitution',async t=>{
  const f=await fixture(t),c=await f.ready();await f.seed(c,['one','two']);await f.bind(c,'one');
  f.catalog.get('two').name='Member one';await f.search(c,['two']);
  await f.bulk(c);f.state.removed.add('one');
- await assert.rejects(f.channels.assertWeComPrivateRecipient(c.id,'callback-one'),/authorization_denied/);
+ const queries=f.state.queries.length;await f.channels.assertWeComPrivateRecipient(c.id,'callback-one');
+ assert.equal(f.state.queries.length,queries);await assert.rejects(f.channels.assertWeComPrivateRecipient(c.id,'two'),/authorization_denied/);
  assert.equal(weComCallbackUserId(f.current(c),'two'),undefined);
  assert.equal(weComCallbackUserId(f.current(c),'one'),'callback-one');
 });
 
-test('legacy profile loss stays blocked until current search restores metadata without rebinding',async t=>{
+test('profile cache loss does not erase a persisted recipient binding',async t=>{
  const f=await fixture(t),c=await f.ready();await f.seed(c,['mapped']);await f.bind(c,'mapped');
  const mapping=f.current(c).wecomContactMappings;f.store.run('DELETE FROM wecom_bot_contacts WHERE connection_id=?',c.id);
- await assert.rejects(f.channels.assertWeComPrivateRecipient(c.id,'callback-mapped'),/authorization_denied/);
+ await f.channels.assertWeComPrivateRecipient(c.id,'callback-mapped');
  await f.seed(c,['mapped']);await f.bulk(c);await f.channels.assertWeComPrivateRecipient(c.id,'callback-mapped');
  assert.deepEqual(f.current(c).wecomContactMappings,mapping);assert.equal((await f.start(c,'mapped')).status,'verified');
 });
@@ -166,10 +168,10 @@ test('retained profiles persist across a reopened SQLite service without refresh
  finally{store.close();}
 });
 
-test('recipient search result cannot survive an in-flight mapping revocation',async t=>{
+test('recipient check reads the current mapping and rejects revocation without external lookup',async t=>{
  const f=await fixture(t),c=await f.ready();await f.seed(c,['mapped']);await f.bind(c,'mapped');
- f.state.beforeSearch=async()=>{f.state.beforeSearch=undefined;const before=f.current(c);f.repository.save({...before,wecomContactMappings:[]},before);};
- await assert.rejects(f.channels.assertWeComPrivateRecipient(c.id,'callback-mapped'),/authorization_denied/);
+ const queries=f.state.queries.length,before=f.current(c);f.repository.save({...before,wecomContactMappings:[]},before);
+ await assert.rejects(f.channels.assertWeComPrivateRecipient(c.id,'callback-mapped'),/authorization_denied/);assert.equal(f.state.queries.length,queries);
 });
 
 test('an in-flight first inbound does not discard a search started before bot confirmation',async t=>{
@@ -202,4 +204,15 @@ test('split configuration projects all retained members beyond 500 and clears th
   await f.channels.revalidate('w','e','wecom','u',f.current(c).revision);assert.equal(await poller.poll(),true);
   assert.equal(runtime.one('SELECT count(*) n FROM wecom_bot_contacts').n,0);assert.equal(channels.botContacts.get(current,'mapped'),undefined);
  }finally{poller.stop();runtime.close();}
+});
+
+
+test('local known people are pageable and retained identities survive search age without becoming an organization snapshot',async t=>{
+ const f=await fixture(t),c=await f.ready();await f.seed(c,['a','b','c']);await f.bind(c,'a');f.policy(c,['b']);
+ let page=f.channels.botContacts.knownPage(f.current(c),{limit:2});assert.deepEqual(page.items.map(p=>p.user_id),['a','b']);assert.equal(page.exhausted,false);
+ page=f.channels.botContacts.knownPage(f.current(c),{after:page.nextAfter,limit:2});assert.deepEqual(page.items.map(p=>p.user_id),['c']);assert.equal(page.exhausted,true);
+ f.advance(600001);page=f.channels.botContacts.knownPage(f.current(c),{keywords:['Member']});assert.deepEqual(page.items.map(p=>p.user_id),['a','b']);
+ assert.equal(f.channels.botContacts.knownPage(f.current(c),{keywords:['Engineering']}).items.length,2);
+ assert.equal(f.channels.botContacts.knownPage({...f.current(c),authRevision:c.authRevision+1}).items.length,0);
+ assert.throws(()=>f.channels.botContacts.knownPage(f.current(c),{limit:101}),/invalid_response/);
 });

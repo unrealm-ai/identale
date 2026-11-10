@@ -100,7 +100,7 @@ test('employee UI hides advanced restrictions but preserves existing Web deny an
 });
 test('employee whitelist new selections default to both scenes while package picker retains its original scene controls',async t=>{
  let selected=[];let env=await mount(t,'picker',{base,label:'白名单',employeeScope:true,subjects:subjects(),rules:selected,'onUpdate:rules':v=>{selected=v;env.props.rules=v;}},async()=>page([department]));
- await click('查询当前目录');await until(()=>text().includes('研发部'));await click('选择部门');assert.deepEqual(selected[0].conversationKinds,['private','group']);assert.equal([...document.querySelectorAll('[role="checkbox"]')].some(el=>el.textContent.trim()==='私聊'||el.textContent.trim()==='群聊'),false);
+ await click('搜索');await until(()=>text().includes('研发部'));await click('选择部门');assert.deepEqual(selected[0].conversationKinds,['private','group']);assert.equal([...document.querySelectorAll('[role="checkbox"]')].some(el=>el.textContent.trim()==='私聊'||el.textContent.trim()==='群聊'),false);
  env.props.employeeScope=false;await flush();assert.ok([...document.querySelectorAll('[role="checkbox"]')].some(el=>el.textContent.trim()==='私聊'),'generic/package picker keeps scene selection');
 });
 
@@ -194,7 +194,7 @@ test('WeCom visible code expiry refreshes once without background rotation',asyn
 });
 test('WeCom rules select immediately and retain automatic code entry after reopening without search',async t=>{
  let env;env=await mount(t,'picker',{base,label:'使用范围',subjects:subjects(wecomConnection()),rules:[],'onUpdate:rules':rules=>{env.props.rules=rules;}},async r=>r.url.endsWith('/member-search')?page([{...verificationPerson}],{provider:'wecom'}):currentCode());
- input('使用范围成员关键词','测试');await click('搜索企微成员');await click('选择人员');await until(()=>document.querySelector('.directory-rule-detail'));assert.equal(env.props.rules.length,1);assert.match(text(),/可先保存/);env.props.base='/workspaces/workspace-a/entities/employee-next';await flush();assert.equal(document.querySelector('.directory-option'),null);await until(()=>document.querySelector('.directory-rule-detail input[readonly]'));
+ input('使用范围成员关键词','测试');await click('搜索企微成员');await click('选择人员');await until(()=>document.querySelector('.directory-rule-detail'));assert.equal(env.props.rules.length,1);assert.match(text(),/可先保存/);env.props.base='/workspaces/workspace-a/entities/employee-next';await flush();await until(()=>document.querySelector('.directory-rule-detail input[readonly]'));assert.ok(env.requests.some(r=>r.url.includes('/employee-next/channels/wecom/member-search')));
 });
 const pendingHumanTarget={kind:'wecom_directory',connectionId:'connection-1',provider:'wecom',appId:'fixture-app',tenantId:'fixture-tenant',sourceId:'source-1',authRevision:1,directoryUserId:'searched-person',identityNamespace:'user_id'};
 for(const initiallyVerified of [false,true])test(`WeCom confirmation saves ${initiallyVerified?'verified':'pending'} target without waiting for member`,async t=>{
@@ -202,6 +202,7 @@ for(const initiallyVerified of [false,true])test(`WeCom confirmation saves ${ini
   if(r.url.endsWith('/member-search'))return page([{...verificationPerson,identityVerified:verified}],{provider:'wecom'});
   if(r.url.includes('/member-verification'))return verified?{userId:'searched-person',status:'verified'}:currentCode();
   if(r.method==='PUT')return{version:2,rules:r.body.rules};
+  if(r.url.endsWith('/human-confirmation/resolve'))return{label:verificationPerson.displayName,directorySubjectId:verificationPerson.subjectId,identityVerified:verified,target:pendingHumanTarget};
   return{version:1,rules:[],subjects:subjects(wecomConnection()),candidates:[{label:verificationPerson.displayName,directorySubjectId:verificationPerson.subjectId,identityVerified:verified,target:pendingHumanTarget}]};
  });
  await until(()=>!button('从渠道目录选择').disabled);await click('从渠道目录选择');input('人工确认人成员关键词','测试');await click('搜索企微成员');await click('选择人员');await until(()=>document.querySelector('.human-rule'));await click('保存确认设置');await until(()=>text().includes('人工确认接收人已保存'));assert.deepEqual(env.requests.find(r=>r.method==='PUT').body.rules,[{questionScope:'*',target:pendingHumanTarget}]);

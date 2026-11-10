@@ -1,8 +1,9 @@
+import {withIdentityDelta} from './wecom-identity-bindings.js';
 import {createHmac,randomInt} from 'node:crypto';
 import type {EmployeeChannelRepository} from './repository.js';
 import type {EmployeeChannelRecord,WeComMemberChallenge} from './types.js';
 import type {DirectoryCredentialVault} from '../directory/secrets.js';
-import {usesWeComBotSearch,weComCallbackUserId,weComSearchUserId,weComVerifiedUserIds} from './wecom-bot-contacts.js';
+import {usesWeComBotSearch,weComCallbackUserId,weComSearchUserId} from './wecom-bot-contacts.js';
 
 const lifetime=24*60*60_000,retention=3*lifetime;
 export const weComMemberCodeCandidates=(text:string)=>text.match(/(?<![0-9])[0-9]{6}(?![0-9])/g)??[];
@@ -42,7 +43,6 @@ export class WeComMemberVerification {
   if(previous){if(previous.user_id!==userId)fail(409,'member_verification_request_conflict');return this.status(r,userId);}
   const pending=r.wecomMemberChallenges?.find(c=>c.userId===userId&&c.authRevision===r.authRevision&&active(c,this.now())&&!!this.repository.store.one('SELECT 1 FROM wecom_member_verification_requests WHERE connection_id=? AND source_id=? AND auth_revision=? AND request_id=?',r.id,r.sourceId,r.authRevision,c.requestId));
   if(pending&&!replace){this.repository.store.run('INSERT INTO wecom_member_verification_requests VALUES(?,?,?,?,?,?,?,NULL,NULL,NULL,?)',r.id,r.sourceId,r.authRevision,requestId,userId,this.now(),r.appId,pending.requestId);return this.status(r,userId);}
-  if(weComVerifiedUserIds(r).length>=500)fail(409,'member_verification_limit');
   const now=this.now(),history=(r.wecomMemberChallenges??[]).filter(c=>c.authRevision===r.authRevision&&retained(c,now));
   // Configuration capacity limits, not guess budgets: ordinary messages never
   // reserve attempts or trigger cooldowns. Never evict still-protected old codes.
@@ -88,8 +88,9 @@ export class WeComMemberVerification {
   this.repository.markVerificationEvent(r.id,input.eventId,input.messageId);
   const completedAt=this.now();
   if(!active(challenge,completedAt))return challenge.completedAt===undefined||challenge.completedAt>=challenge.expiresAt?'expired':challenge.status==='verified'?'used':'revoked';
-  const bySearch=weComCallbackUserId(r,challenge.userId),byCallback=weComSearchUserId(r,input.callbackUserId),conflict=(bySearch!==undefined&&bySearch!==input.callbackUserId)||(byCallback!==undefined&&byCallback!==challenge.userId)||weComVerifiedUserIds(r).length>=500;
-  const next:EmployeeChannelRecord={...r,wecomMemberChallenges:r.wecomMemberChallenges!.map(c=>c.requestId===challenge.requestId?{...c,status:conflict?'failed':'verified',completedAt}:c),...(!conflict?{wecomContactIdentityRevision:r.authRevision,wecomContactMappings:[...(r.wecomContactIdentityRevision===r.authRevision?r.wecomContactMappings??[]:[]).filter(m=>m.userId!==challenge.userId),{userId:challenge.userId,callbackUserId:input.callbackUserId,verifiedAt:completedAt,requestId:challenge.requestId,method:'administrator_relay' as const}]}:{})};
+  const bySearch=weComCallbackUserId(r,challenge.userId),byCallback=weComSearchUserId(r,input.callbackUserId),conflict=(bySearch!==undefined&&bySearch!==input.callbackUserId)||(byCallback!==undefined&&byCallback!==challenge.userId);
+  const next:EmployeeChannelRecord={...r,wecomMemberChallenges:r.wecomMemberChallenges!.map(c=>c.requestId===challenge.requestId?{...c,status:conflict?'failed':'verified',completedAt}:c),...(!conflict?{wecomContactIdentityRevision:r.authRevision}:{})};
+  if(!conflict)withIdentityDelta(next,{exact:[],maps:[{userId:challenge.userId,callbackUserId:input.callbackUserId,verifiedAt:completedAt,requestId:challenge.requestId,method:'administrator_relay'}]});
   try{this.save(r,next,'authenticated-ingress',conflict?'member_verification_conflict':'member_verification_admin_relay_confirmed');return conflict?'invalid':'verified';}catch{return'invalid';}
  }
 }

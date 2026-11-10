@@ -160,10 +160,10 @@ test('WeCom per-member evidence reaches platform without treating the legacy glo
  f.runtime.service.observeWeComContact('c','person-one');
  await f.reporter.flush();
  assert.deepEqual(f.platform.repository.byId('c').wecomVerifiedContactIds,['person-one']);
- assert.deepEqual(f.platform.service.dto(f.platform.repository.byId('c')).memberSearchVerifiedUserIds,['person-one']);
+ assert.deepEqual(f.platform.service.dto(f.platform.repository.byId('c')).memberSearchVerifiedUserIds,[],'DTO exposes only configured selections, not all bindings');
  assert.equal(f.platform.repository.byId('c').revision,current.revision);
  const report=f.sent[0];
- for(const ids of [['person-one','person-one'],[''],[1],Array.from({length:501},(_,i)=>'user-'+i)]){
+ for(const ids of [['person-one','person-one'],[''],[1]]){
   const response=await f.server.inject({method:'POST',url:'/internal/config/channel-observation',headers:{authorization:'Bearer '+token},payload:{...report,reportId:'invalid-'+JSON.stringify(ids).length,observation:{...report.observation,wecomVerifiedContactIds:ids}}});
   assert.equal(response.statusCode,400);
  }
@@ -224,4 +224,61 @@ for(const unexpected of ['expired-history','active-challenge','history-with-new-
  if(unexpected==='expired-history'){
   assert.equal(after.wecomContactMappings[0].callbackUserId,'callback-current');assert.equal(after.wecomMemberChallenges.length,2);assert.equal(after.wecomMemberChallenges.some(c=>c.requestId==='old-request'),false);assert.ok(f.reporter.status().every(r=>r.status==='accepted'));
  }else{assert.equal(after.wecomContactMappings,undefined);assert.ok(f.reporter.status().some(r=>r.status==='conflict'));}
+});
+
+
+test('WeCom incremental reports stay small above 512KB of persisted bindings and retry/reconcile without loss',async t=>{
+ const maps=Array.from({length:4000},(_,i)=>({userId:'person-'+i,callbackUserId:'callback-'+i,requestId:'historical-request-'+i,verifiedAt:1800000000000,method:'administrator_relay'}));
+ assert.ok(Buffer.byteLength(JSON.stringify(maps))>524288);
+ const f=fixture(t,r=>({...r,provider:'wecom',botId:'app',eventTenantId:'app',status:'verified',inboundVerified:true,directoryStatus:'unavailable',verification:undefined,wecomContactIdentityRevision:r.authRevision,wecomContactMappings:maps}));
+ const before=f.runtime.repository.byId('c');
+ f.runtime.repository.save({...before,wecomVerifiedContactIds:['new-exact']},before);
+ const queued=JSON.parse(f.runtime.store.one('SELECT body_json FROM channel_state_reports').body_json);
+ assert.equal(queued.wecomIdentityDelta,true);assert.deepEqual(queued.observation.wecomContactMappings,[]);assert.deepEqual(queued.observation.wecomVerifiedContactIds,['new-exact']);assert.ok(Buffer.byteLength(JSON.stringify(queued))<4096);
+ const platform=f.platform.repository.byId('c');f.platform.repository.save({...platform,wecomVerifiedContactIds:['concurrent-exact']},platform);
+ f.lose();await f.reporter.flush();const acceptedVersion=f.platform.repository.byId('c').stateVersion;await f.reporter.flush();
+ const result=f.platform.repository.byId('c');assert.equal(result.stateVersion,acceptedVersion);assert.equal(result.wecomContactMappings.length,4000);assert.deepEqual(result.wecomVerifiedContactIds,['concurrent-exact','new-exact']);
+ f.runtime.store.run('UPDATE employee_channel_connections SET record_json=?,state_version=? WHERE id=?',JSON.stringify(before),before.stateVersion,'c');f.reporter.reconcile();
+ assert.equal(f.runtime.repository.byId('c').wecomContactMappings.length,4000);assert.deepEqual(f.runtime.repository.byId('c').wecomVerifiedContactIds,['new-exact']);
+ const current=f.runtime.repository.byId('c');assert.throws(()=>f.runtime.repository.save({...current,wecomContactMappings:[]},current),/not_monotonic/);
+});
+
+test('WeCom delta cannot cross credential revisions or collide with a persistent binding',async t=>{
+ const f=fixture(t,r=>({...r,provider:'wecom',botId:'app',eventTenantId:'app',status:'verified',inboundVerified:true,directoryStatus:'unavailable',verification:undefined,wecomContactIdentityRevision:r.authRevision,wecomVerifiedContactIds:['person']}));
+ const before=f.runtime.repository.byId('c');f.runtime.repository.save({...before,wecomVerifiedContactIds:['person','next']},before);
+ const report=JSON.parse(f.runtime.store.one('SELECT body_json FROM channel_state_reports').body_json);
+ const post=payload=>f.server.inject({method:'POST',url:'/internal/config/channel-observation',headers:{authorization:'Bearer '+token},payload});
+ assert.equal((await post({...report,reportId:'cross-auth',expected:{...report.expected,authRevision:2},observation:{...report.observation,wecomContactIdentityRevision:2}})).statusCode,409);
+ assert.equal((await post({...report,reportId:'collision',observation:{...report.observation,wecomContactMappings:[{userId:'other',callbackUserId:'person',requestId:'new',verifiedAt:1,method:'administrator_relay'}]}})).statusCode,409);
+ assert.deepEqual(f.platform.repository.byId('c').wecomVerifiedContactIds,['person']);
+});
+
+
+test('10k relational identities keep channel JSON bounded, use indexes, and do not enumerate on ingress/report',async t=>{
+ const {withIdentityDelta,identityLookup}=await import('../dist/employee-channels/wecom-identity-bindings.js');
+ const {weComCallbackUserId,weComSearchUserId}=await import('../dist/employee-channels/wecom-bot-contacts.js');
+ const exact=Array.from({length:10000},(_,i)=>'identity-'+i);
+ const f=fixture(t,r=>({...r,provider:'wecom',botId:'app',eventTenantId:'app',status:'verified',inboundVerified:true,directoryStatus:'unavailable',verification:undefined,wecomContactIdentityRevision:r.authRevision,wecomVerifiedContactIds:exact}));
+ const before=f.runtime.repository.byId('c'),json=f.runtime.store.one('SELECT record_json FROM employee_channel_connections').record_json;
+ assert.ok(json.length<2000);assert.equal(json.includes('identity-9999'),false);
+ const all=f.runtime.store.all.bind(f.runtime.store);f.runtime.store.all=(sql,...args)=>{if(sql.includes('FROM wecom_identity_bindings'))throw Error('unexpected full relation enumeration');return all(sql,...args);};
+ assert.equal(weComCallbackUserId(before,'identity-9999'),'identity-9999');assert.equal(weComSearchUserId(before,'identity-1'),'identity-1');
+ f.runtime.repository.save(withIdentityDelta({...before,wecomContactIdentityRevision:before.authRevision},{exact:['new-indexed'],maps:[]}),before);
+ assert.equal(identityLookup(f.runtime.repository.byId('c'),'user_id','new-indexed').callback_user_id,'new-indexed');
+ const body=f.runtime.store.one('SELECT body_json FROM channel_state_reports').body_json;assert.ok(body.length<4096);assert.equal(body.includes('identity-9999'),false);
+ await f.reporter.flush();assert.equal(identityLookup(f.platform.repository.byId('c'),'user_id','new-indexed').callback_user_id,'new-indexed');
+ f.runtime.store.all=all;
+ for(const column of ['user_id','callback_user_id'])assert.match(f.runtime.store.all(`EXPLAIN QUERY PLAN SELECT * FROM wecom_identity_bindings WHERE connection_id=? AND source_id=? AND auth_revision=? AND ${column}=?`,'c','source',1,'identity-9999').map(x=>x.detail).join(' '),/SEARCH .*INDEX/);
+});
+
+test('relational identity writes are atomic with CAS, scoped, and ignore legacy JSON evidence',async t=>{
+ const {withIdentityDelta,identityLookup}=await import('../dist/employee-channels/wecom-identity-bindings.js');
+ const f=fixture(t,r=>({...r,provider:'wecom',botId:'app',eventTenantId:'app',status:'verified',inboundVerified:true,directoryStatus:'unavailable',verification:undefined,wecomContactIdentityRevision:r.authRevision}));
+ const before=f.platform.repository.byId('c');f.platform.repository.save(withIdentityDelta({...before},{exact:['person'],maps:[]}),before);
+ assert.equal(f.platform.repository.save(withIdentityDelta({...before},{exact:['stale'],maps:[]}),before),false);assert.equal(identityLookup(f.platform.repository.byId('c'),'user_id','stale'),undefined);
+ const current=f.platform.repository.byId('c');assert.throws(()=>f.platform.repository.save(withIdentityDelta({...current},{exact:['rolled-back'],maps:[{userId:'other',callbackUserId:'person',requestId:'conflict',verifiedAt:1,method:'administrator_relay'}]}),current),/UNIQUE/);
+ assert.equal(identityLookup(f.platform.repository.byId('c'),'user_id','rolled-back'),undefined);assert.equal(f.platform.repository.byId('c').stateVersion,current.stateVersion);
+ f.platform.repository.save({...current,authRevision:2,wecomContactIdentityRevision:undefined},current);assert.equal(f.platform.store.one('SELECT count(*) n FROM wecom_identity_bindings').n,0);
+ const fresh=f.platform.repository.byId('c');f.platform.store.run('UPDATE employee_channel_connections SET record_json=? WHERE id=?',JSON.stringify({...fresh,wecomContactIdentityRevision:2,wecomVerifiedContactIds:['legacy-only']}),'c');
+ assert.equal(identityLookup(f.platform.repository.byId('c'),'user_id','legacy-only'),undefined);assert.equal(f.platform.repository.byId('c').wecomVerifiedContactIds,undefined);
 });

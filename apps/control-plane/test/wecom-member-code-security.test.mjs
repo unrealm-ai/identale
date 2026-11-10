@@ -269,3 +269,15 @@ test('split snapshots carry only scoped digests; active and three-day old-code b
  assert.equal(runtime.one("SELECT 1 FROM main.sqlite_master WHERE name LIKE 'wecom_member_code_%'"),undefined);
  runtime.db.exec('PRAGMA wal_checkpoint(TRUNCATE)');assert.equal(readFileSync(path).includes(Buffer.from(JSON.stringify(issued.phrase))),false);
 });
+
+
+test('more than 500 persisted identity bindings can accept a new code, survive restart and remain locally verifiable',async t=>{
+ const f=await fixture(t),r=f.record();
+ const mappings=Array.from({length:501},(_,i)=>({userId:'person-'+i,callbackUserId:'callback-'+i,verifiedAt:f.now(),requestId:'historic-'+i,method:'administrator_relay'}));
+ assert.equal(f.repository.save({...r,wecomContactIdentityRevision:r.authRevision,wecomContactMappings:mappings},r),true);
+ const issued=await f.start('next-person');assert.equal(issued.status,'pending');assert.equal(f.accept(issued.phrase,{callback:'next-callback'}),'verified');
+ assert.equal(f.record().wecomContactMappings.length,502);f.reopen();assert.equal(f.record().wecomContactMappings.length,502);
+ await f.service.assertWeComPrivateRecipient(f.record().id,'callback-500');await f.service.assertWeComPrivateRecipient(f.record().id,'next-callback');
+ await assert.rejects(f.service.assertWeComPrivateRecipient(f.record().id,'not-bound'),/authorization_denied/);
+ f.candidate('exact-person');f.service.observeWeComContact(f.record().id,'exact-person');assert.ok(f.record().wecomVerifiedContactIds.includes('exact-person'));
+});
