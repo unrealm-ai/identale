@@ -39,18 +39,18 @@ function foreignKeys(db:DatabaseSync,table:string,present:Set<string>):string[]{
 function uniqueKeys(db:DatabaseSync,table:string):string[]{return db.prepare(`PRAGMA main.index_list(${quote(table)})`).all().filter(r=>Number(r['unique'])===1&&r['origin']!=='c').map(r=>JSON.stringify(db.prepare(`PRAGMA main.index_info(${quote(String(r['name']))})`).all().map(c=>c['name']))).sort();}
 function canonicalSQL(sql:string):string{return sql.split(/('(?:''|[^'])*')/g).map((part,i)=>i%2?part:normalized(part.replace(/\bIF\s+NOT\s+EXISTS\b/gi,'')).replace(/\s*([(),;])\s*/g,'$1')).join('');}
 function checks(sql:string,present:Set<string>):string[]{return parts(sql).filter(p=>{const c=p.trim().match(/^(?:"([^"]+)"|`([^`]+)`|\[([^\]]+)\]|(\w+))/)?.slice(1).find(Boolean);return !c||['check','constraint','primary','unique','foreign'].includes(c.toLowerCase())||present.has(c);}).flatMap(p=>p.match(/CHECK\s*\((?:[^()]|\([^)]*\))*\)/gi)??[]).map(canonicalSQL).sort();}
-function compatible(db:DatabaseSync,reference:DatabaseSync,schema:SchemaObject[],legacy:boolean){
+function compatible(db:DatabaseSync,reference:DatabaseSync,schema:SchemaObject[],legacy:boolean,allowRetired=legacy){
  const tables=new Map(schema.filter(o=>o.type==='table').map(o=>[o.name,o]));
  for(const row of db.prepare("SELECT type,name,tbl_name,sql FROM main.sqlite_master WHERE name NOT LIKE 'sqlite_%'").all()){
   const name=String(row['name']);if(/^(platform|runtime|combined)_schema_migrations$/.test(name))continue;
   const retained=RETAINED_LEGACY_SCHEMA.find(o=>o.name===name);
-  if(retained){if(row['type']!==retained.type||!schema.some(o=>tableOwner(o.tbl_name)===retained.owner)||canonicalSQL(String(row['sql']))!==canonicalSQL(retained.sql))throw Error(`schema_migration_unrecognized_retired_object:${name}`);continue;}
+  if(retained){if(!allowRetired)throw Error(`schema_migration_retired_object_after_cleanup:${name}`);if(row['type']!==retained.type||!schema.some(o=>tableOwner(o.tbl_name)===retained.owner)||canonicalSQL(String(row['sql']))!==canonicalSQL(retained.sql))throw Error(`schema_migration_unrecognized_retired_object:${name}`);continue;}
   if(row['type']==='table'){
    if(!tables.has(name))throw Error(`schema_migration_unrecognized_table:${name}`);
    if(/\bWITHOUT\s+ROWID\b/i.test(String(row['sql']))!==/\bWITHOUT\s+ROWID\b/i.test(tables.get(name)!.sql)||/\bSTRICT\s*$/i.test(String(row['sql']))!==/\bSTRICT\s*$/i.test(tables.get(name)!.sql))throw Error(`schema_migration_unrecognized_table_options:${name}`);
    const expected=new Map(columns(reference,name).map(c=>[c.name,c]));
    const actualColumns=columns(db,name);
-   const retainedColumn=name==='employee_channel_connections'&&actualColumns.some(c=>c.name==='directory_credential_id');
+   const retainedColumn=allowRetired&&name==='employee_channel_connections'&&actualColumns.some(c=>c.name==='directory_credential_id');
    if(retainedColumn){
     const c=actualColumns.find(c=>c.name==='directory_credential_id')!;
     const links=db.prepare(`PRAGMA main.foreign_key_list(${quote(name)})`).all().filter(f=>f['from']==='directory_credential_id');
@@ -88,6 +88,29 @@ export function migrateDatabase(db:DatabaseSync,path:string,role:MigrationRole,v
    }
    if(upgradeTriggerReceipts)database.exec("UPDATE trigger_result_notifications SET delivery_status=coalesce((SELECT status FROM channel_message_receipts WHERE kind='outbox' AND id=trigger_result_notifications.id),CASE WHEN error IS NULL THEN 'unknown' ELSE 'failed' END),delivery_error=(SELECT error FROM channel_message_receipts WHERE kind='outbox' AND id=trigger_result_notifications.id),provider_accepted=EXISTS(SELECT 1 FROM channel_message_receipts WHERE kind='outbox' AND id=trigger_result_notifications.id AND provider_request_id IS NOT NULL)");
    for(const object of schema.filter(o=>o.type!=='table'))if(!database.prepare('SELECT 1 FROM main.sqlite_master WHERE name=?').get(object.name))database.exec(object.sql);
+  }},{version:2,name:'remove_retired_directory_and_verification_storage',sql:JSON.stringify(role==='runtime'?[
+   'DROP TABLE IF EXISTS wecom_member_verification_attempts',
+   'DROP TABLE IF EXISTS wecom_member_verification_notices',
+  ]:role==='platform'?[
+   'DROP INDEX IF EXISTS employee_channel_directory_reference',
+   'ALTER TABLE employee_channel_connections DROP COLUMN directory_credential_id',
+   'DROP TABLE IF EXISTS employee_channel_directory_credentials',
+  ]:[
+   'DROP INDEX IF EXISTS employee_channel_directory_reference',
+   'ALTER TABLE employee_channel_connections DROP COLUMN directory_credential_id',
+   'DROP TABLE IF EXISTS employee_channel_directory_credentials',
+   'DROP TABLE IF EXISTS wecom_member_verification_attempts',
+   'DROP TABLE IF EXISTS wecom_member_verification_notices',
+  ]),apply(database){
+   // V2 alone owns destructive cleanup. Validate exact historical signatures
+   // before touching even a recognized old name; never delete unknown shapes.
+   compatible(database,reference,schema,false,true);
+   if(role!=='runtime'){
+    database.exec('DROP INDEX IF EXISTS employee_channel_directory_reference');
+    if(columns(database,'employee_channel_connections').some(c=>c.name==='directory_credential_id'))database.exec('ALTER TABLE employee_channel_connections DROP COLUMN directory_credential_id');
+    database.exec('DROP TABLE IF EXISTS employee_channel_directory_credentials');
+   }
+   if(role!=='platform')database.exec('DROP TABLE IF EXISTS wecom_member_verification_attempts; DROP TABLE IF EXISTS wecom_member_verification_notices');
   }}],validateBaseline:database=>compatible(database,reference,schema,true),validateTarget:(database,migrated)=>{compatible(database,reference,schema,false);if(migrated&&database.prepare('PRAGMA foreign_key_check').get())throw Error('schema_migration_foreign_key_failure');}};
   if(verifyOnly){
    const rows=db.prepare(`SELECT version,name,checksum FROM ${role}_schema_migrations ORDER BY version`).all();

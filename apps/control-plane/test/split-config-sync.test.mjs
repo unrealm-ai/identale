@@ -168,6 +168,8 @@ test('deployment-approved resources travel as safe metadata and participate in r
 
 test('independent WeCom identity bindings project to runtime memory and refresh with channel revision',async t=>{
  const f=await fixture(t);f.platform.run('INSERT INTO wecom_identity_bindings VALUES(?,?,?,?,?,?)','synthetic-wecom','source-A',1,'directory-user','callback-user',null);
+ f.platform.run('DELETE FROM combined_schema_migrations WHERE version=2');
+ new Store(f.platform.databasePath).close();
  const poller=new ConfigurationPoller({store:f.runtime,baseUrl:'http://127.0.0.1:9999',token,fetch:f.fetch,now:f.clock});
  assert.equal(await poller.poll(),true,JSON.stringify(poller.status));
  assert.equal(f.runtime.one('SELECT callback_user_id FROM wecom_identity_bindings WHERE connection_id=?','synthetic-wecom').callback_user_id,'callback-user');
@@ -194,6 +196,8 @@ test('verification challenges use bounded pages, remain memory-only and never pr
 });
 test('challenge paging rejects changed generations and preserves prior coherent configuration',async t=>{
  const f=await fixture(t);seedChallenges(f.platform,101);let mutate=false;
+ f.platform.run('DELETE FROM combined_schema_migrations WHERE version=2');
+ new Store(f.platform.databasePath).close();
  const poller=new ConfigurationPoller({store:f.runtime,baseUrl:'http://127.0.0.1:9999',token,fetch:async(...args)=>{const response=await f.fetch(...args);if(mutate&&String(args[0]).endsWith('challenge-page')){mutate=false;f.platform.run("DELETE FROM wecom_member_challenges WHERE request_id='request-0'");}return response;},now:f.clock});
  assert.equal(await poller.poll(),true);const before=poller.status.epoch;
  f.platform.run("UPDATE entities SET name='Changed' WHERE id='e'");mutate=true;
@@ -202,23 +206,27 @@ test('challenge paging rejects changed generations and preserves prior coherent 
 });
 test('challenge paging rejects corrupt pages without partial apply',async t=>{
  const f=await fixture(t);seedChallenges(f.platform,101);
+ f.platform.run('DELETE FROM combined_schema_migrations WHERE version=2');
+ new Store(f.platform.databasePath).close();
  const poller=new ConfigurationPoller({store:f.runtime,baseUrl:'http://127.0.0.1:9999',token,fetch:async(...args)=>{const response=await f.fetch(...args);if(String(args[0]).endsWith('challenge-page')){const page=await response.json();page.rows[0].user_id='tampered';return new Response(JSON.stringify(page));}return response;},now:f.clock});
  assert.equal(await poller.poll(),false);assert.equal(poller.ready,false);poller.stop();
 });
 
-test('retired directory credentials stay on platform and do not enter runtime configuration',async t=>{
+test('V2 removes retired directory storage before runtime configuration export',async t=>{
  const f=await fixture(t);const {RETAINED_LEGACY_SCHEMA,RETAINED_DIRECTORY_COLUMN}=await import('../dist/schema-migrations/retained-legacy.js');
  f.platform.db.exec(RETAINED_LEGACY_SCHEMA.find(o=>o.name==='employee_channel_directory_credentials').sql);
  f.platform.db.exec('ALTER TABLE employee_channel_connections ADD COLUMN '+RETAINED_DIRECTORY_COLUMN);
  f.platform.db.exec(RETAINED_LEGACY_SCHEMA.find(o=>o.type==='index').sql);
  f.platform.run("INSERT INTO employee_channel_directory_credentials VALUES('retired','w','wecom','corp','agent',1,'RETIRED_PRIVATE_RECORD')");
  f.platform.run("UPDATE employee_channel_connections SET directory_credential_id='retired' WHERE id='ch'");
+ f.platform.run('DELETE FROM combined_schema_migrations WHERE version=2');
+ new Store(f.platform.databasePath).close();
  const poller=new ConfigurationPoller({store:f.runtime,baseUrl:'http://127.0.0.1:9999',token,fetch:f.fetch,now:f.clock});
  assert.equal(await poller.poll(),true,JSON.stringify(poller.status));
  const snapshot=(await f.app.inject({url:'/internal/config/snapshot',headers:auth})).json();
  assert.equal(JSON.stringify(snapshot).includes('directory_credential_id'),false);
  assert.equal(JSON.stringify(snapshot).includes('RETIRED_PRIVATE_RECORD'),false);
  assert.equal(f.runtime.all('PRAGMA temp.table_info(employee_channel_connections)').some(c=>c.name==='directory_credential_id'),false);
- assert.equal(f.platform.one('SELECT directory_credential_id FROM employee_channel_connections').directory_credential_id,'retired');
- assert.equal(f.platform.one('SELECT record_json FROM employee_channel_directory_credentials').record_json,'RETIRED_PRIVATE_RECORD');
+ assert.equal(f.platform.one("SELECT 1 FROM sqlite_master WHERE name='employee_channel_directory_credentials'"),undefined);
+ assert.equal(f.platform.one("SELECT app_id FROM employee_channel_connections WHERE id='ch'").app_id,'app');
 });

@@ -19,7 +19,7 @@ for(const role of ['platform','runtime','combined']){
  test(`${role}: new database versioned once, TEMP projections unversioned`,t=>{
   const root=fixture(t),path=join(root,'db.sqlite');let store=new Store(path,options(role));
   try{
-   assert.equal(store.one(`SELECT count(*) n FROM main.${role}_schema_migrations`).n,1);
+   assert.deepEqual(store.all(`SELECT version FROM main.${role}_schema_migrations ORDER BY version`).map(row=>row.version),[1,2]);
    assert.equal(store.all("SELECT name FROM temp.sqlite_master WHERE name LIKE '%schema_migrations'").length,0);
    if(role!=='combined'){
     const opposite=role==='platform'?RUNTIME_TABLES:PLATFORM_TABLES;
@@ -40,7 +40,7 @@ for(const role of ['platform','runtime','combined']){
    if(role!=='platform')for(const [table,field]of [['runs','end_reason'],['human_requests','selection_json'],['task_outbox','lease_token']])db.exec(`ALTER TABLE ${table} DROP COLUMN ${field}`);
   }finally{db.close();}
   const upgraded=new Store(path,options(role));try{
-   assert.equal(upgraded.one(`SELECT count(*) n FROM ${role}_schema_migrations`).n,1);
+   assert.deepEqual(upgraded.all(`SELECT version FROM ${role}_schema_migrations ORDER BY version`).map(row=>row.version),[1,2]);
    if(policy)assert.deepEqual({...upgraded.one('SELECT * FROM entity_directory_policies')},policy);
    const fields=role==='runtime'?[['runs','end_reason'],['human_requests','selection_json'],['task_outbox','lease_token']]:[['entities','initial_channel_defaults_json'],['entities','avatar_preset'],['entities','description']];
    for(const [table,field]of fields)assert.ok(upgraded.all(`PRAGMA main.table_info(${table})`).some(c=>c.name===field));
@@ -49,9 +49,9 @@ for(const role of ['platform','runtime','combined']){
  });
  test(`${role}: modified checksum and future version prevent opening`,t=>{
   const root=fixture(t),path=join(root,'db.sqlite');new Store(path,options(role)).close();
-  let db=new DatabaseSync(path);const checksum=db.prepare(`SELECT checksum FROM ${role}_schema_migrations`).get().checksum;db.exec(`UPDATE ${role}_schema_migrations SET checksum='tampered'`);db.close();
+  let db=new DatabaseSync(path);const checksum=db.prepare(`SELECT checksum FROM ${role}_schema_migrations WHERE version=1`).get().checksum;db.exec(`UPDATE ${role}_schema_migrations SET checksum='tampered' WHERE version=1`);db.close();
   assert.throws(()=>new Store(path,options(role)),/checksum_mismatch/);
-  db=new DatabaseSync(path);db.prepare(`UPDATE ${role}_schema_migrations SET checksum=?,version=999`).run(checksum);db.close();
+  db=new DatabaseSync(path);db.prepare(`UPDATE ${role}_schema_migrations SET checksum=? WHERE version=1`).run(checksum);db.exec(`UPDATE ${role}_schema_migrations SET version=999 WHERE version=2`);db.close();
   assert.throws(()=>new Store(path,options(role)),/database_newer_than_code/);
  });
 }
@@ -84,5 +84,5 @@ test('two actual Store starters converge on one platform migration',async t=>{
  const module=new URL('../dist/store.js',import.meta.url).href;
  const source=`import{Store}from ${JSON.stringify(module)};new Store(process.argv[1],{role:'platform'}).close();`;
  const start=()=>new Promise((resolve,reject)=>{const child=spawn(process.execPath,['--input-type=module','-e',source,path],{stdio:['ignore','pipe','pipe']});let error='';child.stderr.on('data',chunk=>error+=chunk);child.on('error',reject);child.on('exit',code=>code===0?resolve():reject(Error(error)));});
- await Promise.all([start(),start()]);const db=new DatabaseSync(path);try{assert.equal(db.prepare('SELECT count(*) n FROM platform_schema_migrations').get().n,1);}finally{db.close();}
+ await Promise.all([start(),start()]);const db=new DatabaseSync(path);try{assert.deepEqual(db.prepare('SELECT version FROM platform_schema_migrations ORDER BY version').all().map(row=>row.version),[1,2]);}finally{db.close();}
 });

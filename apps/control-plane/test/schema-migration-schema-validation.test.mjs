@@ -60,7 +60,7 @@ test('already-versioned missing index is schema drift, not automatic repair',asy
  mutate(path,db=>db.exec('DROP INDEX channel_inbox_claim'));
  assert.throws(()=>new Store(path,{role}),/missing_index:channel_inbox_claim/);
  mutate(path,db=>{
-  assert.equal(db.prepare('SELECT count(*) n FROM runtime_schema_migrations').get().n,1);
+  assert.deepEqual(db.prepare('SELECT version FROM runtime_schema_migrations ORDER BY version').all().map(row=>row.version),[1,2]);
   assert.equal(db.prepare("SELECT 1 FROM sqlite_master WHERE name='channel_inbox_claim'").get(),undefined);
  });
 });
