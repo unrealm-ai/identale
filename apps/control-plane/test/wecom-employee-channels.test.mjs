@@ -39,7 +39,8 @@ test('same BotID credential rotation preserves source, fences session evidence a
  assert.equal(next.id,first.id);assert.equal(next.sourceId,first.sourceId);assert.equal(next.authRevision,first.authRevision+1);assert.equal(next.status,'pending_verification');assert.equal(next.inboundVerified,false);
  assert.equal(f.service.currentBindingVersion(first.id),undefined);
  f.service.observeFirstInbound(first.id,{appId:first.appId,botId:first.appId,tenantId:first.appId,tenantNamespace:'app_id'});
- assert.notEqual(f.service.currentBindingVersion(first.id),oldVersion);
+ // Same bot credential rotation fences transport auth, not the persistent identity mapping.
+ assert.equal(f.service.currentBindingVersion(first.id),oldVersion);
  const disabled=f.service.settings('w','e','wecom','u',{enabled:false,expectedRevision:next.revision});
  const retry=await f.service.revalidate('w','e','wecom','u',disabled.revision);
  assert.equal(retry.status,'disabled');assert.equal(retry.sourceId,first.sourceId);
@@ -72,4 +73,13 @@ test('retired enterprise-scoped records do not reconnect or use directory fallba
  assert.equal(f.service.currentBindingVersion(c.id),undefined);
  await assert.rejects(f.service.revalidate('w','e','wecom','u',c.revision),{code:'wecom_bot_reconfiguration_required'});
  assert.deepEqual(f.service.directorySources(),[]);
+});
+
+test('WeCom recent-context defaults on and persists independent off generation without enabling listener',async t=>{
+ const f=setup(t),c=await save(f);assert.equal(c.context.wecomRecentGroupContextEnabled,true);assert.equal(c.context.groupListenEnabled,undefined);
+ const off=f.service.settings('w','e','wecom','u',{enabled:true,expectedRevision:c.revision,wecomRecentGroupContextEnabled:false});
+ assert.equal(off.context.wecomRecentGroupContextEnabled,false);assert.equal(off.context.wecomRecentGroupContextGeneration,1);assert.equal(off.context.groupListenEnabled,false);
+ const unchanged=f.service.settings('w','e','wecom','u',{enabled:true,expectedRevision:off.revision});assert.equal(unchanged.context.wecomRecentGroupContextEnabled,false);assert.equal(unchanged.context.wecomRecentGroupContextGeneration,1);
+ const on=f.service.settings('w','e','wecom','u',{enabled:true,expectedRevision:unchanged.revision,wecomRecentGroupContextEnabled:true});assert.equal(on.context.wecomRecentGroupContextGeneration,2);
+ assert.throws(()=>f.service.settings('w','e','wecom','u',{enabled:true,expectedRevision:on.revision,groupListenEnabled:true}),/channel_context_unsupported/);
 });

@@ -34,3 +34,18 @@ test('directed people pagination and directory refresh preserve selected targets
  assert.ok(env.calls.find(c=>c.url.includes('peopleCursor=')).url.includes('peopleOnly=true'));assert.ok(text().includes('同名群B'));assert.ok(text().includes('确认人 · 私聊'));
  button('同步通讯录').click();await until(()=>env.calls.filter(c=>c.url.includes('peopleOnly=true')).length===2);assert.ok(text().includes('同名群B'));assert.ok(text().includes('确认人 · 私聊'));
 });
+test('WeCom sharing uses recent groups and bound people without Feishu directory calls',async t=>{
+ const wecom=s=>({...s,ref:{...s.ref,provider:'wecom',connectionId:'wc',appId:'bot',...(s.ref.kind==='person'?{namespace:'user_id'}:{})}}),wa=wecom(a),wb=wecom(b),wp=wecom(person);
+ let config={revision:1,rules:[rule({type:'directed',sources:[wa],targets:[wp]})]},saved;
+ const env=await mount(t,async(url,init)=>{
+  if(init.method==='PUT'){saved=JSON.parse(init.body);config={revision:2,rules:saved.rules};return config;}
+  if(url.endsWith('/status'))return{appliedRevision:config.revision};
+  if(url.includes('/candidates'))return{connections:[{id:'wc',appId:'bot',label:'企微 · bot',provider:'wecom'}],groups:[wa,wb],people:[wp],nextCursor:null};
+  return config;
+ });
+ await until(()=>text().includes('Explicit sharing'));button('编辑').click();await until(()=>text().includes('最近可查询群'));
+ assert.match(text(),/不代表完整群目录/);assert.match(text(),/主动读取历史，不开启群监听或关键词触发/);assert.match(text(),/仅显示已完成身份绑定的人员/);
+ assert.ok(document.querySelector('[aria-label="共享渠道应用"]'));assert.equal(env.calls.some(c=>c.url.includes('/channels/feishu/directory')),false);
+ assert.equal(document.querySelectorAll('[aria-label="共享目标"] .n-checkbox').length,3);
+ button('保存共享规则').click();await until(()=>!!saved);assert.equal(saved.rules[0].sources[0].ref.provider,'wecom');assert.equal(saved.rules[0].targets[0].ref.namespace,'user_id');assert.equal(saved.rules[0].targets[0].proof,wp.proof);
+});

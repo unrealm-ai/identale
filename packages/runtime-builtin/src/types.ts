@@ -79,6 +79,8 @@ export interface BuiltinRuntimeOptions {
   readonly isOwnerAlive?:(owner:{pid:number;instanceId:string;startIdentity?:string})=>boolean;
 
   authorizeHistoryBatch?:(batchId:string,context:AuthorizationContext)=>boolean;
+  /** Trusted host-only current callback text when optional group history is revoked. */
+  historyBatchFallback?:(batchId:string,context:AuthorizationContext)=>string|undefined;
   readonly diagnostics?:DiagnosticPort;
   readonly modelClient?: ModelClientPort;
   readonly sessionStore: SessionStore;

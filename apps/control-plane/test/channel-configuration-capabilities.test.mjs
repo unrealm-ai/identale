@@ -42,3 +42,14 @@ test('channel and business support remain independent from online and directory 
 });
 
 test('legacy adapters with no media declaration stay unknown rather than inheriting vendor support',()=>{assert.equal(resolve(record(),{ordinaryMessageEvents:granted}).media,undefined);});
+
+test('WeCom recent history context is separate from ordinary events and keyword triggers',()=>{
+ const active=resolve(record({provider:'wecom'}));
+ assert.equal(active.recentGroupContext.supported,true);
+ assert.equal(active.recentGroupContext.availability,'available');
+ assert.equal(active.ordinaryGroupMessages.supported,false);
+ assert.equal(active.keywordTriggers.supported,false);
+ assert.match(active.recentGroupContext.reason,/不是实时群监听/);
+ for(const change of [{enabled:false},{status:'pending_verification'}])assert.equal(resolve(record({provider:'wecom',...change})).recentGroupContext.availability,'authorization_required');
+ assert.equal(resolve(record({provider:'dingtalk'})).recentGroupContext.supported,false);
+});

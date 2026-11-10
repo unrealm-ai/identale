@@ -368,7 +368,7 @@ test('WeCom employee selection keeps unsupported contexts absent and waits for a
   assert.ok(text().includes('等待首条消息')); assert.equal(text().includes('开始机器人身份验证'),false);
   assert.equal(document.querySelector('[aria-label="读取当前群历史"]'), null);
   assert.equal(document.querySelector('[aria-label="明确的 Minutes token"]'), null);
-  const allowedReads = new Set(['/api/business-resources/configuration', `/api${base}/channels`, `/api${base}/runtime-status`, `/api${base}/channels/wecom/directory-credentials`, `/api${base}/directory-access`]);
+  const allowedReads = new Set(['/api/business-resources/configuration', `/api${base}/channels`, `/api${base}/runtime-status`, `/api${base}/channels/wecom/directory-credentials`, `/api${base}/directory-access`, `/api${base}/group-sharing`, `/api${base}/group-sharing/status`]);
   assert.ok(env.requests.every(item => (item.method === 'GET' && allowedReads.has(item.url)) || (item.method==='POST' && item.url.endsWith('/wecom/member-search') && item.body.keywords.length===0)), 'Only this employee’s channel configuration, runtime observation and WeCom directory choices may be read');
   assert.equal(env.requests.filter(item => item.url === `/api${base}/runtime-status`).length, 1, 'Connection status must be read from the runtime observation endpoint');
   assert.ok(!text().includes('CorpID'));assert.ok(!text().includes('可信 IP'));

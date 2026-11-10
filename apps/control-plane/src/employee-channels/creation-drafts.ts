@@ -62,7 +62,7 @@ export class EmployeeChannelCreationDrafts {
       const record: EmployeeChannelRecord = { id: randomUUID(), sourceId: randomUUID(), workspaceId, entityId: '', provider, appId, ...verifiedApplication,
         revision: 1, authRevision: 1, stateVersion: 0, enabled: true, status: provider==='feishu' && verified.botId && verified.eventTenantId ? 'verified' : 'pending_verification',
         identityEvidence: provider==='feishu'&&verified.botId&&verified.eventTenantId ? 'provider_api' : 'app_credentials_only', inboundVerified: false,
-        ...(provider==='feishu'?{context:{historyEnabled:false,groupListenEnabled:true,listenGeneration:0,meetingRefs:[]}}:{}),lastError: null, credential: { ciphertext: '', nonce: '', tag: '' }, createdBy: actorId, updatedBy: actorId };
+        ...(provider==='feishu'?{context:{historyEnabled:false,groupListenEnabled:true,listenGeneration:0,meetingRefs:[]}}:provider==='wecom'?{context:{historyEnabled:false,wecomRecentGroupContextEnabled:true,wecomRecentGroupContextGeneration:0,meetingRefs:[]}}:{}),lastError: null, credential: { ciphertext: '', nonce: '', tag: '' }, createdBy: actorId, updatedBy: actorId };
       const d: Draft = { id, workspaceId, actorId, expiresAt: this.now() + 10 * 60_000, record, ...(directory?{directory}:{}), scope, secret: this.vault.seal(JSON.stringify({ appSecret }), ['employee-creation-draft', workspaceId, actorId, id]) };
       this.drafts.set(id, d);
       return { draftId: id, expiresAt: d.expiresAt, source: this.channels.dto(record), ...(record.validation?{validation:record.validation}:{}), scope: scopeSummary(scope) };

@@ -205,3 +205,34 @@ test('consumed pending failure preserves input commit and its safe terminal; res
  const recovered=new BuiltinInteractionRuntime(f.options),again=await recovered.getStatus(request({execution:second.payload.execution},second.authorizationContext));assert.equal(again.ok,true);assert.equal(again.value.status,'failed');assert.equal(again.value.error.safeMessage,'Builtin runtime operation failed');assert.equal(again.value.error.operationId,second.operationId);assert.equal(rounds,2,'Follower reconciliation does not repeat model work');
  const terminal=await recovered.readInteractionEvents(request({execution:second.payload.execution},second.authorizationContext));assert.equal(terminal.value.events.filter(e=>e.type==='terminal').length,1);assert.equal(terminal.value.events.find(e=>e.type==='terminal').error.safeMessage,again.value.error.safeMessage);
 });
+
+for(const late of [false,true])test(`trusted group-history fallback preserves only current input (late=${late})`,async()=>{
+ let checks=0;const seen=[];
+ const f=await fixture({authorizeHistoryBatch:()=>late&&++checks===1,historyBatchFallback:id=>id==='optional-history'?'CURRENT_ONLY':undefined,prepareInputHistory:async messages=>[{role:'user',content:'EXISTING_HISTORY',contextSource:{kind:'user_input',id:'previous'}},...messages],modelClient:{async complete(input){seen.push(structuredClone(input.messages));return response();}}});
+ f.submission.payload.input.historyBatchId='optional-history';f.submission.payload.input.messageRefs=[ref('REVOKED_SUPPLEMENT_AND_CURRENT')];
+ await f.adapter.submit(f.submission);assert.equal((await finished(f)).status,'succeeded');
+ assert.match(JSON.stringify(seen),/CURRENT_ONLY/);assert.match(JSON.stringify(seen),/EXISTING_HISTORY/);assert.doesNotMatch(JSON.stringify(seen),/REVOKED_SUPPLEMENT/);
+ const session=f.sessionStore.records.get(runtimeKey('session','c')).value;
+ const saved=f.options.journal.readMany({workspaceId:'w',entityId:'e',conversationId:'c'},session.messageRefs);
+ assert.match(JSON.stringify(saved),/CURRENT_ONLY/);assert.match(JSON.stringify(saved),/EXISTING_HISTORY/);assert.doesNotMatch(JSON.stringify(saved),/REVOKED_SUPPLEMENT/);
+ assert.equal((await f.adapter.getInputCommit(request({execution:f.execution,batchId:'optional-history'}))).value.status,'committed');
+});
+test('trusted fallback supports runtime without reference projection',async()=>{
+ let seen;const f=await fixture({authorizeHistoryBatch:()=>false,historyBatchFallback:()=> 'CURRENT_ONLY',modelClient:{async complete(input){seen=input.messages;return response();}}});f.submission.payload.input.historyBatchId='optional-history';await f.adapter.submit(f.submission);assert.equal((await finished(f)).status,'succeeded');assert.match(JSON.stringify(seen),/CURRENT_ONLY/);assert.doesNotMatch(JSON.stringify(seen),/hello/);
+});
+test('fallback cannot rewrite ambiguous projected current input',async()=>{
+ let calls=0;const f=await fixture({authorizeHistoryBatch:()=>false,historyBatchFallback:()=> 'CURRENT_ONLY',prepareInputHistory:async messages=>[...messages,{role:'user',content:'duplicate',contextSource:{kind:'user_input',id:'turn'}}],modelClient:{async complete(){calls++;return response();}}});f.submission.payload.input.historyBatchId='optional-history';await f.adapter.submit(f.submission);assert.equal((await finished(f)).status,'failed');assert.equal(calls,0);
+});
+for(const late of [false,true])test(`revoked initial batch cannot leak through terminal session cleanup (late=${late})`,async()=>{
+ let checks=0,calls=0;const f=await fixture({authorizeHistoryBatch:()=>late&&++checks===1,modelClient:{async complete(){calls++;return response({text:'OLD_REPLY'});}}});
+ await f.adapter.submit(f.submission);assert.equal((await finished(f)).status,'succeeded');
+ const next=nextSubmission(f,2,'MUST_NOT_ENTER_SESSION');next.payload.input.historyBatchId='revoked';await f.adapter.submit(next);assert.equal((await finished({...f,execution:next.payload.execution,submission:next})).status,'failed');assert.equal(calls,1);
+ const saved=f.options.journal.readMany({workspaceId:'w',entityId:'e',conversationId:'c'},f.sessionStore.records.get(runtimeKey('session','c')).value.messageRefs);
+ assert.match(JSON.stringify(saved),/hello/);assert.match(JSON.stringify(saved),/OLD_REPLY/);assert.doesNotMatch(JSON.stringify(saved),/MUST_NOT_ENTER_SESSION/);
+});
+test('revoked queued supplementary batch keeps current callback when joining an active turn',async()=>{
+ let enter,release,round=0;const started=new Promise(resolve=>enter=resolve),hold=new Promise(resolve=>release=resolve),seen=[];
+ const f=await fixture({authorizeHistoryBatch:()=>false,historyBatchFallback:id=>id==='second'?'SECOND_CURRENT_ONLY':undefined,tools:[tool(async()=>{enter();await hold;return{};})],modelClient:{async complete(input){seen.push(structuredClone(input.messages));return response(++round===1?{toolCalls:[{id:'slow',name:'task_create',arguments:{input:'work'}}]}:{text:'done'});}}});
+ await f.adapter.submit(f.submission);await started;const next=nextSubmission(f,2,'REVOKED_QUEUED_HISTORY');next.payload.input.historyBatchId='second';await f.adapter.submit(next);release();assert.equal((await finished(f)).status,'succeeded');
+ assert.equal(seen.length,2);assert.match(JSON.stringify(seen[1]),/SECOND_CURRENT_ONLY/);assert.match(JSON.stringify(seen[1]),/hello/);assert.doesNotMatch(JSON.stringify(seen),/REVOKED_QUEUED_HISTORY/);assert.equal((await f.adapter.getInputCommit(request({execution:next.payload.execution,batchId:'second'},next.authorizationContext))).value.status,'committed');
+});

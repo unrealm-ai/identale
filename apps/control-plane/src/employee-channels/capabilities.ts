@@ -26,7 +26,7 @@ export function resolveChannelConfigurationCapabilities(
   // Fallback reflects the employee bot route only; never infer ordinary access from the context setting.
   const bot:ChannelCapability={supported:true,availability:'available'};
   const scopeRows=record.validation?.checks.filter(c=>c.id==='scope_inventory').flatMap(c=>c.scopeInventory??[]).filter(s=>s.scope==='im:message.group_msg'&&s.identity==='tenant')??[];
-  const ordinary=conversation?.ordinaryMessageEvents??(record.provider==='feishu'?{supported:true,availability:scopeRows.length&&scopeRows.every(s=>s.status==='granted')?'available':'authorization_required',reason:scopeRows.length&&scopeRows.every(s=>s.status==='granted')?'已核验普通群消息接收权限。':'请在飞书授权普通群消息接收权限，并重新验证连接。'}:unsupported('当前机器人接入不支持普通群消息，不能配置关键词触发或近期群消息上下文。'));
+  const ordinary=conversation?.ordinaryMessageEvents??(record.provider==='feishu'?{supported:true,availability:scopeRows.length&&scopeRows.every(s=>s.status==='granted')?'available':'authorization_required',reason:scopeRows.length&&scopeRows.every(s=>s.status==='granted')?'已核验普通群消息接收权限。':'请在飞书授权普通群消息接收权限，并重新验证连接。'}:unsupported('当前机器人接入不支持普通群消息实时推送或关键词触发。'));
   const media=conversation ? conversation.media : record.provider==='feishu' ? feishuMediaCapabilities({privateMessageEvents:true,mentionEvents:true,ordinaryMessageEvents:ordinary.availability==='available',proactiveSend:true,replyToMessage:true}) : record.provider==='dingtalk' ? dingtalkMediaCapabilities({streamIngress:true,privateMessageEventsGranted:true,mentionEventsGranted:true,proactiveSendGranted:true}) : wecomMediaCapabilities();
   const mapMedia=(direction:'inbound'|'outbound')=>({private:{image:gate(media![direction].private.image),file:gate(media![direction].private.file)},group:{image:gate(media![direction].group.image),file:gate(media![direction].group.file)}});
   const businessDefault=(kind:'meeting'|'document'):ChannelCapability=>record.provider==='wecom'
@@ -38,7 +38,7 @@ export function resolveChannelConfigurationCapabilities(
     privateMessages:gate(conversation?.privateMessageEvents??bot),
     groupMentions:gate(conversation?.mentionEvents??(record.provider==='wecom'?unsupported('企微使用平台认证的定向机器人消息，不伪造 @ 身份。'):bot)),
     directedGroupMessages:gate(conversation?.directedBotMessageEvents??(record.provider==='wecom'?bot:unsupported('此渠道按真实 @ 事件处理。'))),
-    ordinaryGroupMessages:gate(ordinary),keywordTriggers:gate(ordinary),recentGroupContext:gate(ordinary),
+    ordinaryGroupMessages:gate(ordinary),keywordTriggers:gate(ordinary),recentGroupContext:record.provider==='wecom'?gate({supported:true,availability:'available',reason:'被 @ 后按需读取本群近期消息；无法匹配或读取失败时只处理本次消息，不是实时群监听。'}):gate(ordinary),
     ...(media?{media:{inbound:mapMedia('inbound'),outbound:mapMedia('outbound')}}:{}),
     directoryRead:record.provider==='wecom'?{supported:true,availability:'unknown',reason:'使用机器人凭据搜索成员；不支持部门或全量目录，搜索状态须单独核验。'}:{supported:true,availability:record.directoryStatus==='available'?'available':'authorization_required',reason:record.directoryStatus==='available'?'仅覆盖目录授权范围；不代表消息或业务资料权限。':'请验证目录权限与可见范围。'},
     meetingRead:business?.meetingRead??businessDefault('meeting'),documentRead:business?.documentRead??businessDefault('document'),

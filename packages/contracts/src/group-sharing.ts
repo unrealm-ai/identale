@@ -1,9 +1,9 @@
 /** Configuration references are application scoped. Labels never establish identity. */
 export interface SharingIdentity {
-  provider:'feishu'; connectionId:string; appId:string; tenantId:string; bindingVersion:string;
+  provider:'feishu'|'wecom'; connectionId:string; appId:string; tenantId:string; bindingVersion:string;
 }
 export interface SharingGroup extends SharingIdentity {kind:'group';id:string;label:string}
-export interface SharingPerson extends SharingIdentity {kind:'person';id:string;namespace:'open_id';label:string}
+export interface SharingPerson extends SharingIdentity {kind:'person';id:string;namespace:'open_id'|'user_id';label:string}
 export type SharingDestination=SharingGroup|SharingPerson;
 export interface GroupSharingRule {
   id:string;revision:number;name:string;enabled:boolean;

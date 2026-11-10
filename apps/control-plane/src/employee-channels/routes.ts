@@ -9,7 +9,7 @@ export async function registerEmployeeChannelRoutes(app:FastifyInstance,service:
  route('GET','/subjects',[],(w,e)=>service.subjects(w,e));
  route('PUT','/:provider',['appId','appSecret','expectedRevision','replaceSource'],(w,e,p,a,r)=>service.save(w,e,p,a,r.body as any));
  route('POST','/:provider/revalidate',['expectedRevision'],(w,e,p,a,r)=>service.revalidate(w,e,p,a,(r.body as {expectedRevision?:number}|undefined)?.expectedRevision));
- route('PUT','/:provider/settings',['enabled','expectedRevision','historyEnabled','groupListenEnabled','groupTriggerKeywords','meetingRefs'],(w,e,p,a,r)=>service.settings(w,e,p,a,r.body as any));
+ route('PUT','/:provider/settings',['enabled','expectedRevision','historyEnabled','groupListenEnabled','wecomRecentGroupContextEnabled','groupTriggerKeywords','meetingRefs'],(w,e,p,a,r)=>service.settings(w,e,p,a,r.body as any));
  route('DELETE','/:provider',['expectedRevision'],(w,e,p,a,r)=>service.unbind(w,e,p,a,r.body as {expectedRevision:number}));
  route('POST','/:provider/verification/start',['expectedRevision'],()=>{throw new EmployeeChannelError(409,'channel_verification_automatic');});
  route('GET','/:provider/verification',[],(w,e,p)=>service.verification(w,e,p));

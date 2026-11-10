@@ -224,7 +224,7 @@ export class BuiltinInteractionRuntime implements AgentProvisioningPort, AgentSe
   private queuedInput(k:string,state:Execution):QueuedBuiltinInput{
     let r=state.request;const c=r.authorizationContext;
     return{id:k,binding:hash([binding(c),r.payload.session.specHash,r.payload.input.kind==='interaction_turn'?r.payload.input.routeBinding??'':'']),kind:state.platformEvent?'event':'user',request:r,
-      consume:async(signal)=>{await this.auth({...r,deadlineAt:new Date(this.now()+this.limits.maxDurationMs).toISOString(),authorizationContext:{...c,expiresAt:new Date(this.now()+this.limits.maxDurationMs).toISOString()}},'interaction.generate',r.payload.session.runtime);if(signal.aborted||!this.queue.has(k))throw new Failure('REMOTE_REJECTED','Queued input no longer active');state.status='running';await this.persistExecution(k,state);const input=r.payload.input;if(input.kind!=='interaction_turn')throw new Failure('POLICY_DENIED','Invalid queued interaction');return Promise.all(input.messageRefs.map(async ref=>({role:'user' as const,content:await this.options.readContent(ref,c),...(this.options.prepareInputHistory?{contextSource:{kind:'user_input' as const,id:input.turnId}}:{})})));},
+      consume:async(signal)=>{await this.auth({...r,deadlineAt:new Date(this.now()+this.limits.maxDurationMs).toISOString(),authorizationContext:{...c,expiresAt:new Date(this.now()+this.limits.maxDurationMs).toISOString()}},'interaction.generate',r.payload.session.runtime);if(signal.aborted||!this.queue.has(k))throw new Failure('REMOTE_REJECTED','Queued input no longer active');state.status='running';await this.persistExecution(k,state);const input=r.payload.input;if(input.kind!=='interaction_turn')throw new Failure('POLICY_DENIED','Invalid queued interaction');return Promise.all(input.messageRefs.map(async ref=>({role:'user' as const,content:await this.options.readContent(ref,c),...(this.options.prepareInputHistory||input.historyBatchId?{contextSource:{kind:'user_input' as const,id:input.turnId}}:{})})));},
       complete:async(replyId,outputRef,usage,coveredTurnIds)=>{state=await this.inputState(k);const input=r.payload.input;if(input.kind!=='interaction_turn')return;state.status='succeeded';this.deliveryEvent(state,{type:'terminal',status:'succeeded'},coveredTurnIds);state.result={status:'available',execution:r.payload.execution,result:{kind:'interaction_turn',conversationId:input.conversationId,turnId:input.turnId,epoch:input.epoch,replyId,coveredTurnIds,outputRef,artifactRefs:[],provenance:{sourceRefs:input.messageRefs,producer:'builtin-interaction'},usage}};try{await this.persistExecution(k,state);}finally{this.queue.done(k);}},
       reject:async(reason='canceled')=>{
         // Consumption commits update the durable execution, not this closure's
@@ -287,9 +287,14 @@ export class BuiltinInteractionRuntime implements AgentProvisioningPort, AgentSe
         const filtered=await this.options.filterToolResult(result,c,query.name),reply:ModelMessage={role:'tool',toolCallId:callId,content:JSON.stringify(filtered),platform};messages.push(reply);recordAttempt(reply);
         this.options.journal.put(this.scope(c),'platform_tool_exchange',{event,executionId:r.payload.execution.executionId,executed:true,initiatedBy:'adapter',messages:[call,reply]});
       }
-      for(const ref of state.inputCommitted?[]:input.messageRefs){const message:ModelMessage={role:'user',content:await this.bounded(()=>this.options.readContent(ref,c),controller.signal,remaining()),...(this.options.prepareInputHistory?{contextSource:{kind:'user_input' as const,id:input.turnId}}:{})};messages.push(message);recordAttempt(message);}
+      for(const ref of state.inputCommitted?[]:input.messageRefs){const message:ModelMessage={role:'user',content:await this.bounded(()=>this.options.readContent(ref,c),controller.signal,remaining()),...(this.options.prepareInputHistory||input.historyBatchId?{contextSource:{kind:'user_input' as const,id:input.turnId}}:{})};messages.push(message);recordAttempt(message);}
       if(!state.platformEvent&&this.options.prepareInputHistory)messages=[...await this.options.prepareInputHistory(messages,c,session.projectedNoticeIds??[])];
-      await this.commitInput(k,state,messages,c);
+      try{await this.commitInput(k,state,messages,c);}catch(error){
+        // A rejected initial batch must not be published by terminal cleanup.
+        // Keep all prior committed history; staged optional history was never admitted.
+        if(error instanceof Failure&&error.code==='POLICY_DENIED')messages=[...initialMessages];
+        throw error;
+      }
       const available=state.platformEvent?this.options.tools.filter(t=>t.name==='artifact_select'&&prepared.spec.platformTools.includes(t.name)):this.options.tools.filter(t=>prepared.spec.platformTools.includes(t.name));
       for(let round=0;round<this.limits.maxModelRounds;round++) {
         if(!state.platformEvent){let anchored=false;for(const item of this.queue.drain(key('session',r.payload.session.runtime,r.payload.session.sessionId),k,hash([binding(c),r.payload.session.specHash,input.routeBinding??'']))){try{const added=await this.bounded(signal=>item.consume(signal),controller.signal,remaining());const staged=this.options.prepareInputHistory?[...await this.options.prepareInputHistory([...messages,...added],item.request.authorizationContext,(await this.load<Session>(key('session',r.payload.session.runtime,r.payload.session.sessionId))).value.projectedNoticeIds??[])]:[...messages,...added];await this.commitInput(item.id,await this.inputState(item.id),staged,item.request.authorizationContext,k);messages=staged;for(const message of added)recordAttempt(message);consumed.push(item);if(item.request.payload.input.kind==='interaction_turn'){coveredTurnIds.push(item.request.payload.input.turnId);coveredInputIds.push(item.request.payload.input.inputId??item.request.payload.input.turnId);if(!anchored){toolTurnId=item.request.payload.input.turnId;currentRequest=item.request;c=item.request.authorizationContext;anchored=true;}}}catch(error){await item.reject(error instanceof Failure&&error.code==='POLICY_DENIED'?'failed':'unknown');}}}
@@ -399,13 +404,24 @@ export class BuiltinInteractionRuntime implements AgentProvisioningPort, AgentSe
   readInteractionEvents(request:RuntimeRequest<{execution:ExecutionRef;cursor?:string}>){return this.guard(request,async()=>{const state=await this.inspect(request),cursor=Number(request.payload.cursor??0),events=state.deliveryEvents??[];if(!Number.isSafeInteger(cursor)||cursor<0||cursor>events.length)throw new Failure('INVALID_SPEC','Invalid delivery cursor');return{events:events.slice(cursor),cursor:String(events.length)};});}
   private async commitInput(k:string,state:Execution,messages:ModelMessage[],c:AuthorizationContext,ownerKey=k){
     if(state.inputCommitted)return;
-    const input=state.request.payload.input;if(input.kind!=='interaction_turn'||input.historyBatchId&&!this.options.authorizeHistoryBatch?.(input.historyBatchId,c))throw new Failure('POLICY_DENIED','Group input no longer authorized');
+    const input=state.request.payload.input;if(input.kind!=='interaction_turn')throw new Failure('POLICY_DENIED','Invalid group input');
+    const guard=()=>{
+      if(!input.historyBatchId||this.options.authorizeHistoryBatch?.(input.historyBatchId,c))return;
+      const fallback=this.options.historyBatchFallback?.(input.historyBatchId,c);
+      const indexes=messages.flatMap((message,index)=>message.role==='user'&&message.contextSource?.kind==='user_input'&&message.contextSource.id===input.turnId?[index]:[]);
+      // The fallback is host-owned, scoped current-input text. Never select an
+      // arbitrary last message or alter previous committed conversation history.
+      if(typeof fallback!=='string'||!fallback.trim()||input.messageRefs.length!==1||indexes.length!==1)throw new Failure('POLICY_DENIED','Group input no longer authorized');
+      const index=indexes[0]!;messages[index]={...messages[index]!,content:fallback};
+    };
+    guard();
     const sk=key('session',state.request.payload.session.runtime,state.request.payload.session.sessionId),session=await this.load<Session>(sk),execution=await this.load<unknown>(k);
     if(key('execution',state.request.payload.session.runtime,session.value.activeExecution??'')!==ownerKey)throw new Failure('CONFLICT','Input owner changed');
     const modelOwner=ownerKey===k?state:await this.inputState(ownerKey);const committed={...state,inputCommitted:true,started:modelOwner.started??false,...(modelOwner.owner?{owner:modelOwner.owner}:{}),...(ownerKey!==k?{ownerExecutionKey:ownerKey}:{})};this.deliveryEvent(committed,{type:'input_committed',inputId:input.inputId??input.turnId,...(input.historyBatchId?{batchId:input.historyBatchId}:{})});
+    // Recheck after asynchronous loads, before persisting any session content.
+    guard();
     // Journal writes fsync before the atomic metadata transaction exposes these refs.
     const changes=[{key:k,expectedVersion:execution.record.version,value:this.storedExecution(committed)},{key:sk,expectedVersion:session.record.version,value:{...session.value,pendingExecutionKeys:(session.value.pendingExecutionKeys??[]).filter(id=>id!==k),messageRefs:this.recordMessages(messages,c),messageDates:messages.map(()=>this.now()),projectedNoticeIds:[...new Set([...(session.value.projectedNoticeIds??[]),...messages.flatMap(m=>(m.contextSource?.kind==='human_notice'||m.contextSource?.kind==='business_notice')?[m.contextSource.id]:[])])]}}];
-    if(input.historyBatchId&&!this.options.authorizeHistoryBatch?.(input.historyBatchId,c))throw new Failure('POLICY_DENIED','Group input revoked before commit');
     this.options.journal.put(this.scope(c),'input_commit',{executionKey:k,changes} satisfies Commit);
     if(!await this.options.sessionStore.compareAndSetMany(changes))throw new Failure('CONFLICT','Input commit changed');
     Object.assign(state,committed);state.inputCommitted=true;state.deliveryEvents=committed.deliveryEvents??[];this.wake();
