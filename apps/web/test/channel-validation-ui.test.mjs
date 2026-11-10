@@ -351,7 +351,7 @@ for (const provider of ['feishu', 'dingtalk', 'wecom']) test(`${provider}: indep
     assert.equal(document.querySelector('input[aria-label="渠道应用密钥"]').value,'synthetic-unsaved-secret');
     assert.equal(document.querySelector('input[aria-label="渠道应用 ID"]').value,'synthetic-unsaved-app');
   }
-  assert.ok(reads>=4); assert.equal(env.requests.filter(r=>r.url.endsWith('/channels')).length,1);
+  assert.ok(reads>=4); assert.equal(env.requests.filter(r=>r.url.endsWith('/channels')).length,reads+1,'each independent observation reads identity metadata plus one initial configuration load');
   fail=true; await click('刷新渠道状态'); await until(()=>text().includes('暂时无法获取运行状态'));
   assert.ok(!document.querySelector('[data-testid="transport-status"]').textContent.includes('已连接'));
   fail=false; await click('刷新渠道状态'); await until(()=>document.querySelector('[data-testid="transport-status"]').textContent.includes('已连接'));

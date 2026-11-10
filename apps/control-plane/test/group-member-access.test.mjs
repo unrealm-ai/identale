@@ -4,6 +4,7 @@ import {mkdtempSync,rmSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {DirectoryError} from '@dentity/application';
+import {DirectorySnapshots} from '../dist/directory-sync/service.js';
 import {Store} from '../dist/store.js';
 import {EmployeeChannelRepository} from '../dist/employee-channels/repository.js';
 import {EmployeeChannelService,channelSubject} from '../dist/employee-channels/service.js';
@@ -21,12 +22,15 @@ function setup(t){
  store.run("INSERT INTO members(id,workspace_id,user_id,role) VALUES('m','w','u','owner'),('g','w','guest','member')");
  store.run("INSERT INTO entities(id,workspace_id,name,owner_member_id,created_by_member_id,own_web_use,web_use_user_id,interaction_runtime) VALUES('e','w','Entity','m','m',1,'u','builtin'),('e2','w','Second','m','m',0,'u','builtin')");
  const state={clock:1800000000000,dept:'child',active:true,unknown:false,fail:null,calls:0,bot:true,tenant:true};
- const options={now:()=>state.clock,masterKey:new Uint8Array(32).fill(7),verifyApplication:async(provider,appId,secret)=>{if(secret.appSecret==='bad')throw new DirectoryError('authentication_failed');return{identity:{appId,tenantId:state.tenant?'tenant':appId,tenantIdNamespace:state.tenant?'tenant_key':'app_id'},...(state.bot?{botId:'bot-'+appId}:{}),...(state.tenant?{eventTenantId:'tenant'}:{}),directoryStatus:'available'};},adapterFactory:(provider,{appId})=>({provider,capabilities:{},verify:async()=>({appId,tenantId:'tenant',tenantIdNamespace:'tenant_key'}),getAuthorizedScope:async()=>({departmentIds:['root'],userIds:[],entireOrganization:false,revision:'1'}),getDepartment:async id=>({id,namespace:provider==='feishu'?'open_department_id':'department_id',displayName:id,parentId:state.unknown?unknown:known(id==='child'?'root':null),leaders:unknown}),listChildDepartments:async(id,cursor)=>({items:[{id:'child',namespace:'open_department_id',displayName:'Child',parentId:known(id),leaders:unknown}],exhausted:true}),listDepartmentMembers:async()=>({items:[],exhausted:true}),getUser:async id=>{state.calls++;if(state.fail)throw new DirectoryError(state.fail);return{id,displayName:'Person',status:state.active?'active':'inactive',departmentIds:[state.dept],departmentMembershipsKnown:!state.unknown,aliases:[],primaryDepartmentId:unknown,directManager:unknown,dottedLineManagers:unknown};}})};
+ const options={now:()=>state.clock,masterKey:new Uint8Array(32).fill(7),verifyApplication:async(provider,appId,secret)=>{if(secret.appSecret==='bad')throw new DirectoryError('authentication_failed');return{identity:{appId,tenantId:state.tenant?'tenant':appId,tenantIdNamespace:state.tenant?'tenant_key':'app_id'},...(state.bot?{botId:'bot-'+appId}:{}),...(state.tenant?{eventTenantId:'tenant'}:{}),directoryStatus:'available'};},adapterFactory:(provider,{appId})=>({provider,capabilities:{},verify:async()=>({appId,tenantId:'tenant',tenantIdNamespace:'tenant_key'}),getAuthorizedScope:async()=>({departmentIds:['root','elsewhere','outside'],userIds:['person','outsider'].map(id=>({id,namespace:provider==='feishu'?'open_id':'user_id',applicationId:appId})),entireOrganization:false,revision:'1'}),getDepartment:async id=>({id,namespace:provider==='feishu'?'open_department_id':'department_id',displayName:id,parentId:state.unknown?unknown:known(id==='child'?'root':null),leaders:unknown}),listChildDepartments:async(id,cursor)=>({items:id==='root'?[{id:'child',namespace:provider==='feishu'?'open_department_id':'department_id',displayName:'Child',parentId:known(id),leaders:unknown}]:[],exhausted:true}),listDepartmentMembers:async()=>({items:[],exhausted:true}),getUser:async id=>{state.calls++;if(state.fail)throw new DirectoryError(state.fail);return{id,displayName:'Person',status:state.active?'active':'inactive',departmentIds:[state.dept],departmentMembershipsKnown:!state.unknown,aliases:[],primaryDepartmentId:unknown,directManager:unknown,dottedLineManagers:unknown};}})};
  const repository=new EmployeeChannelRepository(store),service=new EmployeeChannelService(repository,options),capabilities=new CapabilityConfigService(store,[],service,undefined,undefined,undefined,()=>state.clock);
+ // Authorization consumes published local facts, not the vendor adapter's mutable state.
+ const snapshots=new DirectorySnapshots(store,()=>service.directorySources(),()=>state.clock);service.setDirectorySnapshots(snapshots);
+ const sync=async()=>{snapshots.reconcile();for(const task of snapshots.list('w').tasks)snapshots.manual('w',task.id);await snapshots.waitForIdle();};
  service.setAccessCheck((...args)=>capabilities.authorizeChannel(...args));
- t.after(()=>{capabilities.close();store.close();rmSync(dir,{recursive:true,force:true});});return{store,state,options,repository,service,capabilities};
+ t.after(async()=>{await snapshots.stop();capabilities.close();store.close();rmSync(dir,{recursive:true,force:true});});return{store,state,options,repository,service,capabilities,snapshots,sync};
 }
-async function ready(f,provider='feishu',entity='e',appId='app'){const c=await f.service.save('w',entity,provider,'u',{appId,appSecret:'test-only-secret',expectedRevision:0});if(provider==='dingtalk')f.service.observeFirstInbound(c.id,{appId,botId:appId,tenantId:'tenant',tenantNamespace:'corp_id',robotCode:appId});return c;}
+async function ready(f,provider='feishu',entity='e',appId='app'){const c=await f.service.save('w',entity,provider,'u',{appId,appSecret:'test-only-secret',expectedRevision:0});if(provider==='dingtalk')f.service.observeFirstInbound(c.id,{appId,botId:appId,tenantId:'tenant',tenantNamespace:'corp_id',robotCode:appId});await f.sync();return c;}
 function rule(c,kind='department',subject='root',includeDescendants=true){return{sourceId:c.sourceId,kind,subjectId:channelSubject(kind,subject,kind==='department'?(c.provider==='feishu'?'open_department_id':'department_id'):(c.provider==='feishu'?'open_id':'user_id'),c.appId),...(kind==='department'?{includeDescendants}:{}),conversationKinds:['private','group']};}
 function scope(c,user='person'){return{workspaceId:'w',entityId:'e',requesterId:user,requesterKind:'channel_user',requesterIdentity:{idNamespace:c.provider==='feishu'?'open_id':'user_id',applicationId:c.appId},conversationKind:'group'};}
 function connection(c){return{workspaceId:'w',connectionId:c.id,provider:c.provider,tenantId:'tenant',identity:{kind:'bot',externalId:c.botId},credentialRef:'server-only'};}
@@ -35,12 +39,14 @@ function connection(c){return{workspaceId:'w',connectionId:c.id,provider:c.provi
 import {ChannelTaskAuthorization} from '../dist/channel-loop/authorization.js';
 function actor(c,id='outsider'){return{externalId:id,idNamespace:c.provider==='feishu'?'open_id':'user_id',applicationId:c.appId,kind:'human',identityEvidence:'channel_verified'};}
 function taskScope(f,b,chat='group-a',id='outsider',kind='group'){return channelInvocationScope(b,{schemaVersion:1,origin:'live',connectionId:b.connectionId,tenantId:b.connection.tenantId,eventId:'event-'+chat,receivedAt:f.state.clock,message:{id:'message-'+chat,conversationKind:kind,conversation:{provider:b.provider,connectionId:b.connectionId,tenantId:b.connection.tenantId,kind:'conversation',externalId:chat,conversationKind:kind,...(kind==='private'?{privateRecipientId:id}:{})},author:{externalId:id,idNamespace:b.provider==='feishu'?'open_id':'user_id',applicationId:b.appId,kind:'human',identityEvidence:'channel_verified'},occurredAt:f.state.clock,text:'Synthetic group permission input',mentions:[]}});}
-function open(f,extra={}){return f.capabilities.saveDirectoryAccess('w','e',{allow:[],deny:[],allowGroupMembers:true,...extra});}
+// These cases exercise the explicit allowlist + trusted-group alternative, not first-bind defaults.
+function open(f,extra={}){return f.capabilities.saveDirectoryAccess('w','e',{allow:[],deny:[],allowGroupMembers:true,...extra,channelPolicies:f.capabilities.getDirectoryAccess('w','e').channelPolicies.map(p=>({sourceId:p.sourceId,mode:'allowlist',allow:(extra.allow??[]).filter(r=>r.sourceId===p.sourceId),deny:(extra.deny??[]).filter(r=>r.sourceId===p.sourceId),allowGroupMembers:extra.allowGroupMembers??true}))});}
 
-test('new source defaults trusted group open; grants neither private/Web nor unproven group; disable invalidates immediately',async t=>{
+test('new source defaults all; explicit allowlist grants trusted groups but neither private/Web nor unproven groups',async t=>{
  const f=setup(t),c=await ready(f),b=await f.service.resolveBinding(c.id),a=actor(c),s=taskScope(f,b);
  assert.equal(f.capabilities.getDirectoryAccess('w','e').channelPolicies.find(p=>p.sourceId===c.sourceId).allowGroupMembers,true);
- assert.equal(f.capabilities.getDirectoryAccess('w','e').channelPolicies.find(p=>p.sourceId===c.sourceId).mode,'allowlist');
+ assert.equal(f.capabilities.getDirectoryAccess('w','e').channelPolicies.find(p=>p.sourceId===c.sourceId).mode,'denylist');
+ await f.service.authorizeInvocation(b,a,'private',{...s.source,conversationKind:'private'});
  await f.service.authorizeInvocation(b,a,'group',s.source);
  open(f);await f.service.authorizeInvocation(b,a,'group',s.source);
  await assert.rejects(f.service.authorizeInvocation(b,a,'group'),code('channel_use_forbidden'));
@@ -60,7 +66,7 @@ test('old client preserves setting; boolean validation, revision/CAS and transac
 test('original personal/department grants still work in private/group; group opening skips positive-list lookup for outsiders',async t=>{
  const f=setup(t),c=await ready(f),b=await f.service.resolveBinding(c.id),s=taskScope(f,b),a=actor(c);
  open(f,{allow:[rule(c)]});await f.service.authorizeInvocation(b,a,'private',{...s.source,conversationKind:'private'});
- f.state.dept='elsewhere';open(f,{allow:[rule(c)]});const before=f.state.calls;
+ f.state.dept='elsewhere';await f.sync();open(f,{allow:[rule(c)]});const before=f.state.calls;
  await f.service.authorizeInvocation(b,a,'group',s.source);assert.equal(f.state.calls,before);
  await assert.rejects(f.service.authorizeInvocation(b,a,'private',{...s.source,conversationKind:'private'}),code('channel_use_forbidden'));
 });
@@ -68,8 +74,8 @@ test('existing scene-specific deny wins; unknown deny fails closed and never bec
  const f=setup(t),c=await ready(f),b=await f.service.resolveBinding(c.id),s=taskScope(f,b),a=actor(c);
  open(f,{deny:[rule(c)]});await assert.rejects(f.service.authorizeInvocation(b,a,'group',s.source),code('channel_use_forbidden'));
  open(f,{deny:[{...rule(c),conversationKinds:['private']}]});await f.service.authorizeInvocation(b,a,'group',s.source);
- f.state.unknown=true;open(f,{deny:[rule(c)]});await assert.rejects(f.service.authorizeInvocation(b,a,'group',s.source),code('channel_use_forbidden'));
- f.state.unknown=false;await assert.rejects(f.service.authorizeInvocation(b,a,'group',s.source),code('channel_use_forbidden'));
+ f.state.unknown=true;await f.sync();open(f,{deny:[rule(c)]});await assert.rejects(f.service.authorizeInvocation(b,a,'group',s.source),code('channel_use_forbidden'));
+ f.state.unknown=false;await f.sync();await assert.rejects(f.service.authorizeInvocation(b,a,'group',s.source),code('channel_use_forbidden'));
 });
 test('formal TaskAuthorization carries trusted group and narrows inherited/restrict packages without global grants',async t=>{
  const f=setup(t),c=await ready(f),b=await f.service.resolveBinding(c.id),s=taskScope(f,b);open(f);
@@ -140,7 +146,7 @@ const employeeMatrix=[
  ['named grant private independent of group switch',false,'private',[['channel_user','person']],[],{},true],
 ];
 for(const [name,enabled,kind,allow,deny,state,expected]of employeeMatrix)test('employee permission matrix: '+name,async t=>{
- const f=setup(t),c=await ready(f),b=await f.service.resolveBinding(c.id),s=taskScope(f,b,'matrix','person',kind);Object.assign(f.state,state);
+ const f=setup(t),c=await ready(f),b=await f.service.resolveBinding(c.id),s=taskScope(f,b,'matrix','person',kind);Object.assign(f.state,state);await f.sync();
  const rules=items=>items.map(([type,id,desc=true,kinds=['private','group']])=>({...rule(c,type,id,desc),conversationKinds:kinds}));
  open(f,{allowGroupMembers:enabled,allow:rules(allow),deny:rules(deny)});
  const auth=new ChannelTaskAuthorization(f.store,f.capabilities,f.service,()=>f.state.clock);
@@ -159,7 +165,7 @@ const packageMatrix=[
  ['unknown restricted allow',{mode:'restrict',allow:[['department','root',true]],unknown:true},false],
 ];
 for(const [name,options,expected]of packageMatrix)test('package permission matrix after group admission: '+name,async t=>{
- const f=setup(t),c=await ready(f),b=await f.service.resolveBinding(c.id),s=taskScope(f,b,'matrix','person');open(f);f.state.unknown=options.unknown??false;
+ const f=setup(t),c=await ready(f),b=await f.service.resolveBinding(c.id),s=taskScope(f,b,'matrix','person');open(f);f.state.unknown=options.unknown??false;await f.sync();
  const rules=items=>(items??[]).map(([type,id,desc=true,kinds=['private','group']])=>({...rule(c,type,id,desc),conversationKinds:kinds}));
  const p=f.capabilities.save('w','e',{name,enabled:options.enabled??true,mode:options.mode??'inherit',allowMemberIds:[],denyMemberIds:[],resourceIds:[],conversationKinds:options.conversationKinds??['group'],directoryAccess:{allow:rules(options.allow),deny:rules(options.deny)}});
  const auth=new ChannelTaskAuthorization(f.store,f.capabilities,f.service,()=>f.state.clock);await auth.refreshAuthorization(s);const result=await auth.resolveForTask(s);assert.equal(result.packages.some(x=>x.id===p.id),expected);
@@ -189,15 +195,20 @@ test('warm decisions isolate same external ID by namespace, tenant, application 
  await f.service.authorizeInvocation(b,actor(c),'group',s.source);await f.service.authorizeInvocation(b,{...actor(c),idNamespace:'user_id'},'group',s.source);assert.equal(new Set(seen).size,2);
  const original=f.options.verifyApplication;f.options.verifyApplication=async(...args)=>({...await original(...args),identity:{appId:'app2',tenantId:'tenant2',tenantIdNamespace:'tenant_key'},eventTenantId:'tenant2'});
  const c2=await ready(f,'feishu','e2','app2'),b2=await f.service.resolveBinding(c2.id),scope2=taskScope(f,b2);scope2.entityId='e2';
- f.capabilities.saveDirectoryAccess('w','e2',{allow:[],deny:[],allowGroupMembers:false});
+ f.capabilities.saveDirectoryAccess('w','e2',{allow:[],deny:[],allowGroupMembers:false,channelPolicies:[{sourceId:c2.sourceId,mode:'allowlist',allow:[],deny:[],allowGroupMembers:false}]});
  await assert.rejects(f.service.authorizeInvocation(b2,actor(c2),'group',scope2.source),code('channel_use_forbidden'));
  f.capabilities.saveDirectoryAccess('w','e2',{allow:[],deny:[],allowGroupMembers:true});await f.service.authorizeInvocation(b2,actor(c2),'group',scope2.source);
  open(f,{allowGroupMembers:false});await assert.rejects(f.service.authorizeInvocation(b,actor(c),'group',s.source),code('channel_use_forbidden'));
 });
-test('group decision retains fixed one-hour membership TTL, hit never renews it; employee policy edits invalidate immediately',async t=>{
- const f=setup(t),c=await ready(f),b=await f.service.resolveBinding(c.id),s=taskScope(f,b),a=actor(c);f.state.dept='elsewhere';open(f,{deny:[rule(c)]});
- await f.service.authorizeInvocation(b,a,'group',s.source);f.state.dept='child';f.state.clock+=1800000;await f.service.authorizeInvocation(b,a,'group',s.source);
- f.state.clock+=1800000;await assert.rejects(f.service.authorizeInvocation(b,a,'group',s.source),code('channel_use_forbidden'));
+test('group decision retains fixed one-hour membership TTL without remote reads; snapshot publication and policy edits invalidate immediately',async t=>{
+ const f=setup(t),c=await ready(f),b=await f.service.resolveBinding(c.id),s=taskScope(f,b),a=actor(c);f.state.dept='elsewhere';await f.sync();open(f,{deny:[rule(c)]});
+ const matches=f.service.matches.bind(f.service);let evaluations=0;f.service.matches=(...args)=>{evaluations++;return matches(...args);};
+ const remoteReads=f.state.calls;
+ await f.service.authorizeInvocation(b,a,'group',s.source);const first=evaluations;assert.ok(first>0);
+ // Remote membership changes do not change the last complete local snapshot.
+ f.state.dept='child';f.state.clock+=1800000;await f.service.authorizeInvocation(b,a,'group',s.source);assert.equal(evaluations,first);
+ f.state.clock+=1800000;await f.service.authorizeInvocation(b,a,'group',s.source);assert.ok(evaluations>first,'cache hit did not renew the original one-hour deadline');assert.equal(f.state.calls,remoteReads,'expiry rechecks local evidence, not the vendor');
+ await f.sync();await assert.rejects(f.service.authorizeInvocation(b,a,'group',s.source),code('channel_use_forbidden'),'new snapshot must fence even a warm allow');
  open(f);await f.service.authorizeInvocation(b,a,'group',s.source);open(f,{deny:[rule(c)]});await assert.rejects(f.service.authorizeInvocation(b,a,'group',s.source),code('channel_use_forbidden'));
 });
 
@@ -225,7 +236,7 @@ test('combined keyword ingress → real employee group admission → builtin tas
  assert.equal(f.store.one('SELECT count(*) n FROM runs').n,1);assert.ok(models[1].messages.filter(m=>m.role==='tool').every(m=>!m.content.includes('channel_use_forbidden')));assert.ok(requests.every(url=>!url.includes('model')));
 });
 
-test('DingTalk trusted group opening, deny priority and inherited execution scope use real user_id without opening private/Web',async t=>{const f=setup(t),c=await ready(f,'dingtalk'),b=await f.service.resolveBinding(c.id),s=taskScope(f,b),a=actor(c);f.capabilities.patchDirectoryAccess('w','e',{sourceId:c.sourceId,allow:[],allowGroupMembers:true,expectedRevision:f.capabilities.getDirectoryAccess('w','e').channelPolicies.find(p=>p.sourceId===c.sourceId).revision});await f.service.authorizeInvocation(b,a,'group',s.source);await assert.rejects(f.service.authorizeInvocation(b,a,'private',{...s.source,conversationKind:'private'}),code('channel_use_forbidden'));await assert.rejects(f.service.authorizeInvocation(b,a,'group',{...s.source,bindingVersion:'old'}),code('channel_use_forbidden'));const inherited=f.capabilities.save('w','e',{name:'Ding group',enabled:true,mode:'inherit',allowMemberIds:[],denyMemberIds:[],resourceIds:[],conversationKinds:['group']});const auth=new ChannelTaskAuthorization(f.store,f.capabilities,f.service,()=>f.state.clock);await auth.refreshAuthorization(s);assert.deepEqual((await auth.resolveForTask(s)).packages.map(p=>p.id),[inherited.id]);open(f,{deny:[rule(c)]});await assert.rejects(f.service.authorizeInvocation(b,a,'group',s.source),code('channel_use_forbidden'));});
+test('DingTalk trusted group opening, deny priority and inherited execution scope use real user_id without opening private/Web',async t=>{const f=setup(t),c=await ready(f,'dingtalk'),b=await f.service.resolveBinding(c.id),s=taskScope(f,b),a=actor(c);f.capabilities.patchDirectoryAccess('w','e',{sourceId:c.sourceId,mode:'allowlist',allow:[],allowGroupMembers:true,expectedRevision:f.capabilities.getDirectoryAccess('w','e').channelPolicies.find(p=>p.sourceId===c.sourceId).revision});await f.service.authorizeInvocation(b,a,'group',s.source);await assert.rejects(f.service.authorizeInvocation(b,a,'private',{...s.source,conversationKind:'private'}),code('channel_use_forbidden'));await assert.rejects(f.service.authorizeInvocation(b,a,'group',{...s.source,bindingVersion:'old'}),code('channel_use_forbidden'));const inherited=f.capabilities.save('w','e',{name:'Ding group',enabled:true,mode:'inherit',allowMemberIds:[],denyMemberIds:[],resourceIds:[],conversationKinds:['group']});const auth=new ChannelTaskAuthorization(f.store,f.capabilities,f.service,()=>f.state.clock);await auth.refreshAuthorization(s);assert.deepEqual((await auth.resolveForTask(s)).packages.map(p=>p.id),[inherited.id]);open(f,{deny:[rule(c)]});await assert.rejects(f.service.authorizeInvocation(b,a,'group',s.source),code('channel_use_forbidden'));});
 
 for(const legacyMode of ['restrict','inherit'])test('legacy '+legacyMode+' package toggle → edit → save preserves projected source restrictions',async t=>{
  const f=setup(t),c=await ready(f),b=await f.service.resolveBinding(c.id);open(f);
@@ -304,15 +315,15 @@ test('legacy inherited allow-list uncertainty stays fail-closed across DTO reads
  const f=setup(t),c=await ready(f),b=await f.service.resolveBinding(c.id),s={...scope(c,'outsider'),groupContext:{conversationId:'legacy-unknown',bindingVersion:b.bindingVersion}};open(f);
  const allow=[rule(c)],deny=[rule(c,'channel_user','blocked')];let dto=f.capabilities.save('w','e',{name:'Legacy inherited membership check',enabled:true,mode:'inherit',allowMemberIds:[],denyMemberIds:[],resourceIds:[],directoryAccess:{allow,deny}});
  assert.equal(dto.directoryAccess.channelPolicies[0].legacyAllowCheck,true);
- assert.deepEqual((await f.capabilities.usableChannel(s,b.connection,'group')).map(p=>p.id),[dto.id],'a known matching allow fact inherits');f.state.unknown=true;
+ assert.deepEqual((await f.capabilities.usableChannel(s,b.connection,'group')).map(p=>p.id),[dto.id],'a known matching allow fact inherits');f.state.unknown=true;await f.sync();
  assert.deepEqual(await f.capabilities.usableChannel(s,b.connection,'group'),[],'unknown legacy allow fact must not become inherit');
  for(const enabled of [false,true])dto=f.capabilities.setEnabled({workspaceId:'w',entityId:'e',userId:'u'},dto.id,{enabled,expectedVersion:dto.version});
  assert.equal(dto.directoryAccess.channelPolicies[0].legacyAllowCheck,true);
  const {id,workspaceId,entityId,version,...edit}=dto;dto=f.capabilities.save(workspaceId,entityId,{...edit,name:'Only name changed',expectedVersion:version},id);
  assert.deepEqual(await f.capabilities.usableChannel(s,b.connection,'group'),[]);
- f.state.unknown=false;f.state.dept='outside';
+ f.state.unknown=false;f.state.dept='outside';await f.sync();
  assert.deepEqual((await f.capabilities.usableChannel(s,b.connection,'group')).map(p=>p.id),[id],'a known nonmatch still inherits: compatibility is not an allowlist');
- f.state.unknown=true;
+ f.state.unknown=true;await f.sync();
  const explicit=dto.directoryAccess.channelPolicies.map(({legacyAllowCheck,...policy})=>({...policy,mode:'inherit'}));
  f.capabilities.save('w','e',{...edit,directoryAccess:{allow,deny,channelPolicies:explicit},expectedVersion:dto.version},id);
  assert.deepEqual((await f.capabilities.usableChannel(s,b.connection,'group')).map(p=>p.id),[id],'explicit modern inherit has no legacy positive-list dependency');

@@ -53,9 +53,15 @@ const connections = ref<DirectoryConnection[]>([]), provider = ref<DirectoryProv
 const runtimeStatus = useChannelRuntimeStatus({ base: () => props.base, active: () => props.active !== false, connections: () => connections.value, onSessionExpired: () => emit('sessionExpired') });
 const { snapshot: runtimeSnapshot } = runtimeStatus;
 const displayConnections = computed(() => connections.value.map(item => {
-  const observed = runtimeSnapshot.value?.employee?.channels?.find(channel => connectionObservationKey(channel) === connectionObservationKey(item));
-  return { ...item, runtimeTransport: observed?.transport ?? null, observedAt: observed?.transport ? runtimeSnapshot.value?.observedAt : null };
+  const metadata = runtimeStatus.identity.value.find(channel => channel.id === item.id && channel.sourceId === item.sourceId && channel.provider === item.provider && channel.appId === item.appId && (channel.revision ?? -1) >= item.revision && (channel.authRevision ?? -1) >= item.authRevision);
+  const display = { ...item, ...metadata };
+  const missing = runtimeStatus.identityLoaded.value && !metadata;
+  const observed = missing ? undefined : runtimeSnapshot.value?.employee?.channels?.find(channel => connectionObservationKey(channel) === connectionObservationKey(display));
+  return { ...display, identityMissing: missing, identityCurrent: !runtimeStatus.identityUnavailable.value && (!runtimeStatus.identityLoaded.value || !!metadata), runtimeTransport: observed?.transport ?? null, observedAt: observed?.transport ? runtimeSnapshot.value?.observedAt : null };
 }));
+const displayedConnection = computed(() => displayConnections.value.find(item => item.provider === provider.value));
+const observationChanged = computed(() => !!displayedConnection.value && !!connection.value && connectionObservationKey(displayedConnection.value) !== connectionObservationKey(connection.value));
+
 const evidenceLabel = (value: DirectoryConnection['identityEvidence']) => ({ provider_api: '厂商 API 身份证据', authenticated_event_confirmed: '管理员确认的已认证事件', authenticated_first_message: '首条真实消息自动确认', app_credentials_only: '仅应用凭据', admin_asserted: '管理员同企业声明（非厂商证明）' })[value] ?? '尚无身份验证证据';
 const connection = computed(() => connections.value.find(item => item.provider === provider.value));
 const showManualSetup = computed(() => !!connection.value || (provider.value === 'feishu' ? feishuManual.value : provider.value === 'wecom' ? wecomManual.value : dingtalkManual.value));
@@ -111,7 +117,6 @@ async function read(signal: AbortSignal) {
   const result = await api<DirectoryConnection[]>(`${props.base}/channels`, signal);
   if (signal.aborted) return;
   connections.value = result; loaded.value = true;
-  void runtimeStatus.refresh();
 }
 function mergeIdentityEvidence(evidence: DirectoryIdentityEvidence) {
   const current = connections.value.find(item => item.sourceId === evidence.sourceId && item.authRevision === evidence.authRevision && item.provider === 'wecom');
@@ -164,7 +169,7 @@ onUnmounted(() => { controller.abort(); pendingWecomCredentials.value = null; cl
     <NAlert v-if="confirmPolicySwitch" type="warning">当前渠道有未保存的修改，是否放弃并切换？<NSpace><NButton :disabled="channelLocked" @click="confirmPolicySwitch=false;pendingPolicySwitch=undefined">继续编辑当前渠道</NButton><NButton :disabled="channelLocked" @click="discardPolicySwitch">放弃策略修改并切换</NButton></NSpace></NAlert>
     <section v-if="!selectedConnection" class="connection-list">
       <header class="connection-list-heading"><div><h3>渠道连接</h3><p class="field-note">为员工接入飞书、钉钉或企业微信独立机器人，分别管理连接与使用范围。</p></div><NButton v-if="canManage" type="primary" @click="requestPolicySwitch(()=>selectedConnection=true)">添加渠道连接</NButton></header>
-      <NCard v-for="item in displayConnections" :key="item.id" size="small"><div class="connection-summary"><ChannelBrand :provider="item.provider"/><NTag size="small">{{directoryStatusLabel(item)}}</NTag><span class="field-note">{{item.enabled?'已启用':'已停用'}} · {{item.runtimeTransport?transportLabel(item.runtimeTransport.state):'运行状态未知'}} · {{item.directoryMode==='member_search'?'成员搜索':item.directoryStatus==='available'?'通讯录可查询':'通讯录不可用'}}</span><NButton size="small" secondary @click="requestPolicySwitch(()=>{provider=item.provider;selectedConnection=true})">查看此连接</NButton></div></NCard>
+      <NCard v-for="item in displayConnections" :key="item.id" size="small"><div class="connection-summary"><ChannelBrand :provider="item.provider"/><NTag size="small">{{item.identityCurrent?directoryStatusLabel(item):'身份状态待刷新'}}</NTag><span class="field-note">{{item.enabled?'已启用':'已停用'}} · {{item.runtimeTransport?transportLabel(item.runtimeTransport.state):'运行状态未知'}} · {{item.directoryMode==='member_search'?'成员搜索':item.directoryStatus==='available'?'通讯录可查询':'通讯录不可用'}}</span><NButton size="small" secondary @click="requestPolicySwitch(()=>{provider=item.provider;selectedConnection=true})">查看此连接</NButton></div></NCard>
       <div v-if="loaded&&!connections.length" class="connection-empty-state"><p class="field-note">尚未连接渠道，可按需添加。</p></div>
       <NAlert v-if="error" type="error" role="alert">{{error}}</NAlert>
     </section>
@@ -172,8 +177,10 @@ onUnmounted(() => { controller.abort(); pendingWecomCredentials.value = null; cl
       <div class="channel-detail-toolbar"><NButton size="small" aria-label="返回连接列表" :disabled="channelLocked" @click="requestPolicySwitch(()=>selectedConnection=false)">返回连接列表</NButton><NButton size="small" @click="runtimeStatus.refresh()">刷新渠道状态</NButton></div>
       <ChannelProviderTabs :before-change="guardProvider" :model-value="provider" @update:model-value="selectProvider" :disabled="disabled || channelLocked" :hide-navigation="!canManage">
         <template v-if="canManage && $slots.automation" #automation><slot name="automation" /></template>
+        <p v-if="runtimeStatus.identityUnavailable.value" role="status">身份状态暂时无法刷新，显示上次读取结果。</p>
+        <p v-if="observationChanged || displayedConnection?.identityMissing" role="status">{{displayedConnection?.identityMissing?'连接已变更或解除，请重新载入配置。':'连接状态已更新，未保存的输入保持不变；配置保存时仍会校验版本。'}}<NButton size="small" :disabled="channelLocked" @click="requestPolicySwitch(()=>{void load()})">重新载入配置</NButton></p>
         <section v-for="item in displayConnections.filter(c=>c.provider===provider)" :key="item.id" class="connection-status form-section" aria-label="当前连接状态">
-          <div class="form-section-heading"><h3>当前连接</h3><NSpace><NTag size="small">{{directoryStatusLabel(item)}}</NTag><NTag size="small">{{item.directoryMode==='member_search'?'成员搜索':item.directoryStatus==='available'?'通讯录可查询':'通讯录不可用'}}</NTag></NSpace></div>
+          <div class="form-section-heading"><h3>当前连接</h3><NSpace><NTag size="small">{{item.identityCurrent?directoryStatusLabel(item):'身份状态待刷新'}}</NTag><NTag size="small">{{item.directoryMode==='member_search'?'成员搜索':item.directoryStatus==='available'?'通讯录可查询':'通讯录不可用'}}</NTag></NSpace></div>
           <p data-testid="transport-status">长连接：{{item.runtimeTransport?.error==='channel_ingress_standby'?'由另一平台进程维护连接':item.runtimeTransport?transportLabel(item.runtimeTransport.state):'状态未知'}}<InfoHint label="连接状态说明">连接状态与身份、目录和使用权限分别核验。无法获取状态时不能判断为离线。</InfoHint></p>
           <p v-if="item.provider==='wecom'" data-testid="wecom-credential-status">机器人凭据：{{item.runtimeTransport?.state==='connected'?'当前长连接已认证':item.runtimeTransport?.state==='failed'?'连接未通过，请查看连接错误':'等待当前长连接认证结果'}}</p>
           <p v-if="!item.runtimeTransport" role="status">{{runtimeStatus.unavailable.value?'暂时无法获取运行状态，将自动重试；不代表机器人已离线。':'暂时无法确认此连接的运行状态，正在自动刷新。'}}</p>
@@ -243,12 +250,12 @@ onUnmounted(() => { controller.abort(); pendingWecomCredentials.value = null; cl
             <ChannelValidationReport v-if="report && (provider!=='wecom'||!report.canContinue)" :report="report"/>
         <div class="channel-actions" ><NButton key="connect" @click="mutate('connect')" type="primary" :disabled="channelLocked || policyDirty || sharingDirty || contextDirty || !loaded || !credentialsComplete || (replacing&&!replaceSource)" :loading="busy">{{replacing?'保存换绑':provider==='wecom'?'保存机器人配置':'验证并保存渠道连接'}}</NButton><NButton key="revalidate" v-if="connection" :disabled="channelLocked||policyDirty||sharingDirty||contextDirty" @click="mutate('revalidate')">{{provider==='wecom'?'重新连接并检查':'重新验证已存凭据'}}</NButton><NButton key="settings" v-if="connection" :disabled="channelLocked||policyDirty||sharingDirty||contextDirty" @click="mutate('settings')">{{ connection.enabled ? '停用此渠道' : '启用此渠道' }}</NButton><NPopconfirm v-if="connection" :disabled="channelLocked||policyDirty||sharingDirty||contextDirty" positive-text="确认解除绑定" negative-text="保留绑定" @positive-click="unbindChannel"><template #trigger><NButton :disabled="channelLocked||policyDirty||sharingDirty||contextDirty">解除渠道绑定</NButton></template>解除本员工的当前渠道绑定并停止连接，释放全平台机器人身份；历史业务记录保留，旧授权不会转给新的绑定。</NPopconfirm></div>
           </section>
-      <NAlert v-if="provider === 'feishu' && connection?.status === 'verified'" type="success">机器人与租户身份已验证，可按使用范围使用；实际收发、长连接与模型状态仍需分别核对。</NAlert>
-      <NAlert v-if="provider === 'feishu' && connection?.status === 'pending_verification'" :type="connection.botId ? 'info' : 'warning'" aria-label="飞书身份确认状态">
-        <template v-if="connection.botId">已通过官方 API 取得机器人 open_id，仅待确认租户 tenant_key。长连接在线后，从飞书客户端给此机器人发普通真人私聊，或在群里真正 @ 此机器人；系统会自动确认租户，并按现有使用范围处理同一条消息。首发者不会自动获得使用权，无需验证口令或人工确认。发送后可刷新渠道状态。</template>
+      <NAlert v-if="provider === 'feishu' && displayedConnection?.identityCurrent && displayedConnection.status === 'verified'" type="success">机器人与租户身份已验证，可按使用范围使用；实际收发、长连接与模型状态仍需分别核对。</NAlert>
+      <NAlert v-if="provider === 'feishu' && displayedConnection?.identityCurrent && displayedConnection.status === 'pending_verification'" :type="displayedConnection.botId ? 'info' : 'warning'" aria-label="飞书身份确认状态">
+        <template v-if="displayedConnection.botId">已通过官方 API 取得机器人 open_id，仅待确认租户 tenant_key。长连接在线后，从飞书客户端给此机器人发普通真人私聊，或在群里真正 @ 此机器人；系统会自动确认租户，并按现有使用范围处理同一条消息。首发者不会自动获得使用权，无需验证口令或人工确认。发送后可刷新渠道状态。</template>
         <template v-else>尚未取得可信的机器人 open_id，不能自动确认身份。请先在飞书应用中启用机器人能力，再重新验证已存凭据；应用 App ID 或消息中的 @ 不能替代机器人身份。</template>
       </NAlert>
-      <NAlert v-if="provider !== 'feishu' && connection?.status === 'pending_verification'" type="info">凭据已保存。长连接在线后，给机器人发一条普通私聊或群定向消息，系统会自动确认身份；同一条消息仍按现有使用范围鉴权，首发者不会自动获得使用权。</NAlert>
+      <NAlert v-if="provider !== 'feishu' && displayedConnection?.identityCurrent && displayedConnection.status === 'pending_verification'" type="info">凭据已保存。长连接在线后，给机器人发一条普通私聊或群定向消息，系统会自动确认身份；同一条消息仍按现有使用范围鉴权，首发者不会自动获得使用权。</NAlert>
     <ChannelAccessSettings v-if="canManage && selectedConnection && connection" ref="policyEditor" :base="base" :connection="connection" :can-manage="canManage" :disabled="!!disabled||busy||directoryBusy||sharingBusy" @busy-changed="v=>policyBusy=v" @dirty-changed="v=>policyDirty=v" @identity-verified="mergeIdentityEvidence" @changed="emit('changed')" @session-expired="emit('sessionExpired')" />
       <NCard v-if="connection && provider!=='wecom' && (connection.capabilities?.recentGroupContext.supported || connection.capabilities?.keywordTriggers.supported)" title="群聊触发与上下文" size="small">
         <p class="field-note">普通群消息：{{ connection.groupListeningStatus?.permission === 'granted' ? '已授权' : connection.groupListeningStatus?.permission === 'denied' ? '未授权' : '未核验' }}<InfoHint label="关于群消息接收">上下文开关只控制近期群消息保留，不控制 SDK 接收或关键词触发。群消息接收权限与连接状态分别核验。最近窗口缓存 {{ connection.groupListeningStatus?.cachedMessages ?? 0 }} 条；没有缓存不表示已获权限。</InfoHint></p>

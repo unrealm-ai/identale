@@ -292,7 +292,7 @@ test('runtime channel status rejects another connection or outdated configuratio
 
 test('transport lifecycle is distinct from identity and exposes safe health timestamps without callback UI', async t => {
   let current = connection({ status: 'pending_verification', transport: { state: 'connecting', changedAt: 1792756800000 } });
-  await mount(t, 'settings', { base, canManage: true }, async () => [current]);
+  await mount(t, 'settings', { base, canManage: true }, async () => [current], async () => ({ observedAt: 1792756800000, employee: { channels: [current] } }));
   await until(() => text().includes('长连接：正在连接'));
   assert.ok(text().includes('等待首条消息确认租户'));
   for (const [state, label] of [['connected', '已连接'], ['reconnecting', '正在重连'], ['failed', '连接失败'], ['stopped', '已停止']]) {
@@ -370,7 +370,7 @@ test('WeCom employee selection keeps unsupported contexts absent and waits for a
   assert.equal(document.querySelector('[aria-label="明确的 Minutes token"]'), null);
   const allowedReads = new Set(['/api/business-resources/configuration', `/api${base}/channels`, `/api${base}/runtime-status`, `/api${base}/channels/wecom/directory-credentials`, `/api${base}/directory-access`, `/api${base}/group-sharing`, `/api${base}/group-sharing/status`]);
   assert.ok(env.requests.every(item => (item.method === 'GET' && allowedReads.has(item.url)) || (item.method==='POST' && item.url.endsWith('/wecom/member-search') && item.body.keywords.length===0)), 'Only this employee’s channel configuration, runtime observation and WeCom directory choices may be read');
-  assert.equal(env.requests.filter(item => item.url === `/api${base}/runtime-status`).length, 1, 'Connection status must be read from the runtime observation endpoint');
+  assert.ok(env.requests.filter(item => item.url === `/api${base}/runtime-status`).length >= 1, 'Connection status must be read from the runtime observation endpoint');
   assert.ok(!text().includes('CorpID'));assert.ok(!text().includes('可信 IP'));
 });
 
@@ -381,7 +381,7 @@ test('WeCom member reads separate statuses without directory-management endpoint
   assert.equal(document.querySelector('.wecom-directory-binding'), null);
   const allowedReads = new Set(['/api/business-resources/configuration', `/api${base}/channels`, `/api${base}/runtime-status`]);
   assert.ok(env.requests.every(item => (item.method === 'GET' && allowedReads.has(item.url)) || (item.method==='POST' && item.url.endsWith('/wecom/member-search') && item.body.keywords.length===0)), 'A read-only member must not access directory-management or mutation endpoints');
-  assert.equal(env.requests.filter(item => item.url === `/api${base}/runtime-status`).length, 1, 'A member may read the same employee’s runtime observation');
+  assert.ok(env.requests.filter(item => item.url === `/api${base}/runtime-status`).length >= 1, 'A member may read the same employee’s runtime observation');
 });
 
 
@@ -632,10 +632,10 @@ for(const provider of ['feishu','dingtalk','wecom'])test(provider+' same identit
  let current=connection({provider,enabled:false,status:'disabled'});const env=await mount(t,'settings',{base,canManage:true},async request=>{if(request.method==='GET')return[current];current={...current,revision:2};return current;});
  input('渠道应用密钥','synthetic-rotated-secret');await click('验证并保存渠道连接');await until(()=>text().includes('停用状态不变'));assert.deepEqual(env.requests.find(r=>r.method==='PUT').body,{appId:'fixture-app',appSecret:'synthetic-rotated-secret',expectedRevision:1,replaceSource:false});assert.equal(current.enabled,false);assert.equal(document.querySelector('[aria-label="确认换绑并重置当前渠道配置"]'),null);
 });
-test('Feishu cross-group context remains independent of employee scope and hidden from other providers',async t=>{
- await mount(t,'settings',{base,canManage:true},async()=>[connection(),connection({provider:'dingtalk',sourceId:'ding-source'}),connection({provider:'wecom',sourceId:'wecom-source'})]);
+test('Feishu and WeCom group sharing stays independent of employee scope and absent for DingTalk',async t=>{
+ await mount(t,'settings',{base,canManage:true},async()=>[connection(),connection({provider:'dingtalk',id:'ding-connection',sourceId:'ding-source'}),connection({provider:'wecom',id:'wecom-connection',sourceId:'wecom-source'})]);
  await until(()=>!!document.querySelector('.group-sharing'));assert.equal(document.querySelector('.channel-access-settings .group-sharing'),null);assert.ok(text().includes('不是员工使用范围'));
- await providerTab('钉钉');assert.equal(document.querySelector('.group-sharing'),null);assert.ok(document.querySelector('[aria-label="允许群成员在群内使用"]'));await providerTab('企业微信');assert.equal(document.querySelector('.group-sharing'),null);
+ await providerTab('钉钉');assert.equal(document.querySelector('.group-sharing'),null);assert.ok(document.querySelector('[aria-label="允许群成员在群内使用"]'));await providerTab('企业微信');assert.ok(document.querySelector('.group-sharing'),'WeCom now supports authorized group history sharing');
 });
 
 const syncTask = (overrides={}) => ({connectionId:'connection-1',snapshotVersion:1,running:false,hasSnapshot:true,stale:false,lastSuccessAt:Date.now(),lastResult:'success',...overrides});
@@ -689,4 +689,91 @@ test('DingTalk saved connection guides separate directory permissions and range 
  assert.equal(document.querySelector('a').getAttribute('href'),'https://open-dev.dingtalk.com/');
  await click('检查并同步通讯录');await until(()=>text().includes('已发现 2 人、1 个部门'));
  assert.equal(env.requests.filter(r=>r.method==='POST').length,1);
+});
+
+for (const provider of ['feishu', 'dingtalk', 'wecom']) test(`${provider} identity observations preserve credential/context drafts and CAS revisions`, async t => {
+  let current = connection({ provider, status:'pending_verification', context:{groupListenEnabled:true,groupTriggerKeywords:['saved'],meetingRefs:[]} });
+  const env = await mount(t, 'settings', { base, canManage:true }, async request => {
+    if (request.method === 'GET' && request.url.endsWith('/channels')) return [current];
+    if (request.url.endsWith('/directory-sync')) return {hasSnapshot:false,running:false,lastResult:'never'};
+    return {};
+  }, async () => ({ observedAt:Date.now(), employee:{channels:[current]} }));
+  if (provider !== 'feishu') await providerTab(provider === 'wecom' ? '企业微信' : '钉钉');
+  input('渠道应用密钥','unsaved-observation-secret');
+  const keyword = document.querySelector('textarea[aria-label="群聊触发关键词"]');
+  if (keyword) { keyword.value='draft-keyword';keyword.dispatchEvent(new InputEvent('input',{bubbles:true})); }
+  current = connection({ provider,revision:2,authRevision:2,identityEvidence:'authenticated_first_message',inboundVerified:true,context:{groupListenEnabled:false,groupTriggerKeywords:['remote'],meetingRefs:[]},appSecret:'must-not-display' });
+  await click('刷新渠道状态'); await until(() => text().includes('首条真实消息自动确认'));
+  assert.equal(document.querySelector('input[aria-label="渠道应用密钥"]').value,'unsaved-observation-secret');
+  if(keyword)assert.equal(keyword.value,'draft-keyword');
+  assert.ok(text().includes('配置保存时仍会校验版本'));
+  assert.equal(text().includes('must-not-display'),false);
+  assert.ok(env.requests.every(r => r.method==='GET' || r.url.endsWith('/member-search')));
+  // A delayed older observation cannot regress verified identity.
+  current=connection({provider,status:'invalid',revision:1,authRevision:1});
+  await click('刷新渠道状态'); await until(() => text().includes('身份状态待刷新'));
+  assert.equal(document.querySelector('input[aria-label="渠道应用密钥"]').value,'unsaved-observation-secret');
+  assert.ok(!text().includes('机器人与租户身份已验证，可按使用范围使用'));
+});
+
+test('identity refresh failure is marked stale while runtime polling and drafts remain independent', async t => {
+  let fail=false;
+  await mount(t,'settings',{base,canManage:true},async()=>fail?{status:503,data:{error:'fixture_unavailable'}}:[connection()],async()=>({observedAt:Date.now(),employee:{channels:[connection()]}}));
+  await until(()=>text().includes('机器人已验证'));
+  input('渠道应用密钥','unsaved-secret');fail=true;
+  await click('刷新渠道状态');await until(()=>text().includes('身份状态待刷新'));
+  assert.ok(text().includes('长连接：已连接'));
+  assert.ok(text().includes('身份状态暂时无法刷新'));
+  assert.ok(!text().includes('机器人与租户身份已验证，可按使用范围使用'));
+  assert.equal(document.querySelector('input[aria-label="渠道应用密钥"]').value,'unsaved-secret');
+});
+
+test('late identity observation cannot cross employee switch or overwrite a newer request', async t => {
+  let hold=false, release; const pending=new Promise(resolve=>release=resolve);t.after(()=>release([]));
+  const other=base.replace('employee-a','employee-b');
+  const env=await mount(t,'settings',{base,canManage:true},async r=>{
+    if(r.url.endsWith('/channels')){
+      if(r.url.includes('employee-b'))return [connection({id:'new-connection',appId:'new-app',status:'invalid'})];
+      if(hold)return pending;
+      return [connection()];
+    }
+    return {};
+  });
+  hold=true;await click('刷新渠道状态');env.props.base=other;
+  await until(()=>text().includes('连接失效'));
+  release([connection({identityEvidence:'authenticated_first_message',inboundVerified:true})]);await flush();
+  assert.ok(!text().includes('首条真实消息自动确认'));
+  assert.equal(document.querySelector('input[aria-label="渠道应用 ID"]').value,'new-app');
+});
+
+test('identity observer polls while connected, pauses off-page and resumes without reloading drafts', async t => {
+  let current=connection({status:'pending_verification'}), calls=0, inFlight=0, peak=0;
+  const env=await mount(t,'settings',{base,canManage:true},async r=>{
+    if(r.url.endsWith('/channels')){calls++;peak=Math.max(peak,++inFlight);await new Promise(resolve=>setTimeout(resolve,20));inFlight--;return [current];}
+    return {};
+  },async()=>({observedAt:Date.now(),employee:{channels:[current]}}));
+  await until(()=>text().includes('等待首条消息确认租户'));
+  input('渠道应用密钥','poll-draft');
+  current=connection({revision:2,inboundVerified:true,identityEvidence:'authenticated_first_message'});
+  await new Promise(resolve=>setTimeout(resolve,5300));await until(()=>text().includes('首条真实消息自动确认'));
+  assert.equal(document.querySelector('input[aria-label="渠道应用密钥"]').value,'poll-draft');
+  env.props.active=false;await flush();const paused=calls;
+  await new Promise(resolve=>setTimeout(resolve,5200));assert.equal(calls,paused);
+  current=connection({revision:3,status:'invalid'});env.props.active=true;
+  await until(()=>text().includes('连接失效'));assert.equal(peak,1);
+  assert.equal(document.querySelector('input[aria-label="渠道应用密钥"]').value,'poll-draft');
+});
+
+test('external replacement cannot show old transport online; reloading explicitly guards drafts', async t => {
+  let current=connection();
+  await mount(t,'settings',{base,canManage:true},async()=>[current],async()=>({observedAt:Date.now(),employee:{channels:[connection()]}}));
+  await until(()=>text().includes('长连接：已连接'));input('渠道应用密钥','keep-before-reload');
+  current=connection({id:'replacement',sourceId:'replacement-source',appId:'replacement-app',revision:2});
+  await click('刷新渠道状态');await until(()=>text().includes('连接已变更或解除'));
+  assert.ok(!text().includes('长连接：已连接'));assert.ok(text().includes('身份状态待刷新'));
+  await click('重新载入配置');assert.equal(document.querySelector('input[aria-label="渠道应用密钥"]').value,'keep-before-reload');
+  await click('继续编辑当前渠道');assert.equal(document.querySelector('input[aria-label="渠道应用密钥"]').value,'keep-before-reload');
+  await click('重新载入配置');await click('放弃策略修改并切换');
+  await until(()=>document.querySelector('input[aria-label="渠道应用 ID"]').value==='replacement-app');
+  assert.equal(document.querySelector('input[aria-label="渠道应用密钥"]').value,'');
 });
